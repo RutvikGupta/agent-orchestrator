@@ -281,7 +281,7 @@ test('reply links show a short label', () => {
 function layout() {
   const context = vm.createContext({});
   vm.runInContext(snippet('function graphLayout(', '// The graph view of a section'), context);
-  return (nodes, edges = []) => JSON.parse(JSON.stringify(context.graphLayout(nodes.map((id) => (typeof id === 'string' ? { id } : id)), edges.map(([from, to]) => ({ from, to })))));
+  return (nodes, edges = [], options = {}) => JSON.parse(JSON.stringify(context.graphLayout(nodes.map((id) => (typeof id === 'string' ? { id } : id)), edges.map(([from, to]) => ({ from, to })), options)));
 }
 const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 function assertNoOverlap(nodes) {
@@ -325,13 +325,22 @@ function assertEdgesClear(g) {
 // inside its lane's band with room for its attention outline and badge, every edge stays inside the
 // band of the lane its tasks share, and only the last lane holds the tasks linked to no other.
 function assertLanes(g) {
-  let y = 0;
+  let y = 0, group = 0;
+  const alone = new Set(), names = ['independent · running', 'independent · needs attention', 'independent'];
   for (const [i, lane] of g.lanes.entries()) {
     assert.equal(lane.index, i);
     assert.equal(lane.y, y, `lane ${i} starts where lane ${i - 1} ends`);
     assert.ok(lane.h > 0);
     y = lane.y + lane.h;
-    assert.equal(lane.independent, i === g.lanes.length - 1 && lane.independent, 'only the last lane can be the independent one');
+    assert.ok(lane.group >= group, 'lanes go by group: running, then needing someone, then the rest');
+    group = lane.group;
+    if (lane.independent) {
+      assert.ok(!alone.has(lane.group), 'one independent lane per group');
+      alone.add(lane.group);
+      assert.equal(lane.label, names[lane.group]);
+      if (lane.group < 2) assert.ok(i === 0 || g.lanes[i - 1].group < lane.group, `${lane.label} leads its group`);
+      else assert.equal(i, g.lanes.length - 1, 'the independent lane of finished or planned tasks closes the drawing');
+    } else assert.equal(lane.label, null);
   }
   assert.equal(y, g.height, 'the lanes fill the drawing');
   const band = (n) => g.lanes[n.lane];
@@ -345,6 +354,15 @@ function assertLanes(g) {
     assert.equal(at[e.from].lane, at[e.to].lane, `${e.from} → ${e.to} links tasks of one lane`);
     const { y: top, h } = band(at[e.from]);
     for (const [, py] of edgePoints(e.d)) assert.ok(py > top && py < top + h, `${e.from} → ${e.to} stays inside its lane`);
+  }
+  // The reading order holds every task once: lane by lane; a chain column by column and top to bottom;
+  // a grid row by row and left to right.
+  assert.deepEqual([...g.order].sort(), g.nodes.map((n) => n.id).sort());
+  for (let i = 1; i < g.order.length; i++) {
+    const a = at[g.order[i - 1]], b = at[g.order[i]];
+    if (a.lane !== b.lane) { assert.ok(a.lane < b.lane, `${a.id} reads before ${b.id}`); continue; }
+    const [p, q] = g.lanes[a.lane].independent ? [[a.row, a.layer], [b.row, b.layer]] : [[a.layer, a.row], [b.layer, b.row]];
+    assert.ok(p[0] < q[0] || (p[0] === q[0] && p[1] < q[1]), `${a.id} reads before ${b.id}`);
   }
 }
 
@@ -366,7 +384,7 @@ test('graphLayout puts each task one column after the longest chain before it', 
   assertNoOverlap(g.nodes);
   assertEdgesClear(g);
   assertLanes(g);
-  assert.deepEqual(layout()([]), { width: 0, height: 0, nodes: [], edges: [], lanes: [] });
+  assert.deepEqual(layout()([]), { width: 0, height: 0, order: [], nodes: [], edges: [], lanes: [] });
 });
 
 test('graphLayout keeps each column in plan order whatever the states in a lane, and keeps tasks put as the plan grows', () => {
@@ -462,14 +480,16 @@ test('graphLayout gives each chain of linked tasks a lane, in plan order, and th
   assert.deepEqual(g.lanes.map((l) => [l.ids, l.independent]), [[['c', 'd', 'e'], false], [['a', 'b'], false], [['solo1', 'solo2'], true]],
     'lanes come in plan order of their first task; the tasks linked to no other share the last');
   assert.deepEqual(g.nodes.map((n) => [n.id, n.lane, n.layer, n.row]),
-    [['c', 0, 0, 0], ['a', 1, 0, 0], ['solo1', 2, 0, 0], ['b', 1, 1, 0], ['d', 0, 1, 0], ['solo2', 2, 0, 1], ['e', 0, 2, 0]]);
+    [['c', 0, 0, 0], ['a', 1, 0, 0], ['solo1', 2, 0, 0], ['b', 1, 1, 0], ['d', 0, 1, 0], ['solo2', 2, 1, 0], ['e', 0, 2, 0]]);
   assertLanes(g);
   assertNoOverlap(g.nodes);
   assertEdgesClear(g);
   const at = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
-  assert.ok(at.c.x === at.a.x && at.a.x === at.solo1.x && at.d.x === at.b.x, 'columns line up across lanes');
-  // Lanes stand clearly further apart than rows within one.
-  const rowGap = at.solo2.y - (at.solo1.y + at.solo1.h);
+  assert.ok(at.c.x === at.a.x && at.a.x === at.solo1.x && at.d.x === at.b.x && at.b.x === at.solo2.x, 'columns line up across lanes');
+  // Lanes stand clearly further apart than rows within one (measured in a grid one column wide).
+  const narrow = Object.fromEntries(run(ids, edges, { fit: 1 }).nodes.map((n) => [n.id, n]));
+  const rowGap = narrow.solo2.y - (narrow.solo1.y + narrow.solo1.h);
+  assert.ok(rowGap > 0);
   for (let i = 1; i < g.lanes.length; i++) {
     const above = g.nodes.filter((n) => n.lane === i - 1), below = g.nodes.filter((n) => n.lane === i);
     const gap = Math.min(...below.map((n) => n.y)) - Math.max(...above.map((n) => n.y + n.h));
@@ -500,16 +520,17 @@ test('graphLayout puts lanes with running work first, then those that need someo
     t('lone2', 'failed', 'failed'), t('d1'), t('d2', 'running'), t('lone3', 'running')];
   const g = run(nodes, edges);
   const lanes = (layout) => layout.lanes.map((l) => [l.ids.join(' '), l.group, l.independent]);
-  assert.deepEqual(lanes(g), [['b1 b2', 0, false], ['d1 d2', 0, false], ['c1 c2', 1, false], ['a1 a2', 2, false], ['lone3 lone2 lone1', 0, true]],
-    'running lanes, then one awaiting review, then finished ones, each group in plan order; the lone tasks last, ordered the same way');
+  assert.deepEqual(lanes(g), [['lone3', 0, true], ['b1 b2', 0, false], ['d1 d2', 0, false], ['lone2', 1, true], ['c1 c2', 1, false], ['a1 a2', 2, false], ['lone1', 2, true]],
+    'running lanes, then those that need someone, then finished ones, each in plan order; a running or needing lone task leads its group, a finished one closes the drawing');
+  assert.deepEqual(g.lanes.map((l) => l.label), ['independent · running', null, null, 'independent · needs attention', null, null, 'independent']);
   const at = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
-  assert.deepEqual(['lone3', 'lone2', 'lone1'].map((id) => at[id].row), [0, 1, 2]);
   assert.deepEqual([at.b1.layer, at.b2.layer, at.d1.layer, at.d2.layer], [0, 1, 0, 1], 'a chain keeps its layering whichever task runs');
   assertLanes(g);
   assertNoOverlap(g.nodes);
   assertEdgesClear(g);
   // A decision or a failure counts as needing someone; a silent task is still running; planned work is the rest.
-  assert.deepEqual(lanes(run([t('p', null), t('q', 'needs-decision', 'needs-decision'), t('r', 'running', 'silent'), t('s', 'aborted', 'failed')])), [['r q s p', 0, true]]);
+  assert.deepEqual(lanes(run([t('p', null), t('q', 'needs-decision', 'needs-decision'), t('r', 'running', 'silent'), t('s', 'aborted', 'failed')])),
+    [['r', 0, true], ['q s', 1, true], ['p', 2, true]]);
 });
 
 test('graphLayout keeps lanes put while their group holds, and moves only the lane whose group changes', () => {
@@ -524,12 +545,61 @@ test('graphLayout keeps lanes put while their group holds, and moves only the la
   assert.deepEqual(run(plan(same), edges), g);
   // d finishes: its lane joins the finished ones, after a in plan order. The lanes above it stay put.
   const moved = run(plan({ ...base, d2: ['completed'] }), edges);
-  assert.deepEqual(moved.lanes.map((l) => l.ids.join(' ')), ['b1 b2', 'c1 c2', 'a1 a2', 'd1 d2', 'lone3 lone2 lone1']);
+  assert.deepEqual(moved.lanes.map((l) => l.ids.join(' ')), ['lone3', 'b1 b2', 'lone2', 'c1 c2', 'a1 a2', 'd1 d2', 'lone1']);
   const before = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
-  for (const id of ['b1', 'b2']) assert.deepEqual(moved.nodes.find((n) => n.id === id), before[id], `${id} stays put`);
+  for (const id of ['lone3', 'b1', 'b2']) assert.deepEqual(moved.nodes.find((n) => n.id === id), before[id], `${id} stays put`);
   assertLanes(moved);
   // a starts running: within the running group it goes by plan order, ahead of b, not by when it started.
-  assert.deepEqual(run(plan({ ...base, a1: ['running'] }), edges).lanes.map((l) => l.ids.join(' ')), ['a1 a2', 'b1 b2', 'd1 d2', 'c1 c2', 'lone3 lone2 lone1']);
+  assert.deepEqual(run(plan({ ...base, a1: ['running'] }), edges).lanes.map((l) => l.ids.join(' ')), ['lone3', 'a1 a2', 'b1 b2', 'd1 d2', 'lone2', 'c1 c2', 'lone1']);
+  // A lone task that starts running joins the running independent lane, in plan order there.
+  assert.deepEqual(run(plan({ ...base, lone1: ['running'] }), edges).lanes.map((l) => l.ids.join(' ')), ['lone1 lone3', 'b1 b2', 'd1 d2', 'lone2', 'c1 c2', 'a1 a2']);
+});
+
+test('graphLayout puts running unlinked tasks at the top, never under a chain that awaits review or is planned', () => {
+  const run = layout();
+  const t = (id, state = 'completed', attention = null) => ({ id, state, attention });
+  // The board the user saw: research feeds a design awaiting review, then a planned review; the
+  // running tasks are linked to nothing.
+  const nodes = [t('research-a'), t('research-b'), t('design', 'completed', 'awaiting-review'), t('review', null), t('testinfra', 'running'),
+    t('impl-5', 'running'), t('mode-matrix'), t('impl-1'), t('blocked', 'failed', 'failed')];
+  const g = run(nodes, [['research-a', 'design'], ['research-b', 'design'], ['design', 'review']]);
+  assert.deepEqual(g.lanes.map((l) => [l.label, l.ids.join(' ')]), [
+    ['independent · running', 'testinfra impl-5'], ['independent · needs attention', 'blocked'],
+    [null, 'research-a research-b design review'], ['independent', 'mode-matrix impl-1']]);
+  const at = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
+  for (const id of ['testinfra', 'impl-5']) for (const other of ['research-a', 'design', 'review', 'mode-matrix']) assert.ok(at[id].y < at[other].y, `${id} sits above ${other}`);
+  assertLanes(g);
+  assertNoOverlap(g.nodes);
+  assertEdgesClear(g);
+});
+
+test('graphLayout wraps an independent lane into a grid as wide as fits, left to right then top to bottom', () => {
+  const run = layout();
+  const ids = Array.from({ length: 20 }, (_, i) => `t${String(i).padStart(2, '0')}`);
+  const cells = (g, only = () => true) => g.nodes.filter((n) => only(n.id)).map((n) => [n.layer, n.row]);
+  // With no width given, 4 columns: five rows instead of one column of twenty.
+  const g = run(ids);
+  assert.deepEqual(cells(g), ids.map((_, i) => [i % 4, Math.floor(i / 4)]));
+  assert.deepEqual(g.order, ids, 'it reads in plan order');
+  assert.ok(g.height < 450, `five rows tall (${g.height}px), not twenty`);
+  assertLanes(g);
+  assertNoOverlap(g.nodes);
+  // As many columns as fit the panel's width: two here, and at least one when none fits.
+  const two = 2 * 12 + 2 * 184 + 64;
+  const narrow = run(ids, [], { fit: two });
+  assert.deepEqual(cells(narrow).slice(0, 3), [[0, 0], [1, 0], [0, 1]]);
+  assert.ok(narrow.width <= two);
+  assert.deepEqual(new Set(run(ids, [], { fit: 100 }).nodes.map((n) => n.layer)), new Set([0]));
+  // At most 4, or as many as the widest chain has columns when that is more.
+  assert.equal(Math.max(...run(ids, [], { fit: 10_000 }).nodes.map((n) => n.layer)) + 1, 4);
+  const chain = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'], links = chain.slice(1).map((c, i) => [chain[i], c]);
+  const wide = run([...chain, ...ids], links, { fit: 10_000 });
+  assert.equal(Math.max(...wide.nodes.filter((n) => n.id.startsWith('t')).map((n) => n.layer)) + 1, 6);
+  const at = Object.fromEntries(wide.nodes.map((n) => [n.id, n]));
+  assert.ok(at.t05.x === at.c5.x && at.t06.x === at.c0.x, 'the grid lines up with the chain\'s columns');
+  assertLanes(wide);
+  assertNoOverlap(wide.nodes);
+  assertEdgesClear(wide);
 });
 
 test('clicking a graph node, or pressing Enter on it, chooses its task; the view toggle is remembered', () => {
@@ -604,8 +674,11 @@ function fakeDom() {
     getBoundingClientRect() { return { top: 0 }; }
     getAnimations() { return []; }
   }
-  const byId = Object.fromEntries(['runs', 'stamp', 'need', 'grand'].map((id) => [id, new El(id === 'runs' ? 'section' : 'span')]));
+  const byId = Object.fromEntries(['runs', 'detail', 'stamp', 'need', 'grand'].map((id) => [id, new El(id === 'runs' || id === 'detail' ? 'section' : 'span')]));
+  const listeners = {};
   Object.assign(doc, {
+    addEventListener: (name, fn) => { (listeners[name] ||= []).push(fn); },
+    fire: (name, event = {}) => { for (const fn of listeners[name] || []) fn(event); },
     createElement: (t) => new El(t), createElementNS: (ns, t) => new El(t), createTextNode: (t) => new Text(t),
     getElementById: (id) => byId[id] || null, querySelectorAll: (s) => byId.runs.querySelectorAll(s),
   });
@@ -613,14 +686,19 @@ function fakeDom() {
 }
 
 // The page's board, drawn by its own code into the fake DOM from a state the test changes.
-function boardPage() {
-  const doc = fakeDom(), stored = {}, page = { doc, root: doc.getElementById('runs'), board: [], fetches: 0, held: false };
+// With `realHold`, the page's own press and selection hold runs too, with its timers run by the test.
+function boardPage({ realHold = false } = {}) {
+  const doc = fakeDom(), stored = {};
+  const page = { doc, root: doc.getElementById('runs'), board: [], fetches: 0, held: false, timers: [], chosen: [], picked: [] };
   const context = vm.createContext({
     document: doc, sessionStorage: { getItem: (k) => stored[k] ?? null, setItem: (k, v) => { stored[k] = v; } }, stored,
     matchMedia: () => ({ matches: true }), CSS: { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`) },
     fetch: async () => { page.fetches++; return { headers: { get: () => null }, text: async () => JSON.stringify(page.board) }; },
-    holding: () => page.held, getSelection: () => ({ isCollapsed: !page.held }), tick() {}, compose() {}, preload() {},
+    getSelection: () => ({ isCollapsed: !page.held, anchorNode: page.held ? page.root : null }), tick() {}, compose() {}, preload() {}, detail() {},
+    choose: (el) => page.chosen.push(el), pick: (row) => page.picked.push(row), setTimeout: (fn) => page.timers.push(fn),
+    ...(realHold ? {} : { holding: () => page.held }),
   });
+  if (realHold) vm.runInContext(snippet('let pressed=null,behind=false;', 'async function refresh()'), context);
   vm.runInContext(app.slice(0, app.indexOf('// Choosing a row')), context);
   vm.runInContext(snippet('async function refresh()', "// The agent's structured report"), context);
   vm.runInContext(snippet('function graphLayout(', '// Where the details panel scrolls'), context);
@@ -776,8 +854,52 @@ test('each run of a section draws in its own framed panel, headed by its goal, s
     assert.deepEqual(panel.querySelectorAll('.gnode').map((g) => g.dataset.node), run.graph.nodes.map((n) => `s1/${run.id}/${n.id}`));
     assert.ok(panel.querySelector('.gwrap')?.dataset.run === `s1/${run.id}`, 'its scroll box keeps its horizontal scroll across redraws');
   }
-  // Lanes: the main run's chain is one band; the nested run's two lone tasks share the labelled independent band.
+  // Lanes: the main run's chain is one band; the nested run's lone running task and lone task that
+  // needs a decision each have a labelled band of their group.
   assert.equal(main.querySelectorAll('rect.glane').length, 1);
   assert.equal(main.querySelector('text.glabel'), null);
-  assert.equal(text(nested, 'text.glabel'), 'independent');
+  assert.deepEqual(nested.querySelectorAll('text.glabel').map((l) => l.textContent), ['independent · running', 'independent · needs attention']);
+});
+
+test('Tab follows the drawing: graph nodes are in the page lane by lane, column by column, top to bottom', async () => {
+  const page = boardPage();
+  const sec = boardSection('s1');
+  sec.runs[0].graph = { nodes: [graphNode('done1'), graphNode('b'), graphNode('a'), graphNode('run1', { state: 'running', phase: 'running' }), graphNode('c'), graphNode('done2')],
+    edges: [{ from: 'a', to: 'b' }, { from: 'a', to: 'c' }] };
+  page.board = [sec];
+  page.run('graphShown.add("s1")');
+  await page.refresh();
+  const nodes = page.root.querySelectorAll('.gnode');
+  assert.deepEqual(nodes.map((g) => g.dataset.node.split('/').pop()), ['run1', 'a', 'b', 'c', 'done1', 'done2'],
+    'the running lone task, then the chain from its first column, then the finished lone tasks; plan order was done1 b a run1 c done2');
+  assert.ok(nodes.every((g) => g.getAttribute('tabindex') === '0'), 'every node is in the Tab order, in page order');
+});
+
+test('a press holds the board until it ends, so the click lands on the element pressed; one redraw then catches up', async () => {
+  const page = boardPage({ realHold: true }), { doc, root } = page;
+  page.board = [boardSection('s1'), boardSection('s2')];
+  page.run('graphShown.add("s1")');
+  await page.refresh();
+  const settle = async () => { while (page.timers.length) page.timers.shift()(); await new Promise((resolve) => setImmediate(resolve)); };
+  for (const [selector, key, value, end] of [['.gnode', 'node', 's1/r/b', 'pointerup'], ['tbody.session', 'key', 's2/r~a', 'pointerup'], ['.gnode', 'node', 's1/r/a', 'pointercancel']]) {
+    const pressed = page.find(selector, key, value), fetches = page.fetches;
+    doc.fire('pointerdown', { target: pressed });
+    page.board[1].tasks[1].now = `busy during ${value} ${end}`;
+    await page.refresh(); // a poll lands while the pointer is down
+    assert.equal(page.fetches, fetches + 1);
+    assert.ok(root.contains(pressed), `${value} is still on the board while pressed`);
+    doc.fire(end, {});
+    if (end === 'pointerup') page.click(pressed); // the browser's click follows the release, before any timer
+    assert.ok(root.contains(pressed), 'the click is handled before the board catches up');
+    await settle();
+    assert.equal(page.fetches, fetches + 2, 'one redraw catches up');
+    assert.ok(!root.contains(pressed) && page.find(selector, key, value), 'the board is redrawn after the release');
+  }
+  assert.deepEqual(page.chosen.map((g) => g.dataset.node), ['s1/r/b'], 'the pressed graph node is chosen');
+  assert.deepEqual(page.picked.map((row) => row.dataset.key), ['s2/r~a'], 'the pressed tree row is chosen');
+  // Without a press, a poll redraws at once.
+  page.board[1].tasks[1].now = 'no press';
+  const before = page.find('tbody.session', 'key', 's2/r~a');
+  await page.refresh();
+  assert.ok(!root.contains(before));
 });

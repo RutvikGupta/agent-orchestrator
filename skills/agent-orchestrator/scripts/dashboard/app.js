@@ -73,8 +73,13 @@ needButton.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.pre
 let pressed=null,behind=false;
 const holding=el=>{if(pressed&&el.contains(pressed))return true;const s=getSelection();return !!s&&!s.isCollapsed&&el.contains(s.anchorNode)};
 function catchUp(){if(!behind||holding(document.getElementById("runs"))||holding(document.getElementById("detail")))return;behind=false;lastState="";lastDetail="";refresh().then(detail)}
+// A press holds its panel from pointerdown until pointerup or pointercancel, so the click that follows
+// lands on the very element that was pressed, never on one a redraw put in its place; then one
+// pending redraw catches up, after the click has been handled.
+const release=()=>{pressed=null;setTimeout(catchUp,0)};
 document.addEventListener("pointerdown",e=>{pressed=e.target},true);
-document.addEventListener("pointerup",()=>{pressed=null;setTimeout(catchUp,0)},true);
+document.addEventListener("pointerup",release,true);
+document.addEventListener("pointercancel",release,true);
 document.addEventListener("selectionchange",()=>{if(getSelection().isCollapsed)catchUp()});
 async function refresh(){
   let text;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;text=await r.text()}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
@@ -173,22 +178,27 @@ function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.le
   return[$("h3",{},r?"Structured report":"Scope"),$("dl",{class:"report"},...rows.filter(([,v])=>v!=null).flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)]))]}
 // Lays out a plan graph: `nodes` ([{id, state, attention}], in plan order) and `edges` ([{from, to}],
 // from a task to one that depends on it). Tasks linked by edges, directly or through others, share a
-// lane: a horizontal band, one per chain. Lanes with a running task come first, then those with a
-// task that needs someone (a decision, a failure, a review), then the rest, in plan order of their
-// first task within each group; tasks linked to no other share the last lane ("independent"),
-// ordered by the same groups. Bands are padded so lanes stand further apart than rows. Within a
-// chain's lane, each task goes one column right of the longest chain of tasks before it, and tasks
-// stack from the top in plan order: a task moves only when its lane changes group, never within it,
-// and not when a task is added to another column or lane. Columns line up across lanes. An edge that skips columns runs through a thin slot below the tasks of each column it
-// crosses. Edges are smooth cubic curves from a task's right side to its dependent's left side. The
-// plan validator forbids cycles; one found here is cut at its first task in plan order, so the
-// layout always ends, and each edge that then points back (to a column at or left of its source)
-// runs below its lane's tasks, on a channel of its own, through the gaps beside the columns.
-// Returns {width, height, nodes: [{id, lane, layer, row, x, y, w, h}], edges: [{from, to, d, x1, y1, x2, y2}],
-// lanes: [{index, y, h, independent, group (0 running, 1 needs someone, 2 the rest), ids, labelY}]}.
-function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,band=18,label=16}={}){
+// lane: a horizontal band, one per chain. Tasks linked to no other share an "independent" lane per
+// status group. Lanes with a running task come first, then those with a task that needs someone (a
+// decision, a failure, a review), then the rest, each group in plan order of the lanes' first tasks;
+// a group's independent lane leads it, except the finished or planned one, which closes the drawing.
+// Bands are padded so lanes stand further apart than rows. Within a chain's lane, each task goes one
+// column right of the longest chain of tasks before it, and tasks stack from the top in plan order;
+// an independent lane is a grid, filled left to right and then top to bottom, as many columns wide
+// as fit `fit` pixels (at least 1, at most 4 or the widest chain's column count, whichever is more).
+// A task moves only when its lane changes group, never within it, and not when a task is added to
+// another lane. Columns line up across lanes. An edge that skips columns runs through a thin slot
+// below the tasks of each column it crosses. Edges are smooth cubic curves from a task's right side
+// to its dependent's left side. The plan validator forbids cycles; one found here is cut at its
+// first task in plan order, so the layout always ends, and each edge that then points back (to a
+// column at or left of its source) runs below its lane's tasks, on a channel of its own, through the
+// gaps beside the columns. `order` lists the tasks as the eye reads them: lane by lane, a chain's
+// column by column and top to bottom, a grid row by row.
+// Returns {width, height, order, nodes: [{id, lane, layer, row, x, y, w, h}], edges: [{from, to, d, x1, y1, x2, y2}],
+// lanes: [{index, y, h, independent, group (0 running, 1 needs someone, 2 the rest), label, ids, labelY}]}.
+function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,band=18,label=16,fit=Infinity}={}){
   const index=new Map();for(const n of nodes||[])if(n&&!index.has(n.id))index.set(n.id,index.size);
-  const ids=[...index.keys()];if(!ids.length)return{width:0,height:0,nodes:[],edges:[],lanes:[]};
+  const ids=[...index.keys()];if(!ids.length)return{width:0,height:0,order:[],nodes:[],edges:[],lanes:[]};
   const preds=new Map(ids.map(id=>[id,[]])),succs=new Map(ids.map(id=>[id,[]])),links=[],seen=new Set();
   for(const e of edges||[]){const k=JSON.stringify([e?.from,e?.to]);if(!e||e.from===e.to||!index.has(e.from)||!index.has(e.to)||seen.has(k))continue;
     seen.add(k);links.push(e);preds.get(e.to).push(e.from);succs.get(e.from).push(e.to)}
@@ -203,26 +213,29 @@ function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,b
       layer.set(id,Math.max(0,...preds.get(id).filter(p=>layer.has(p)).map(p=>layer.get(p)+1)));
       for(const s of succs.get(id)){waiting.set(s,waiting.get(s)-1);if(!waiting.get(s)&&!layer.has(s))next.push(s)}}
     ready=next}
-  // Lanes: the connected groups of linked tasks, collected in plan order of their first task, and one
-  // shared lane for the tasks linked to no other.
+  // Lanes: the connected groups of linked tasks, and the tasks linked to no other by status group,
+  // each collected in plan order. A lane goes in the group of its most pressing task.
+  const info=new Map();for(const n of nodes||[])if(n&&!info.has(n.id))info.set(n.id,n);
+  const urgency=id=>{const n=info.get(id);return n.state==="running"?0:["needs-decision","failed","awaiting-review"].includes(n.attention)?1:2};
   const group=new Map(ids.map(id=>[id,id])),root=id=>{while(group.get(id)!==id)id=group.get(id);return id};
   for(const e of links){const a=root(e.from),b=root(e.to);if(a!==b)group.set(index.get(a)<index.get(b)?b:a,index.get(a)<index.get(b)?a:b)}
   const linked=new Set(links.flatMap(e=>[e.from,e.to])),byKey=new Map(),lanes=[],laneOf=new Map();
-  for(const id of ids){const key=linked.has(id)?root(id):"";if(!byKey.has(key)){byKey.set(key,{ids:[],independent:!key});lanes.push(byKey.get(key))}byKey.get(key).ids.push(id)}
-  // Running work above work that needs someone, above the rest: a lane goes in the group of its most
-  // pressing task, in plan order within its group, so it moves only when its group changes. The
-  // shared lane of unlinked tasks stays last and orders its own tasks the same way.
-  const info=new Map();for(const n of nodes||[])if(n&&!info.has(n.id))info.set(n.id,n);
-  const urgency=id=>{const n=info.get(id);return n.state==="running"?0:["needs-decision","failed","awaiting-review"].includes(n.attention)?1:2};
-  for(const lane of lanes){if(lane.independent)lane.ids.sort((a,b)=>urgency(a)-urgency(b)||index.get(a)-index.get(b));lane.group=Math.min(...lane.ids.map(urgency))}
-  lanes.sort((a,b)=>a.independent-b.independent||(a.independent?0:a.group-b.group));
+  for(const id of ids){const key=linked.has(id)?"chain "+root(id):"alone "+urgency(id);
+    if(!byKey.has(key)){byKey.set(key,{ids:[],independent:!linked.has(id)});lanes.push(byKey.get(key))}byKey.get(key).ids.push(id)}
+  const names=["independent · running","independent · needs attention","independent"],lead=l=>l.independent?(l.group<2?-1:1):0;
+  for(const lane of lanes){lane.group=Math.min(...lane.ids.map(urgency));lane.label=lane.independent?names[lane.group]:null}
+  lanes.sort((a,b)=>a.group-b.group||lead(a)-lead(b));
   lanes.forEach((lane,i)=>{lane.index=i;for(const id of lane.ids)laneOf.set(id,i)});
   // Back edges need room for their turns beside the outer columns, and a channel each below their lane's tasks.
   const back=links.filter(e=>layer.get(e.to)<=layer.get(e.from)),side=back.length?turn:0,colX=l=>pad+side+l*(w+gx);
-  const at=new Map(),via=new Map(),slotY=new Map(),channel=new Map();let y=0,width=0;
+  const depthOf=lane=>Math.max(...lane.ids.map(id=>layer.get(id)))+1;
+  const widest=Math.max(4,...lanes.filter(l=>!l.independent).map(depthOf)),fits=Math.floor((fit-2*(pad+side)+gx)/(w+gx));
+  const across=Math.max(1,Math.min(widest,Number.isFinite(fits)?fits:widest));
+  const at=new Map(),via=new Map(),slotY=new Map(),channel=new Map(),order=[];let y=0,width=0;
   for(const lane of lanes){
-    const depth=Math.max(...lane.ids.map(id=>layer.get(id)))+1,cols=Array.from({length:depth},()=>[]);
-    for(const id of lane.ids)cols[layer.get(id)].push(id);
+    // A chain's columns follow its layers; an independent lane wraps into a grid.
+    const depth=lane.independent?Math.min(across,lane.ids.length):depthOf(lane),cols=Array.from({length:depth},()=>[]);
+    lane.ids.forEach((id,i)=>cols[lane.independent?i%depth:layer.get(id)].push(id));
     // Slots go under each column's tasks, one per column an edge skips. A back edge takes none.
     const mine=links.filter(e=>laneOf.get(e.from)===lane.index),turns=mine.filter(e=>back.includes(e));
     for(const e of mine){via.set(e,[]);if(!turns.includes(e))for(let l=layer.get(e.from)+1;l<layer.get(e.to);l++){const v=" slot "+via.size+" "+l;cols[l].push(v);via.get(e).push([l,v])}}
@@ -231,6 +244,7 @@ function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,b
     for(const[v,t]of top)if(!index.has(v))slotY.set(v,t+slot/2);
     turns.forEach((e,k)=>channel.set(e,first+tall+gy+k*10));
     cols.forEach((c,l)=>c.filter(id=>index.has(id)).forEach((id,i)=>at.set(id,{id,lane:lane.index,layer:l,row:i,x:colX(l),y:top.get(id),w,h})));
+    order.push(...(lane.independent?lane.ids:cols.flatMap(c=>c.filter(id=>index.has(id)))));
     const bottom=first+tall+(turns.length?gy+(turns.length-1)*10:0)+band;
     Object.assign(lane,{y,h:bottom-y,labelY:lane.independent?y+band+4:null});y=bottom;
     width=Math.max(width,2*(pad+side)+depth*w+(depth-1)*gx)}
@@ -242,7 +256,8 @@ function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,b
       return{from:e.from,to:e.to,x1,y1,x2,y2,d}}
     for(const[l,v]of via.get(e)){const vx=colX(l),vy=slotY.get(v);d+=curve(x,cy,vx,vy)+"L"+(vx+w)+" "+vy;x=vx+w;cy=vy}
     return{from:e.from,to:e.to,x1,y1,x2,y2,d:d+curve(x,cy,x2,y2)}};
-  return{width,height:y,nodes:ids.map(id=>at.get(id)),edges:links.map(path),lanes:lanes.map(({index,y,h,independent,group,ids,labelY})=>({index,y,h,independent,group,ids,labelY}))}}
+  return{width,height:y,order,nodes:ids.map(id=>at.get(id)),edges:links.map(path),
+    lanes:lanes.map(({index,y,h,independent,group,label,ids,labelY})=>({index,y,h,independent,group,label,ids,labelY}))}}
 // The graph view of a section: one framed panel per run, each nested run right after the run whose
 // task started it, indented under an accent line. A run with nothing planned or started is left out.
 function graphView(sec){const byId=new Map(sec.runs.map(r=>[r.id,r])),kids=new Map(),order=[],seen=new Set();
@@ -255,13 +270,16 @@ function graphView(sec){const byId=new Map(sec.runs.map(r=>[r.id,r])),kids=new M
 // A run's panel: a one-line header (its goal, cut short with the whole goal in the tooltip, its short
 // id, who delegated it, and a count of its tasks and of those needing attention), then its graph.
 const NEEDS=[["needs-decision","needs decision","need decision"],["failed","failed","failed"],["awaiting-review","awaiting review","awaiting review"],["silent","silent","silent"]];
+// Its graph wraps independent tasks to the width the panel will have: the board's, less the paddings
+// and borders of the section, the panel list and the panel, and a nested panel's indent and accent.
 function graphPanel(sec,r,depth){const nodes=r.graph.nodes,running=nodes.filter(n=>n.state==="running").length;
+  const room=document.getElementById("runs")?.clientWidth,fit=room?room-88-(depth?depth*24+2:0):Infinity;
   const count=[nodes.length+(nodes.length===1?" task":" tasks"),running?running+" running":null,
     ...NEEDS.map(([kind,one,many])=>{const c=nodes.filter(n=>n.attention===kind).length;return c?c+" "+(c===1?one:many):null})].filter(Boolean).join(" · ");
   return $("div",{class:"gpanel"+(depth?" nested":""),"data-run":sec.id+"/"+r.id,role:"group","aria-label":"Plan of "+sectionTitle(r),...(depth?{style:"--depth:"+depth}:{})},
     $("h3",{class:"ghead",title:(r.goal||r.id)+"\nrun "+r.id},$("span",{class:"ggoal"},sectionTitle(r)),$("span",{class:"grun"},clip(r.id.replace(/^\d{8}-\d{6}-/,""),32)),
       r.parent?$("span",{class:"gfrom"},"delegated by "+r.parent.task):null,$("span",{class:"gcount"},count)),
-    $("div",{class:"gwrap","data-run":sec.id+"/"+r.id},graphSvg(sec,r)))}
+    $("div",{class:"gwrap","data-run":sec.id+"/"+r.id},graphSvg(sec,r,fit)))}
 // One run's graph as inline SVG. A node is colored by state like the tree's dots, dashed while only
 // planned, outlined in its attention color, and marked "×N" after several attempts and "+N" for the
 // tasks it delegated to a nested run. Choosing a node chooses its row (the click and key handlers).
@@ -270,19 +288,20 @@ const $s=(t,a={},...kids)=>{const e=document.createElementNS("http://www.w3.org/
   for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextNode(String(c)));return e};
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
 const nodeWord=n=>n.planned?(n.ready?"ready":"planned"):((n.state==="completed"&&n.phase)||n.state||"not started").replace(/-/g," ");
-function graphSvg(sec,r){const{nodes,edges}=r.graph,L=graphLayout(nodes,edges),at=new Map(L.nodes.map(p=>[p.id,p])),byId=new Map(nodes.map(n=>[n.id,n]));
+function graphSvg(sec,r,fit=Infinity){const{nodes,edges}=r.graph,L=graphLayout(nodes,edges,{fit}),at=new Map(L.nodes.map(p=>[p.id,p])),byId=new Map(nodes.map(n=>[n.id,n]));
   const keyOf=n=>n.key?sec.id+"/"+n.key:null,hot=new Set(nodes.filter(n=>keyOf(n)&&keyOf(n)===sel).map(n=>n.id));
   // Drawn one unit to a pixel, at least as wide as its panel, so the lanes' bands span the panel.
   const svg=$s("svg",{class:"graph",width:L.width,height:L.height,role:"group","aria-label":"Plan graph: "+sectionTitle(r)});
-  // One band per lane, every other one shaded, a thin line between them, and the label of the lane of
-  // tasks linked to no other.
+  // One band per lane, every other one shaded, a thin line between them, and the labels of the lanes
+  // of tasks linked to no other.
   for(const lane of L.lanes){svg.append($s("rect",{class:"glane"+(lane.index%2?" alt":""),x:0,y:lane.y,width:"100%",height:lane.h}));
     if(lane.index)svg.append($s("line",{class:"gdivide",x1:0,y1:lane.y,x2:"100%",y2:lane.y}));
-    if(lane.independent)svg.append($s("text",{class:"glabel",x:12,y:lane.labelY},"independent"))}
+    if(lane.independent)svg.append($s("text",{class:"glabel",x:12,y:lane.labelY},lane.label))}
   for(const e of L.edges){const c=(byId.get(e.from)?.phase==="integrated"?" met":"")+(hot.has(e.from)||hot.has(e.to)?" hot":"");
     svg.append($s("path",{class:"gedge"+c,d:e.d}),$s("path",{class:"garrow"+c,d:"M"+(e.x2-7)+" "+(e.y2-4)+"L"+e.x2+" "+e.y2+"L"+(e.x2-7)+" "+(e.y2+4)+"Z"}))}
   // Awaiting review has a color of its own, apart from the green of accepted and integrated work.
-  for(const n of nodes){const p=at.get(n.id),k=keyOf(n),word=nodeWord(n),review=!n.planned&&n.phase==="awaiting-review";
+  // Nodes go in as the eye reads them (L.order), so Tab moves through them in that order.
+  for(const n of L.order.map(id=>byId.get(id))){const p=at.get(n.id),k=keyOf(n),word=nodeWord(n),review=!n.planned&&n.phase==="awaiting-review";
     const dc=n.planned||!n.state?"":review?"d-review":dotClass({state:n.state});
     const tip=[n.id+(n.type?" ("+n.type+")":""),n.title,word+(n.attempts>1?" · "+n.attempts+" attempts":""),n.attention?"needs attention: "+n.attention.replace(/-/g," "):null,
       n.delegated?n.delegated+" task"+(n.delegated>1?"s":"")+" delegated to a nested run":null,k?null:"not started yet: nothing to show"].filter(Boolean);
@@ -485,6 +504,8 @@ refresh().then(detail);setInterval(()=>soon(),2000);limits();setInterval(limits,
 // The server pushes "change" when an agent writes; refresh at once, one refresh at a time.
 let refreshing=false,queued=false;
 function soon(){if(refreshing){queued=true;return}refreshing=true;refresh().then(detail).finally(()=>{refreshing=false;if(queued){queued=false;soon()}})}
+// A graph wraps its independent tasks to the board's width, so a resize redraws it once it settles.
+let resized=null;addEventListener("resize",()=>{clearTimeout(resized);resized=setTimeout(()=>{if(graphShown.size){lastState="";soon()}},250)});
 const presence=new EventSource("api/presence");
 presence.addEventListener("change",soon);
 function showEscalation(event){
