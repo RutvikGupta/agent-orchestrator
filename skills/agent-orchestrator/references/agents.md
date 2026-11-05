@@ -2,16 +2,16 @@
 
 Facts come from each delegate skill's relay (`~/.agents/skills/<agent>-delegate/`). Its `SKILL.md`
 and `references/dispatch-and-poll.md` remain the authority on flags; check `relay.mjs --help` for
-the installed version. Which agent and Codex tier to use is decided in `SKILL.md` ("Choose the
-agent and model"); the models themselves live in `../policy.json`.
+the installed version. Which agent and tier to use is decided in `SKILL.md` ("Choose the agent and
+model"); the models themselves live in `../policy.json`.
 
 | | Claude Code (`claude`) | Codex (`codex`) |
 | --- | --- | --- |
-| Model and effort | Always `claude-opus-5-5`, effort `xhigh` | `--tier standard`: `gpt-6.1-sol`, `medium`; `--tier complex`: `gpt-6-astra`, `high` |
+| Model and effort | `--tier light`: `claude-haiku-5-5`; `--tier standard`: `claude-sonnet-5-5`; `--tier complex` (the default, and every babysitter): `claude-opus-5-5`; all at `xhigh` | `--tier standard`: `gpt-6.1-sol`, `medium`; `--tier complex`: `gpt-6-astra`, `high` |
 | Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) |
 | Write mode (default) | `acceptEdits`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; may commit, push without force, and write to GitHub (force pushes, admin merges, secrets, repository creation and deletion, and nested `claude` denied); `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
 | `--read-only` | `plan` mode with Read, Glob, and Grep only (no shell); reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run |
-| Session id (for `-- --session`) | `sessionId` | `threadId`; a resumed thread may switch tier |
+| Session id (for `-- --session`) | `sessionId`; a resumed session keeps its tier unless `--tier` switches it | `threadId`; a resumed thread may switch tier |
 | Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost |
 | Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` |
 | `--sandbox` | Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access |

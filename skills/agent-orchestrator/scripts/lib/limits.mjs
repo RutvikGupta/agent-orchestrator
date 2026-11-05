@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CODEX_HOME, STATE_ROOT, USAGE_CACHE } from "./config.mjs";
 import { agoText } from "./format.mjs";
-import { loadPolicy } from "./policy.mjs";
+import { CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
 import { readJson, tailBytes, writeJson } from "./util.mjs";
 
 function windowName(minutes) {
@@ -44,14 +44,14 @@ export function rememberClaudeLimits(limits, observedAt, source) {
 
 // One minimal Claude turn (no tools, not saved as a session) to read Claude's current limits.
 export function probeClaudeLimits(bin) {
-  const policy = loadPolicy();
+  const { model, effort } = loadPolicy().claude.tiers[CLAUDE_DEFAULT_TIER];
   const env = { ...process.env };
   delete env.CLAUDECODE;
   fs.mkdirSync(STATE_ROOT, { recursive: true });
   const r = spawnSync(
     bin,
-    ["-p", "Reply with the single word ok.", "--output-format", "stream-json", "--verbose", "--model", policy.claude.model,
-      "--effort", policy.claude.effort, "--tools", "", "--max-turns", "1", "--no-session-persistence"],
+    ["-p", "Reply with the single word ok.", "--output-format", "stream-json", "--verbose", "--model", model,
+      ...(effort ? ["--effort", effort] : []), "--tools", "", "--max-turns", "1", "--no-session-persistence"],
     { cwd: STATE_ROOT, env, encoding: "utf8", timeout: 120000, stdio: ["ignore", "pipe", "pipe"] },
   );
   for (const line of (r.stdout || "").split("\n")) {

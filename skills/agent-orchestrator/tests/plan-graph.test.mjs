@@ -80,7 +80,7 @@ test('/api/state draws each run of a section as a plan graph', async (t) => {
   assert.equal(parent.parent, null);
 
   assert.deepEqual(nodes.api, {
-    id: 'api', title: 'Add the API', type: 'implement', agent: 'claude', tier: null, planned: false, ready: false,
+    id: 'api', title: 'Add the API', type: 'implement', agent: 'claude', tier: 'complex', planned: false, ready: false,
     state: 'completed', phase: 'awaiting-review', attempts: 1, attention: 'awaiting-review', key: rowKey(run, 'api'), delegated: 2,
   });
   assert.deepEqual(nodes.ui, {

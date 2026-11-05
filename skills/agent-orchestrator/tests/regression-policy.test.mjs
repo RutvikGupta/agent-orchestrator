@@ -1,11 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fixture, readJson } from './helpers.mjs';
+import { fileURLToPath } from 'node:url';
+import { fixture, readJson, writeJson } from './helpers.mjs';
 
 const policy = readJson(new URL('../policy.json', import.meta.url));
-test('model policy rejects direct and passthrough overrides before dispatch', async (t) => {
+const tiersOf = (agent) => Object.entries(policy[agent].tiers);
+// "light = claude-haiku-5-5, standard = ...", as the error messages list an agent's tiers.
+const tierList = (agent) => tiersOf(agent).map(([tier, choice]) => `${tier} = ${choice.model}`).join(', ');
+
+test('model policy rejects direct and passthrough overrides and unknown tiers before dispatch', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   for (const agent of ['claude', 'codex']) {
@@ -13,28 +19,152 @@ test('model policy rejects direct and passthrough overrides before dispatch', as
       const result = await f.command(['start', run.id, 'refused', '--agent', agent,
         ...(agent === 'codex' ? ['--tier', 'standard'] : []),
         '--why', 'Policy regression', '--brief', f.brief('refused'), ...flags], { code: 2 });
-      assert.match(result.stderr, agent === 'claude' ? /Claude always runs/ : /choose the Codex model with --tier/);
+      if (agent === 'claude') assert.ok(result.stderr.includes(`choose the Claude model with --tier (${tierList('claude')}), not --model/--effort`), result.stderr);
+      else assert.match(result.stderr, /choose the Codex model with --tier/);
     }
   }
-  for (const [agent, tier] of [['claude', 'standard'], ['codex', 'imaginary']]) {
-    await f.command(['start', run.id, 'refused', '--agent', agent, '--tier', tier,
+  for (const [agent, tier, message] of [
+    ['claude', 'imaginary', `unknown --tier "imaginary" for Claude (choose: ${tierList('claude')}; without --tier: complex)`],
+    ['claude', 'constructor', 'unknown --tier "constructor" for Claude'],
+    ['codex', 'imaginary', 'unknown --tier "imaginary" (choose: standard, complex)'],
+    ['codex', 'light', 'unknown --tier "light"'],
+  ]) {
+    const result = await f.command(['start', run.id, 'refused', '--agent', agent, '--tier', tier,
       '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
+    assert.ok(result.stderr.includes(message), result.stderr);
+  }
+  const codex = await f.command(['start', run.id, 'refused', '--agent', 'codex', '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
+  assert.ok(codex.stderr.includes(`--tier is required for Codex: ${tierList('codex')}`), codex.stderr);
+  assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
+});
+
+test('every tier reaches the relay with its policy model and effort, and status shows the tier', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const all = ['claude', 'codex'].flatMap((agent) => tiersOf(agent).map(([tier, choice]) => [agent, tier, choice]));
+  for (const [agent, tier, choice] of all) {
+    const id = `${agent}-${tier}`;
+    const started = await f.start(run, id, { agent, flags: ['--tier', tier] });
+    assert.deepEqual([started.tier, started.model, started.effort], [tier, choice.model, choice.effort ?? null]);
+    await f.finished(run, id);
+    const { argv } = readJson(path.join(started.outDir, 'invocation.json'));
+    assert.equal(argv[argv.indexOf('--model') + 1], choice.model);
+    // A tier without an effort leaves the flag out, so the CLI uses its default for the model.
+    if (choice.effort) assert.equal(argv[argv.indexOf('--effort') + 1], choice.effort);
+    else assert.equal(argv.includes('--effort'), false);
+  }
+  const rows = new Map((await f.json(['status', run.id])).tasks.map((row) => [row.id, row]));
+  const text = (await f.command(['status', run.id])).stdout;
+  for (const [agent, tier, choice] of all) {
+    const row = rows.get(`${agent}-${tier}`);
+    assert.equal(row.tier, tier);
+    assert.equal(row.modelLabel, `${choice.model.replace(/^(claude|gpt)-/, '')} ${choice.effort || ''}`.trim());
+    assert.match(text, new RegExp(`${agent}-${tier}\\s+${agent} ${tier}: `));
+  }
+});
+
+test('a Claude task without --tier runs complex, and the start line names the tier', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const out = await f.command(['start', run.id, 'default', '--agent', 'claude', '--why', 'Hard cross-module change',
+    '--brief', f.brief('default')]);
+  const complex = policy.claude.tiers.complex;
+  assert.ok(out.stdout.includes(`started default → claude ${complex.model} (effort ${complex.effort}, complex tier, write`), out.stdout);
+  const task = readJson(f.taskFile(run, 'default'));
+  assert.deepEqual([task.tier, task.model, task.effort], ['complex', complex.model, complex.effort]);
+  await f.finished(run, 'default');
+  const light = await f.command(['start', run.id, 'light', '--agent', 'claude', '--tier', 'light', '--why', 'Gathers facts from two named files',
+    '--brief', f.brief('light')]);
+  const choice = policy.claude.tiers.light;
+  assert.ok(light.stdout.includes(`→ claude ${choice.model} (${choice.effort ? `effort ${choice.effort}` : 'default effort'}, light tier, write`), light.stdout);
+  await f.finished(run, 'light');
+});
+
+test('a babysitter refuses a lighter Claude tier before reading the pull request', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (const tier of ['light', 'standard']) {
+    const result = await f.command(['start', run.id, 'babysit-1', '--agent', 'claude', '--babysit', '--pr', '1', '--tier', tier,
+      '--why', 'Babysits PR #1', '--brief', f.brief('babysit')], { code: 2 });
+    assert.match(result.stderr, new RegExp(`a babysitter always runs the complex tier, .*; drop --tier ${tier}$`, 'm'));
   }
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 });
 
-test('every allowed model tier reaches the relay with the policy effort', async (t) => {
+test('a Claude follow-up keeps its tier, and a failed lighter attempt names the next tier', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
-  for (const [agent, tier, choice] of [ ['claude', null, policy.claude],
-    ...Object.entries(policy.codex.tiers).map(([tier, choice]) => ['codex', tier, choice]) ]) {
-    const id = `${agent}-${tier || 'fixed'}`;
-    const started = await f.start(run, id, { agent, flags: tier ? ['--tier', tier] : [] });
-    await f.finished(run, id);
-    const { argv } = readJson(path.join(started.outDir, 'invocation.json'));
-    assert.equal(argv[argv.indexOf('--model') + 1], choice.model);
-    assert.equal(argv[argv.indexOf('--effort') + 1], choice.effort);
+  const first = await f.start(run, 'lookup', { flags: ['--tier', 'light'] });
+  await f.finished(run, 'lookup');
+  // A follow-up without --tier or --why keeps the tier and the earlier reason; nothing failed yet.
+  const kept = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--brief', f.brief('resume'), '--', '--session', 'fixture-claude']);
+  assert.doesNotMatch(kept.stdout, /one tier up/);
+  let task = readJson(f.taskFile(run, 'lookup'));
+  assert.deepEqual([task.attempt, task.tier, task.model, task.why], [2, 'light', policy.claude.tiers.light.model, first.why]);
+  await f.finished(run, 'lookup');
+
+  // A `changes` verdict on a light attempt: starting it at the same tier again prints the next tier.
+  await f.command(['verdict', run.id, 'lookup', 'changes', '--note', 'missed a caller']);
+  const failingCheck = '```orch-result\n{"outcome":"done","changed":[],"checks":[{"cmd":"npm test","result":"fail","note":"1 failure"}],"decisions":[],"unresolved":[]}\n```';
+  const same = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--brief', f.brief('rework', { finalMessage: failingCheck })]);
+  assert.match(same.stdout, /^note: attempt 2 at the light tier failed its review or gates; redo it one tier up, with --tier standard and a new --why$/m);
+  await f.finished(run, 'lookup');
+
+  // Attempt 3 reported a failing check. Moving up a tier needs a new --why, and then gives no hint.
+  const refused = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--tier', 'standard', '--brief', f.brief('up')], { code: 2 });
+  assert.match(refused.stderr, /--why is required: .* picked claude at the standard tier/);
+  const up = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--tier', 'standard',
+    '--why', 'standard: the light attempt missed a caller', '--brief', f.brief('up')]);
+  assert.doesNotMatch(up.stdout, /one tier up/);
+  task = readJson(f.taskFile(run, 'lookup'));
+  assert.deepEqual([task.attempt, task.tier, task.model], [4, 'standard', policy.claude.tiers.standard.model]);
+  await f.finished(run, 'lookup');
+
+  // A check the agent itself reported as failing counts too, and Codex `standard` names `complex`.
+  const failing = { finalMessage: failingCheck };
+  await f.start(run, 'scan', { agent: 'codex', config: failing });
+  await f.finished(run, 'scan');
+  const codex = await f.command(['start', run.id, 'scan', '--agent', 'codex', '--tier', 'standard', '--brief', f.brief('scan-again')]);
+  assert.match(codex.stdout, /^note: attempt 1 at the standard tier failed its review or gates; redo it one tier up, with --tier complex and a new --why$/m);
+  await f.finished(run, 'scan');
+});
+
+test('a Claude task recorded before tiers resumes at complex with its earlier reason', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'legacy');
+  await f.finished(run, 'legacy');
+  const file = f.taskFile(run, 'legacy');
+  writeJson(file, { ...readJson(file), tier: null });
+  const resumed = await f.json(['start', run.id, 'legacy', '--agent', 'claude', '--brief', f.brief('again')]);
+  assert.deepEqual([resumed.attempt, resumed.tier, resumed.why], [2, 'complex', first.why]);
+  await f.finished(run, 'legacy');
+});
+
+test('a bad policy.json stops start with a message that names the problem', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  // A copy of the CLI reads the policy.json next to its own scripts/ folder.
+  const copy = path.join(f.root, 'skill-copy');
+  fs.cpSync(fileURLToPath(new URL('../scripts', import.meta.url)), path.join(copy, 'scripts'), { recursive: true });
+  const cli = path.join(copy, 'scripts', 'orch.mjs');
+  const { light, standard } = policy.claude.tiers;
+  for (const [content, message] of [
+    ['{not json', /orch: missing or invalid \S+policy\.json: it is not readable JSON/],
+    [JSON.stringify({ claude: { model: 'claude-opus-5-5', effort: 'xhigh' }, codex: policy.codex }),
+      /orch: invalid \S+policy\.json: claude\.tiers must be an object with at least one tier$/m],
+    [JSON.stringify({ claude: { tiers: { light, standard } }, codex: policy.codex }), /claude\.tiers needs a "complex" tier/],
+    [JSON.stringify({ claude: { tiers: { ...policy.claude.tiers, standard: { effort: 'high' } } }, codex: { tiers: { standard: { model: 'gpt-x', effort: 7 } } } }),
+      /claude\.tiers\.standard\.model must be a model name; codex\.tiers\.standard\.effort must be a level/],
+    [JSON.stringify({ claude: policy.claude, codex: { tiers: {} } }), /codex\.tiers must be an object with at least one tier/],
+  ]) {
+    fs.writeFileSync(path.join(copy, 'policy.json'), content);
+    const result = spawnSync(process.execPath, [cli, 'start', run.id, 'bad', '--agent', 'claude', '--why', 'Policy regression',
+      '--brief', f.brief('bad')], { cwd: f.repo, env: f.env, encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, message);
   }
+  assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 });
 
 for (const [depth, slots] of [[2, 4], [3, 2]]) {

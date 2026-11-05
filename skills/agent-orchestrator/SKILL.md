@@ -5,7 +5,7 @@ description: >-
   plan the work as data, brief each task from a template, run up to 8 tasks at once as background
   agent sessions (each writer in its own prepared git worktree), review and accept every result,
   integrate it in dependency order, and verify the whole request. Chooses Claude or Codex and the
-  Codex tier per task by assessing it, never by remaining usage, and records why. Opens a live
+  model tier per task by assessing it, never by remaining usage, and records why. Opens a live
   dashboard of every launched session, and babysits every pull request it opens until it lands.
   Use when the user asks to orchestrate, fan out, parallelize, or coordinate work across agents,
   run background agents, split a job between Claude and Codex, get a second opinion or a
@@ -133,7 +133,7 @@ lines:
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts |
-| `agent`, `tier`, `why` | The agent, the Codex tier (`standard`, `complex`, or `null`), and your one-line assessment |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex`, or `null` for `complex`; Codex `standard` or `complex`), and your one-line assessment |
 | `brief` | The brief file, relative to the run directory |
 
 Rules for the plan:
@@ -154,15 +154,19 @@ Rules for the plan:
 
 #### Choose the agent and model
 
-You choose the agent for every task by assessing that task. No table or default rule makes the
-choice for you, and you must not prefer an agent just because it is the CLI you are running in.
-`start` refuses a dispatch without `--why`, a one-line statement of your assessment (the plan's
-`why`), and shows that reason in `status`, `result`, and the dashboard. A follow-up attempt that
-keeps the same agent and tier may omit `--why`, and reuses the earlier reason.
+You choose the agent and its tier for every task by assessing that task. No table or default rule
+makes the choice for you, and you must not prefer an agent just because it is the CLI you are
+running in. `start` refuses a dispatch without `--why`, a one-line statement of your assessment (the
+plan's `why`) that names the task's complexity behind the tier, and shows that reason in `status`,
+`result`, and the dashboard. A follow-up attempt that keeps the same agent and tier may omit
+`--why`, and reuses the earlier reason.
 
-The models themselves are fixed by `policy.json`, and `start` enforces them:
+Each tier's model is fixed by `policy.json` (`$ORCH agents` lists them), and `start` enforces it. Do
+not pass `--model` or `--effort`.
 
-- **Claude** always runs `claude-opus-5-5` at effort `xhigh`. Do not pass `--model` or `--effort`.
+- **Claude**: `--tier light` runs `claude-haiku-5-5`, `standard` runs `claude-sonnet-5-5`, and
+  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. Without `--tier` a task runs `complex`, and a
+  follow-up attempt keeps its earlier tier. A babysitter always runs `complex`.
 - **Codex** needs `--tier`. `standard` runs `gpt-6.1-sol` at effort `medium`. `complex` runs
   `gpt-6-astra` at effort `high`.
 
@@ -182,7 +186,7 @@ Assess each task with these questions, then weigh the answers together:
    - Babysitting a pull request: only Claude, with `--babysit` (step 8).
 3. **Does it check another agent's work?** Give a review, verification, or second opinion to the
    agent that did not write the work, so that a different model looks at it.
-4. **How hard and how risky is it?** Use the tier criteria below. Claude at `xhigh` is the strongest
+4. **How hard and how risky is it?** Use the tier criteria below. Claude `complex` is the strongest
    choice for hard implementation work. On Codex, hard work needs the `complex` tier.
 5. **What has this run already shown?** If an agent failed this task twice, or a similar task, give
    the next attempt to the other agent; rework that is converging stays in the same session.
@@ -193,7 +197,7 @@ Assess each task with these questions, then weigh the answers together:
 When the answers do not favor Codex, choose Claude. Re-assess after each failure and whenever you
 change the plan, not only at the start.
 
-For Codex, choose `complex` if **any** of these is true; otherwise choose `standard`:
+For either agent, choose `complex` if **any** of these is true:
 
 - The change spans several modules or more than about 5 files, or changes an interface that other
   code depends on.
@@ -202,18 +206,25 @@ For Codex, choose `complex` if **any** of these is true; otherwise choose `stand
 - Mistakes would be costly or subtle: concurrency, security or authentication, data migrations or
   schemas, billing, performance-critical paths, or integration between systems.
 - Doing it right requires understanding a large, unfamiliar subsystem.
-- It reviews a large or high-risk diff.
-- A `standard` attempt at this task already failed review or its gates.
+- It reviews a large or high-risk diff, or babysits a pull request.
+- A lighter-tier attempt at this task already failed review or its gates.
 
 `standard` fits: a well-specified change to 1 to 5 files with clear done criteria; mechanical work
 (renames, pattern refactors, tests for existing behavior, lint or type fixes, docs or config
 edits); read-only inventories, searches, test runs, or documentation lookups; and reviews of small
-diffs. When unsure, start at `standard`, unless a failure would be costly, and escalate once if it
-fails (see Rework in step 6).
+diffs. Claude `light` fits only mechanical and lookup work with nothing to judge: renames,
+formatting, simple searches and summaries, and gathering facts from files the brief names.
 
-Write the deciding factors in the plan's `why`, for example `"runs the test suite read-only;
-Claude's read-only mode has no shell"`. Per-agent behavior (sandboxes, read-only limits, flags) is
-in [references/agents.md](references/agents.md).
+A lighter tier must not lower the quality of the result. On Claude, choose `light` or `standard`
+only when you judge that model will do the task as well as Opus would; when unsure, choose
+`complex`. On Codex, when unsure, start at `standard` unless a failure would be costly. Reviews and
+verification of another agent's work run at `standard` or above, and at `complex` for a large or
+risky diff. Redo a lighter-tier result that fails review or its gates one tier up, never at the
+same tier (see Rework in step 6); `start` prints the next tier when you do not.
+
+Write the deciding factors in the plan's `why`, for example `"standard: a specified 2-file fix with
+tests"` or `"runs the test suite read-only; Claude's read-only mode has no shell"`. Per-agent
+behavior (sandboxes, read-only limits, flags) is in [references/agents.md](references/agents.md).
 
 #### Usage limits
 
@@ -337,8 +348,8 @@ $ORCH dispatch <run> [--max N] [--dry-run]
   task, babysitters, and tasks that need relay flags, such as research with live web search.
 
 ```bash
-$ORCH start <run> <task-id> --agent claude --why "<assessment>" --brief <brief-file> \
-  [--read-only] [--timeout 2h]
+$ORCH start <run> <task-id> --agent claude [--tier light|standard|complex] --why "<assessment>" \
+  --brief <brief-file> [--read-only] [--timeout 2h]
 $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
@@ -530,11 +541,12 @@ run `$ORCH start <run> <task-id> --agent <same> [--tier <same>] --brief <delta> 
 using the session id that `result` printed. The task keeps its working directory, and the attempt
 number goes up.
 
-**Escalating a Codex task** from `standard` to `complex`: resume with `--tier complex`, a new
-`--why` that names what failed, and the same `--session`, so `gpt-6-astra` keeps the context; when
-the earlier attempt went far off track, start fresh (no `--session`) with a corrected full brief.
-Escalate at most once. After two failed attempts, give the task to the other agent (a fresh
-session with a full brief and a new `--why`), do the fix yourself, or re-plan; do not loop.
+**Escalating a task** one tier up (Claude `light` to `standard` to `complex`, Codex `standard` to
+`complex`): resume with `--tier <next>`, a new `--why` that names what failed, and the same
+`--session`, so the stronger model keeps the context; when the earlier attempt went far off track,
+start fresh (no `--session`) with a corrected full brief. Never retry a failed lighter-tier result
+at the same tier. After two failed attempts, give the task to the other agent (a fresh session with
+a full brief and a new `--why`), do the fix yourself, or re-plan; do not loop.
 
 ### 7. Integrate and verify the goal
 

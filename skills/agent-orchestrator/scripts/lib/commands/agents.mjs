@@ -42,9 +42,10 @@ export function cmdAgents(args) {
   const policy = loadPolicy();
   const known = new Set((readJson(path.join(process.env.CODEX_HOME || path.join(HOME, ".codex"), "models_cache.json"))?.models || []).map((m) => m.slug));
   const flag = (m) => (known.size && !known.has(m) ? "  (not in this account's Codex model list!)" : "");
+  const effortText = (v) => (v.effort ? `effort ${v.effort}` : "default effort");
   const lines = [
-    `claude → ${policy.claude.model}, effort ${policy.claude.effort} (always)`,
-    ...Object.entries(policy.codex.tiers).map(([t, v]) => `codex --tier ${t.padEnd(8)} → ${v.model}, effort ${v.effort}: ${v.use || ""}${flag(v.model)}`),
+    ...Object.entries(policy.claude.tiers).map(([t, v]) => `claude --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}: ${v.use || ""}`),
+    ...Object.entries(policy.codex.tiers).map(([t, v]) => `codex --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}: ${v.use || ""}${flag(v.model)}`),
   ];
 
   const installed = new Set(rows.filter((r) => r.bin !== "-").map((r) => r.key));

@@ -1,7 +1,23 @@
 {
   "claude": {
-    "model": "claude-opus-5-5",
-    "effort": "xhigh"
+    "note": "Tiers are listed lightest first. Every Claude tier runs at xhigh effort, the same as Opus: the claude CLI accepts it for Haiku, Sonnet and Opus, and a lighter model should not also lose effort.",
+    "tiers": {
+      "light": {
+        "model": "claude-haiku-5-5",
+        "effort": "xhigh",
+        "use": "mechanical and lookup work: renames, formatting, simple searches and summaries, gathering facts from given files"
+      },
+      "standard": {
+        "model": "claude-sonnet-5-5",
+        "effort": "xhigh",
+        "use": "well-specified, bounded work: small changes to 1 to 5 files with clear done criteria, tests for existing behavior, docs, reviews of small diffs"
+      },
+      "complex": {
+        "model": "claude-opus-5-5",
+        "effort": "xhigh",
+        "use": "hard, ambiguous, cross-cutting or high-risk work, every pull-request babysitter, and the default when unsure or without --tier"
+      }
+    }
   },
   "codex": {
     "tiers": {

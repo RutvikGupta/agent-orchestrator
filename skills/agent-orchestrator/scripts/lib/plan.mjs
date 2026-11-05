@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AGENTS, TASK_ID } from "./config.mjs";
-import { loadPolicy } from "./policy.mjs";
+import { CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
 import { readJson } from "./util.mjs";
 
 export const TASK_TYPES = ["implement", "review", "research", "debug", "babysit"];
@@ -66,7 +66,9 @@ export function validatePlan(plan, held = new Map()) {
     errors.push("tasks must be a non-empty list");
     return { errors, conflicts: [] };
   }
-  const tiers = Object.keys(loadPolicy().codex.tiers);
+  const policy = loadPolicy();
+  const tiers = Object.keys(policy.codex.tiers);
+  const claudeTiers = Object.keys(policy.claude.tiers);
   const ids = new Set();
   let graphReadable = true; // every task is an object whose dependsOn, if any, is a list of ids
   plan.tasks.forEach((task, i) => {
@@ -84,7 +86,9 @@ export function validatePlan(plan, held = new Map()) {
     if (task.type !== undefined && !TASK_TYPES.includes(task.type)) bad(`type must be one of ${TASK_TYPES.join(", ")}`);
     if (!AGENTS[task.agent]) bad(`agent must be ${Object.keys(AGENTS).join(" or ")}`);
     else if (task.agent === "codex" && !tiers.includes(task.tier)) bad(`a Codex task needs a tier (${tiers.join(" or ")})`);
-    else if (task.agent === "claude" && task.tier != null) bad("a Claude task has no tier (Claude always runs one model); set tier to null");
+    else if (task.agent === "claude" && task.tier != null && !claudeTiers.includes(task.tier)) {
+      bad(`a Claude task's tier is one of ${claudeTiers.join(", ")}, or null for ${CLAUDE_DEFAULT_TIER}`);
+    } else if (task.type === "babysit" && task.tier != null && task.tier !== CLAUDE_DEFAULT_TIER) bad(`a babysit task runs the ${CLAUDE_DEFAULT_TIER} tier`);
     if (!filled(task.why)) bad("why is empty: one line on why your assessment picked this agent");
     for (const key of LIST_FIELDS) if (task[key] !== undefined && !stringList(task[key])) bad(`${key} must be a list of non-empty strings`);
     if (task.readOnly !== undefined && typeof task.readOnly !== "boolean") bad("readOnly must be true or false");

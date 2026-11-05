@@ -50,7 +50,9 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
       entry(run, 'ghost', { dependsOn: ['missing'] }),
       entry(run, 'self', { dependsOn: ['self'] }),
       entry(run, 'codex-task', { agent: 'codex', tier: null }),
-      entry(run, 'claude-tier', { tier: 'complex' }),
+      entry(run, 'claude-tier', { tier: 'imaginary' }),
+      entry(run, 'claude-light', { tier: 'light' }),
+      entry(run, 'babysit-light', { type: 'babysit', owns: [], tier: 'light' }),
       entry(run, 'robot', { agent: 'robot' }),
       entry(run, 'no-why', { why: '  ' }),
       entry(run, 'no-brief', { brief: '' }),
@@ -63,12 +65,13 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
   for (const pattern of [
     /goal is empty: one line/, /task Bad_ID: id must be a lowercase slug/, /task dup: duplicate id/,
     /task ghost: dependsOn names "missing", which is not in the plan/, /task self: depends on itself/,
-    /task codex-task: a Codex task needs a tier \(standard or complex\)/, /task claude-tier: a Claude task has no tier/,
+    /task codex-task: a Codex task needs a tier \(standard or complex\)/, /task claude-tier: a Claude task's tier is one of light, standard, complex, or null for complex/,
+    /task babysit-light: a babysit task runs the complex tier/,
     /task robot: agent must be claude or codex/, /task no-why: why is empty/,
     /task no-brief: brief is empty: the path of its brief file/, /task no-goal: goal is empty/,
     /task reader: is read-only, so it owns nothing/,
   ]) assert.match(out.stderr, pattern);
-  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:/);
+  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:/);
   assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
 
   const cycle = { goal: 'Cycle', tasks: [entry(run, 'a', { dependsOn: ['c'] }), entry(run, 'b', { dependsOn: ['a'] }), entry(run, 'c', { dependsOn: ['b'] })] };

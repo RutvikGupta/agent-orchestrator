@@ -1,6 +1,7 @@
 ---
 name: browser
 description: Drives a real Chrome browser through the Chrome DevTools MCP server. Use when a task needs to see or interact with a web page - open a URL or a local web app, click, fill forms, take screenshots or DOM snapshots, read console messages and network requests, or record a performance trace. The browser server starts with this agent and stops when it finishes, so other sessions never pay for it.
+model: sonnet
 mcpServers:
   - chrome-devtools:
       type: stdio
