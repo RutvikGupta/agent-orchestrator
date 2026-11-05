@@ -6,7 +6,7 @@ import path from "node:path";
 import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { decisionsIn } from "./briefs.mjs";
 import { inboxFields } from "./inbox.mjs";
-import { lifecycleFields } from "./lifecycle.mjs";
+import { attemptReasonOf, lifecycleFields } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
@@ -149,6 +149,118 @@ function attemptDirs(run, task) {
   return dirs;
 }
 
+// The outcome word of a final message's last orch-result block (done, partial or blocked), and
+// whether it hands back decisions; report.mjs parses the current attempt's report in full.
+function reportOutcome(message) {
+  let last;
+  for (const block of String(message || "").matchAll(/^[\t ]*```orch-result[\t ]*\r?\n([\s\S]*?)^[\t ]*```[\t ]*(?=\r?$)/gm)) last = block[1];
+  try {
+    const value = last === undefined ? null : JSON.parse(last.trim());
+    return { outcome: ["done", "partial", "blocked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
+  } catch {
+    return { outcome: null, decisions: false };
+  }
+}
+
+// What an earlier attempt's result.json says, reread only when the file changes: the dashboard
+// describes every task each second, and only the current attempt's result changes.
+const attemptResults = new Map(); // result.json path -> { mtimeMs, size, value }
+function attemptResult(dir) {
+  const file = path.join(dir, "result.json");
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    attemptResults.delete(file);
+    return null;
+  }
+  const hit = attemptResults.get(file);
+  if (hit?.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value;
+  const result = readJson(file);
+  const report = reportOutcome(result?.finalMessage);
+  const value = result && {
+    status: result.status || "unknown",
+    error: firstLine(typeof result.error === "string" ? result.error : result.error ? JSON.stringify(result.error) : "", 160) || null,
+    decisions: result.status === "completed" && Boolean(decisionsIn(result.finalMessage) || report.decisions),
+    outcome: report.outcome,
+    startedAt: result.startedAt || null,
+    finishedAt: result.finishedAt || null,
+    model: result.model || null,
+    session: result.threadId || result.sessionId || null,
+    resumedFrom: typeof result.session === "string" ? result.session : null,
+    resumed: Boolean(result.resumed || result.resumeLast || result.session),
+  };
+  if (attemptResults.size >= 2000) attemptResults.delete(attemptResults.keys().next().value);
+  attemptResults.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+  return value;
+}
+
+// An attempt's brief does not change once its relay starts, so its size is read once.
+const briefSizes = new Map(); // orch-brief.md path -> bytes
+function briefBytes(dir) {
+  const file = path.join(dir, "orch-brief.md");
+  if (briefSizes.has(file)) return briefSizes.get(file);
+  try {
+    const { size } = fs.statSync(file);
+    if (briefSizes.size >= 2000) briefSizes.delete(briefSizes.keys().next().value);
+    briefSizes.set(file, size);
+    return size;
+  } catch {
+    return null;
+  }
+}
+
+// One compact line per attempt, newest first, for the dashboard's receipts: why it started, its
+// agent and model, time and tokens, how it ended and the outcome its report gave. `seen` holds each
+// attempt's event summary and tokens from describe(); `row` is the finished row, whose state,
+// report and result describe the current attempt.
+function attemptsOf(task, seen, row) {
+  const current = task.attempt || 0;
+  const sessions = [];
+  const list = seen.map(({ dir, agent, summary, tokens }, i) => {
+    const n = i + 1;
+    const now = n === current;
+    const r = now ? null : attemptResult(dir);
+    const result = now ? row.result : null;
+    const session = now ? row.session : r?.session || summary.sessionId || null;
+    // The session this attempt resumed: the relay records it for Codex; the current attempt's
+    // relay arguments name it for both; a Claude result says only that it resumed, so its own
+    // session counts when an earlier attempt had the same one.
+    const argv = now && Array.isArray(task.argv) ? task.argv : [];
+    const named = argv.includes("--session") ? argv[argv.indexOf("--session") + 1] : null;
+    const explicit = (now ? (typeof result?.session === "string" ? result.session : null) : r?.resumedFrom) || named || null;
+    const flagged = now ? Boolean(result?.resumed || result?.resumeLast || argv.includes("--resume-last")) : Boolean(r?.resumed);
+    const from = explicit || (flagged && session && sessions.includes(session) ? session : null);
+    const resumedAttempt = from ? sessions.lastIndexOf(from) + 1 || null : null;
+    sessions.push(session);
+    let state = now ? row.state : r ? r.status : "aborted";
+    if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
+    const startedAt = now ? row.startedAt : r?.startedAt || null;
+    const finishedAt = now ? result?.finishedAt || null : r?.finishedAt || null;
+    const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
+    const errorText = now ? (typeof result?.error === "string" ? result.error : result?.error ? JSON.stringify(result.error) : "") : r?.error || "";
+    const failed = !["completed", "needs-decision", "running", "prepared"].includes(state);
+    return {
+      n,
+      reason: attemptReasonOf(task, n),
+      agent,
+      model: now ? row.model : r?.model || summary.model || null,
+      startedAt,
+      durationMs: Number.isFinite(durationMs) ? Math.max(0, durationMs) : null,
+      tokensIn: tokens.input,
+      tokensOut: tokens.output,
+      state,
+      error: failed ? firstLine(errorText, 160) || firstLine(summary.error, 160) || null : null,
+      outcome: now ? (row.report && !row.report.invalid ? row.report.outcome : null) : r?.outcome || null,
+      session,
+      resumed: from || (flagged ? true : null),
+      resumedAttempt,
+      briefBytes: briefBytes(dir),
+    };
+  });
+  return list.reverse();
+}
+
 export function describe(run, task) {
   const readResult = () => (task.outDir ? readJson(path.join(task.outDir, "result.json")) : null);
   let result = readResult();
@@ -174,6 +286,7 @@ export function describe(run, task) {
   let exact = true;
   let current = newSummary();
   const attempts = attemptDirs(run, task);
+  const seen = []; // each attempt's summary and tokens, for its line in `attempts`
   const byThread = new Map(); // Codex thread id -> tokens already counted for it
   for (const [i, { dir, agent }] of attempts.entries()) {
     const s = summarizeEvents(agent, path.join(dir, "events.jsonl"), task.cd);
@@ -196,6 +309,7 @@ export function describe(run, task) {
     if (s.costUsd != null) costUsd = (costUsd || 0) + s.costUsd;
     if (!s.exact && (s.tokens.input || s.tokens.output)) exact = false;
     current = s;
+    seen.push({ dir, agent, summary: s, tokens: t });
   }
   let lastEventMs = null;
   try {
@@ -252,7 +366,9 @@ export function describe(run, task) {
   };
   const reported = { ...row, ...reportFields(run, task, row) };
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
-  return { ...staged, ...inboxFields(run, task, staged) };
+  const described = { ...staged, ...inboxFields(run, task, staged) };
+  described.attempts = attemptsOf(task, seen, described);
+  return described;
 }
 
 // Errors that mean the agent's usage window is used up, as Claude Code and Codex word them.

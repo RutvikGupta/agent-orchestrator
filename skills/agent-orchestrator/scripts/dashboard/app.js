@@ -153,10 +153,10 @@ function sectionView(run){
 // A redraw replaces every element of the board. The one that had focus (a tree row by its task key,
 // a graph node by its run and task, an attention item, or a section's toggle) is found again and
 // focused without scrolling, so Tab and Enter keep working. Focus outside the board, such as in the
-// message box, is never taken.
+// message box, is never taken. The details panel passes its own `keys` (PANEL_FOCUS).
 const FOCUS_KEYS=[["tbody.session",["key"]],[".gnode",["node"]],[".attn",["key"]],[".view",["run","view"]],[".older",["run"]]];
-function focusedOn(root){const a=document.activeElement;if(!a||a===root||!root.contains(a))return null;
-  const hit=FOCUS_KEYS.find(([s])=>a.matches(s));
+function focusedOn(root,keys=FOCUS_KEYS){const a=document.activeElement;if(!a||a===root||!root.contains(a))return null;
+  const hit=keys.find(([s])=>a.matches(s));
   return hit?hit[0]+hit[1].map(k=>"[data-"+k+'="'+CSS.escape(a.dataset[k]??"")+'"]').join(""):null}
 let refocusing=false; // the focusin handler leaves a refocused row's log alone
 function refocus(root,selector){const el=selector&&root.querySelector(selector);if(!el||document.activeElement===el)return;
@@ -167,11 +167,21 @@ function redrawSection(id){const root=document.getElementById("runs"),run=state.
   if(!run||!old){lastState="";refresh();return}
   const focus=focusedOn(root),fresh=sectionView(run);old.replaceWith(fresh);refocus(root,focus);syncPulses(fresh)}
 // The agent's structured report (its orch-result block) and the files it changed outside its plan.
+// Each check shows the evidence `orch.mjs result` saved for it: the last matching run in the
+// agent's log, as in "pass · ran, exit 0". A check reported as passing without a successful run is
+// marked as a warning, as `result` warns. The dashboard only reads saved evidence.
+const evidenceWords=e=>!e.ran?"NOT FOUND in the log":e.exitCode===0?"ran, exit 0":"exit "+(e.exitCode??"unknown");
+const checkWarning=c=>{const e=c?.evidence;if(c?.result!=="pass"||!e||e.exitCode===0)return null;
+  return !e.ran?"reported pass, but no matching run is in the log":e.exitCode==null?"reported pass, but the log has no exit code for its last run":"reported pass, but its last run exited "+e.exitCode};
 function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.length)return[];
   const text=v=>typeof v==="string"?v:JSON.stringify(v),list=(items,f=text)=>$("ul",{},...items.map(x=>$("li",{},f(x))));
   const mark=(s,ok,bad)=>$("span",{class:"state "+(s===ok?"s-completed":s===bad?"s-bad":s==null||s==="not-run"?"s-idle":"s-running")},s||"unknown");
+  const check=c=>{const e=c&&typeof c==="object"?c.evidence:null,warn=checkWarning(c);
+    return $("span",{class:warn?"check mismatch":"check",title:warn||""},mark(c?.result,"pass","fail"),
+      e?$("span",{class:warn?"evw":"muted"}," · "+evidenceWords(e)+(warn?" ⚠":"")):null," "+(c?.cmd||"(no command)")+(c?.note?" — "+c.note:""))};
+  const unproven=r?.checks?.length&&!t.native&&!t.main&&!t.external&&!["running","prepared"].includes(t.state)&&r.checks.some(c=>c&&typeof c==="object"&&!c.evidence);
   const rows=r?.invalid?[["report","invalid orch-result block: "+r.error]]:r?[["outcome",mark(r.outcome,"done","blocked")],
-    ["checks",r.checks?.length?list(r.checks,c=>[mark(c?.result,"pass","fail")," "+(c?.cmd||"(no command)")+(c?.note?" — "+c.note:"")]):null],
+    ["checks",r.checks?.length?[list(r.checks,check),unproven?$("p",{class:"muted note"},"evidence is worked out by `orch.mjs result`"):null]:null],
     ["decisions",r.decisions?.length?list(r.decisions,d=>typeof d==="string"?d:(d?.question||"(no question)")+(d?.recommendation?" → "+d.recommendation:"")):null],
     ["unresolved",r.unresolved?.length?list(r.unresolved):null]]:[];
   rows.push(["outside its files",out.length?list(out):null]);
@@ -326,42 +336,146 @@ const logScroll=(same,panel)=>!same||atBottom(panel)?"bottom":panel.scrollTop;
 // row's log starts loading when the pointer reaches it, so it is usually ready by the click, and
 // a row never has two loads at once.
 const logs=new Map(),loading=new Map();
-const logSource=t=>t.native||t.main?(t.outDir?"api/transcript?file="+encodeURIComponent(t.outDir):null):"api/events?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id);
-function loadLog(key,t){const src=logSource(t);if(!src)return Promise.resolve([]);if(loading.has(key))return loading.get(key);
-  const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(key)?.ev||[]).then(ev=>{loading.delete(key);logs.delete(key);
-    logs.set(key,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
-  loading.set(key,load);return load}
-function preload(key){const t=taskAt(key);if(t&&!loading.has(key)&&!(Date.now()-(logs.get(key)?.at||0)<3000))loadLog(key,t)}
+// The earlier attempt whose log and brief a row's panel shows, after a click on it in the
+// Attempts list; a row not in it follows its current attempt. Each log is kept, and fetched, by its
+// row and the number of the attempt it belongs to, so one attempt's log never shows as another's.
+const attemptShown=new Map();
+const shownAttempt=(key,t)=>{const n=attemptShown.get(key);return n&&n<=(t.attempt||0)?n:t.attempt||0};
+const logAttempt=(key,t)=>t&&!t.native&&!t.main?shownAttempt(key,t):0;
+const logKey=(key,t)=>{const n=logAttempt(key,t);return n?key+"@"+n:key};
+const logSource=(t,n)=>t.native||t.main?(t.outDir?"api/transcript?file="+encodeURIComponent(t.outDir):null):"api/events?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id)+(n?"&attempt="+n:"");
+// A log's fingerprint for the panel's change check: its length and a hash of every entry, since a
+// log capped at 400 entries keeps its length as new entries push old ones out. Worked out once per log.
+const prints=new WeakMap();
+function logPrint(ev){if(!ev)return"loading";let p=prints.get(ev);if(p!=null)return p;let h=2166136261;
+  for(const e of ev){const s=e.kind+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
+  p=ev.length+":"+h.toString(36);prints.set(ev,p);return p}
+function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSource(t,n);if(!src)return Promise.resolve([]);if(loading.has(lk))return loading.get(lk);
+  const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(lk)?.ev||[]).then(ev=>{loading.delete(lk);logs.delete(lk);
+    logs.set(lk,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
+  loading.set(lk,load);return load}
+function preload(key){const t=taskAt(key),lk=logKey(key,t);if(t&&!loading.has(lk)&&!(Date.now()-(logs.get(lk)?.at||0)<3000))loadLog(key,t)}
 async function detail(){
   if(!sel)return;const key=sel,[runId,taskId]=key.split("/");const run=state.find(r=>r.id===runId);const t=run?.tasks.find(x=>x.key===taskId);if(!t)return;
   const ext=t.native||t.main;
   // A newly chosen row paints at once, with the log it last had, before its fresh log arrives.
-  if(document.getElementById("detail").dataset.sel!==key)paint(key,t,ext,logSource(t)?logs.get(key)?.ev??null:[]);
+  const lk=logKey(key,t);
+  if(document.getElementById("detail").dataset.sel!==key)paint(key,t,ext,logSource(t)?logs.get(lk)?.ev??null:[]);
   const ev=await loadLog(key,t);
-  // A slower load for a row chosen earlier must not repaint the panel over the current one.
-  if(sel!==key)return;
-  paint(key,t,ext,ev);
+  // A slower load for a row chosen earlier, or for another attempt of this row, must not repaint
+  // the panel over the current one.
+  const now=state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskId)||t;
+  if(sel!==key||logKey(key,now)!==lk)return;
+  paint(key,now,ext,ev);
 }
-// `ev` is null while the row's first log is still loading.
-function paint(key,t,ext,ev){
-  const sig=key+JSON.stringify(t)+(ev?ev.length:"loading");if(sig===lastDetail)return;
+// The panel's controls that keep focus across a repaint, found again as focusedOn finds the board's:
+// an attempt line by its number, the Brief, "show attempt N", and the close button.
+const PANEL_FOCUS=[[".att",["n"]],[".bsum",[]],[".linkish",[]],[".close",[]]];
+// The final message as the panel shows it: without the orch-result block that the structured report
+// above already shows. An invalid block stays, so the reader can see what is wrong with it.
+const REPORT_BLOCK=/^[\t ]*```orch-result[\t ]*\r?\n[\s\S]*?^[\t ]*```[\t ]*(?=\r?$)/gm;
+function shownMessage(t){const m=String(t.finalMessage||"");if(!t.report||t.report.invalid)return m;
+  const blocks=[...m.matchAll(REPORT_BLOCK)],last=blocks.at(-1);return last?(m.slice(0,last.index)+m.slice(last.index+last[0].length)).trimEnd():m}
+// `ev` is null while the row's first log is still loading; it must be the log of the attempt the
+// panel shows (logKey). `keep` holds the scroll position as it is, after a click inside the panel.
+function paint(key,t,ext,ev,keep){
+  // A task that orch.mjs started has receipts; its working directory and branch go in its Context line.
+  const own=!ext&&!t.external&&(t.attempts||[]).length>0,n=own?shownAttempt(key,t):0,past=own&&n!==t.attempt;
+  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(own?briefSig(key,t,n):"");if(sig===lastDetail)return;
   const d=document.getElementById("detail");if(holding(d)){behind=true;return}lastDetail=sig;
-  const to=logScroll(d.dataset.sel===key,d);
+  const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d);
+  // A tool event with no output text gets no OUTPUT row.
+  const rows=(ev||[]).filter(e=>e.kind!=="output"||String(e.text??"").trim()),message=t.finalMessage?shownMessage(t):"";
+  const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.state)},t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
     $("dl",{},...[["state",t.state+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state?t.phase:null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
-      ["working dir",t.cd],["branch",t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
+      ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
+    ...(own?[...contextView(t,n),...briefView(key,t,n),...attemptsView(key,t,n)]:[]),
     ...reportView(t),
-    ...(t.finalMessage?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final"},$("pre",{},t.finalMessage))]:[]),
+    ...reviewView(t),
+    ...(message?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final"},$("pre",{},message))]:[]),
     ...(t.main?[$("p",{class:"muted"},"The session that launched this run. Its counts cover the whole session and are not in the run's totals.")]:[]),
     ...(t.inbox?.messages?.length?[$("h3",{},"Messages ("+t.inbox.messages.length+")"),...t.inbox.messages.map(m=>$("div",{class:"msg"+(m.from==="user"?" you":"")},
       $("span",{class:"k"},(m.from==="user"?"you":"orchestrator")+" · "+new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+" · "+(m.read?"read":"not read yet")),$("pre",{},m.text+(m.images?"\n("+(m.images>1?m.images+" images":"1 image")+" attached)":"")),
       ...(m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text)))))]:[]),
-    $("h3",{},ev?"Events ("+ev.length+", newest last)"+(ext?", from its transcript":""):"Events (loading…)"),
-    ...(ev||[]).map(e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.text))));
+    $("h3",{},(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":""):" (loading…)"),
+      past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
+    ...rows.map(e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.text))));
   d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;
+  if(focus)refocus(d,focus);
 }
+// The receipts of a task that orch.mjs started: what it was given (a Context line, and its brief,
+// loaded when opened), what each attempt did, and what was accepted or rejected on what evidence.
+// Main sessions, native sub-agents and outside agents have no receipts, so they get none of these
+// sections, and a task gets only the sections it has something for.
+const bytesText=n=>n<1024?n+" B":n<1048576?(n/1024).toFixed(n<10240?1:0)+" KB":(n/1048576).toFixed(1)+" MB";
+const timeText=iso=>{const d=new Date(iso);if(isNaN(d))return"";const hm=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+  return d.toDateString()===new Date().toDateString()?hm:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+hm};
+const shortSha=c=>String(c||"").slice(0,7);
+// Paint the chosen row's panel again at once, from what is already loaded, after a click in it.
+function repaint(key){const t=taskAt(key);if(!t||sel!==key)return;lastDetail="";paint(key,t,t.native||t.main,logSource(t)?logs.get(logKey(key,t))?.ev??null:[],true)}
+// Show attempt n's log and brief in the row's panel; choosing the current attempt follows it again.
+// An open Brief moves to that attempt, and loads it. "show attempt N" leaves the focus on its line.
+function showAttempt(key,n){const t=taskAt(key);if(!t)return;const fromLink=document.activeElement?.matches?.(".linkish");
+  if(n===t.attempt)attemptShown.delete(key);else attemptShown.set(key,n);
+  if(briefOpen.has(key)){briefOpen.set(key,n);loadBrief(key,t,n,true)}
+  repaint(key);if(fromLink)refocus(document.getElementById("detail"),".att.on");detail()}
+// Briefs fetched for the panel, by run, task and attempt: {text, bytes}, {error}, or {} while it
+// loads. For each row whose Brief is open, `briefOpen` holds the attempt it shows.
+const briefs=new Map(),briefOpen=new Map();
+const briefKey=(t,n)=>t.run+"/"+t.id+"/"+n;
+const briefSig=(key,t,n)=>{const b=briefs.get(briefKey(t,n));return"|"+(briefOpen.get(key)===n)+"|"+(!b?"":b.text!=null?b.text.length:b.error||"loading")};
+// Fetch attempt n's brief once. A failed fetch stays failed, and is shown, until the reader opens
+// the Brief again or chooses another attempt (`retry`); nothing else fetches it again.
+function loadBrief(key,t,n,retry){const k=briefKey(t,n),b=briefs.get(k);if(b&&!(retry&&b.error))return;
+  briefs.delete(k);briefs.set(k,{});if(briefs.size>20)briefs.delete(briefs.keys().next().value);
+  fetch("api/brief?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id)+"&attempt="+n)
+    .then(async r=>{const v=await r.json().catch(()=>({}));briefs.set(k,r.ok&&typeof v.text==="string"?{text:v.text,bytes:v.bytes}:{error:v.error||"HTTP "+r.status})},
+      ()=>{briefs.set(k,{error:"the dashboard is not reachable"})})
+    .then(()=>repaint(key))}
+// The reader opened or closed the Brief. The browser fires `toggle` for a <details> rebuilt open too;
+// that one matches the state already kept, so only the reader's own change acts.
+function toggleBrief(key,t,n,open){if(open===(briefOpen.get(key)===n))return;
+  if(!open){briefOpen.delete(key);return}
+  briefOpen.set(key,n);loadBrief(key,t,n,true);repaint(key)}
+function briefView(key,t,n){const b=briefs.get(briefKey(t,n)),open=briefOpen.get(key)===n;
+  const body=!open?null:b?.text!=null?$("div",{class:"final"},$("pre",{},b.text)):$("p",{class:"muted"},b?.error?"Not loaded: "+b.error+".":b?"Loading…":"Not loaded; close and open the Brief to load it.");
+  return[$("details",{class:"brief",...(open?{open:""}:{}),ontoggle:e=>toggleBrief(key,t,n,e.currentTarget.open)},
+    $("summary",{class:"bsum"},"Brief",t.attempt>1?$("span",{class:"muted"}," · attempt "+n):null),body)]}
+// One line: the brief's size, whether the attempt resumed an earlier session (and which), how many
+// messages the agent received, and where it works.
+function contextView(t,n){const a=(t.attempts||[]).find(x=>x.n===n);
+  const resumed=!a?null:!a.resumed?(a.n>1?"new session":null):"resumed "+(a.resumedAttempt?"attempt "+a.resumedAttempt+"'s session":"session")+(typeof a.resumed==="string"?" "+a.resumed.slice(0,8):"");
+  const read=t.inbox?.read||0;
+  const bits=[a?.briefBytes!=null?"brief "+bytesText(a.briefBytes):null,resumed,t.inbox?read+" message"+(read===1?"":"s")+" received":null,t.cd?t.cd+(t.branch?" @ "+t.branch:""):null].filter(Boolean);
+  return bits.length?[$("p",{class:"ctx"},$("span",{class:"k"},"Context"),bits.join(" · "))]:[]}
+// How an attempt ended, in words: completed, needs decision, stopped, or failed with its error.
+const attemptEnd=a=>a.state==="completed"?"completed":a.state==="needs-decision"?"needs decision":a.state==="running"||a.state==="stopped"?a.state:(a.state||"unknown")+(a.error?": "+a.error:"");
+// The attempts, newest first, one line each; choosing one shows its events (and brief) below.
+function attemptsView(key,t,n){const list=t.attempts||[];if(!list.length)return[];
+  return[$("h3",{},"Attempts"),$("div",{class:"attempts"},...list.map(a=>{const on=a.n===n,end=attemptEnd(a);
+    const time=a.state==="running"&&a.n===t.attempt?t.elapsed:a.durationMs!=null?dur(a.durationMs):null;
+    const tip=[on?"Its events are shown below":"Show this attempt's events",a.session?"session "+a.session:null,a.startedAt?"started "+timeText(a.startedAt):null,end].filter(Boolean).join("\n");
+    return $("button",{type:"button",class:"att"+(on?" on":""),"data-n":String(a.n),"aria-pressed":String(on),title:tip,onclick:()=>showAttempt(key,a.n)},
+      $("b",{},"#"+a.n),$("span",{class:"muted"},a.reason||"-"),$("span",{},[a.agent,a.model].filter(Boolean).join(" · ")||"-"),
+      time?$("span",{class:"num"},time):null,$("span",{class:"num"},fmt(a.tokensIn)+" in / "+fmt(a.tokensOut)+" out"),
+      $("span",{class:"end state "+cls(a.state)},end),a.outcome?$("span",{class:"muted"},"reported "+a.outcome):null)}))]}
+// The coordinator's own receipts: the gates it reran (orch.mjs verify), its review rounds (verdict),
+// and the acceptance or rejection, each with its commit, reviewer, time and note.
+function reviewView(t){const vs=t.verifications||[],rs=t.reviewRounds||[],acc=t.acceptance||null;if(!vs.length&&!rs.length&&!acc)return[];
+  const several=t.attempt>1,rows=[],note=s=>s?" — "+s:"";
+  const verdict=(word,good)=>$("span",{class:"state "+(good===true?"s-completed":good===false?"s-bad":"s-running")},word);
+  if(vs.length)rows.push(["verified",$("ul",{},...vs.map(v=>$("li",{},v.id?$("span",{class:"muted"},v.id+" "):null,verdict(v.passed?"pass":"fail",!!v.passed)," "+(v.cmd||"(no command)"),
+    $("span",{class:"muted"}," · "+[v.timedOut?"timed out":v.exitCode!=null?"exit "+v.exitCode:v.signal||"exit unknown",v.commit?shortSha(v.commit)+(v.dirty?" dirty":""):null,
+      several&&v.attempt?"attempt "+v.attempt:null,v.by?"by "+v.by:null,v.startedAt?timeText(v.startedAt):null].filter(Boolean).join(" · ")))))]);
+  if(rs.length)rows.push(["review rounds",$("ul",{},...rs.map(r=>$("li",{},"round "+r.round+" · attempt "+r.attempt+" · ",verdict(r.verdict||"unknown",r.verdict==="clean"?true:r.verdict==="reject"?false:null),
+    $("span",{class:"muted"}," · by "+(r.reviewer||"coordinator")+(r.at?" · "+timeText(r.at):"")+(r.verifications?.length?" · on "+r.verifications.join(", "):"")),note(r.note))))]);
+  if(acc){const old=acc.attempt!=null&&acc.attempt!==t.attempt,yes=acc.verdict==="accepted";
+    rows.push(["acceptance",[verdict(yes?"accepted":"rejected",yes)," attempt "+(acc.attempt??"?")+(yes&&acc.commit?" at "+shortSha(acc.commit):"")+(yes&&acc.by?" by "+acc.by:""),
+      $("span",{class:"muted"},acc.at?" · "+timeText(acc.at):""),note(acc.note),old?$("span",{class:"muted"}," (an earlier attempt: it does not cover attempt "+t.attempt+")"):null]])}
+  return[$("h3",{},"Verification and review"),$("dl",{class:"report"},...rows.flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)]))]}
 async function limits(){try{const u=await (await fetch("api/usage")).json();
   document.getElementById("limits").replaceChildren(...["claude","codex"].map(k=>$("span",{class:"limit"+(u[k]&&u[k].max>=80?" hot":""),title:u[k]?u[k].full:"no reading yet"},
     $("b",{},k[0].toUpperCase()+k.slice(1))," "+(u[k]?u[k].short:"unknown"))))}catch{}}

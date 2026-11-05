@@ -94,6 +94,19 @@ export function lifecycleFields(run, task, row) {
     verifications: verifications.slice(-5).map(({ outputTail, ...v }) => v),
     rejected: rejectedNow(task),
     acceptNote: acceptedNow(task) ? task.acceptNote ?? null : null,
+    acceptance: acceptanceOf(task),
+  };
+}
+
+// The task's latest acceptance or rejection, for the dashboard's receipts, with the attempt it
+// covered (an earlier attempt's no longer covers the task); null when it has neither.
+function acceptanceOf(task) {
+  const rejectedLast = task.rejectedAt && !(task.acceptedAt > task.rejectedAt);
+  if (rejectedLast) return { verdict: "rejected", attempt: task.rejectedAttempt ?? null, at: task.rejectedAt, note: task.rejectNote ? shortText(task.rejectNote, 300) : null };
+  if (!task.acceptedAt) return null;
+  return {
+    verdict: "accepted", attempt: task.acceptedAttempt ?? null, at: task.acceptedAt, by: task.acceptedBy || null,
+    commit: task.acceptedCommit || null, note: task.acceptNote ? shortText(task.acceptNote, 300) : null,
   };
 }
 

@@ -112,6 +112,49 @@ export function servesHost(header, host, port, { loopbackOnly = false } = {}) {
   return names.some((name) => header.toLowerCase() === `${name}:${port}`);
 }
 
+// An attempt number in a query: a positive integer.
+const ATTEMPT = /^[1-9]\d{0,5}$/;
+// The details panel shows at most this much of a brief.
+const BRIEF_BYTES = 200 * 1024;
+const kb = (bytes) => `${Math.round(bytes / 1024)} KB`;
+
+// An attempt's brief for /api/brief, as { status, body }: { text, bytes }, with at most BRIEF_BYTES
+// of the text and a note at its end when cut. Only the attempt's own orch-brief.md is read: its real
+// path must be exactly <run>/tasks/<task>/attempt-<n>/orch-brief.md, so no link (of the file or of
+// a folder above it) points the route at another file. It opens without following a link and
+// without waiting on a pipe, must be a regular file, and is read asynchronously and capped, so no
+// file can hold up the server.
+async function readBrief(runDir, taskId, attempt) {
+  const missing = { status: 404, body: { error: "no brief for that attempt" } };
+  const real = (f) => fs.promises.realpath(f).catch(() => null);
+  const root = await real(runDir);
+  if (!root) return missing;
+  const file = path.join(root, "tasks", taskId, `attempt-${attempt}`, "orch-brief.md");
+  const target = await real(file);
+  if (!target) return missing;
+  if (target !== file) return { status: 403, body: { error: "not a brief of this run" } };
+  let handle;
+  try {
+    handle = await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (error) {
+    // A link swapped in after the check above refuses to open (ELOOP).
+    return error.code === "ELOOP" ? { status: 403, body: { error: "not a brief of this run" } } : missing;
+  }
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) return missing;
+    const buf = Buffer.alloc(Math.min(st.size, BRIEF_BYTES));
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    let text = buf.subarray(0, bytesRead).toString("utf8");
+    const cut = st.size > bytesRead;
+    // A cut through a multi-byte character leaves a replacement character at the end; drop it.
+    if (cut) text = `${text.replace(/\uFFFD+$/, "")}\n\n… (truncated: the first ${kb(bytesRead)} of ${kb(st.size)} are shown)`;
+    return { status: 200, body: { text, bytes: st.size, ...(cut ? { truncated: true } : {}) } };
+  } finally {
+    await handle.close();
+  }
+}
+
 // Serve the dashboard on host:port (or the next free port) until the process exits.
 export async function serveDashboard({ host, port, args }) {
   const http = await import("node:http");
@@ -294,13 +337,30 @@ export async function serveDashboard({ host, port, args }) {
         const runId = url.searchParams.get("run") || "";
         const taskId = url.searchParams.get("task") || "";
         if (!/^\w[\w.-]*$/.test(runId) || !TASK_ID.test(taskId)) return send(400, "application/json", '{"error":"bad run or task"}');
+        // An attempt, when given, is a positive integer; without one the log is the current attempt's.
+        const asked = url.searchParams.get("attempt");
+        if (asked !== null && !ATTEMPT.test(asked)) return send(400, "application/json", '{"error":"bad attempt"}');
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return send(404, "application/json", '{"error":"unknown run"}');
         const run = { ...readJson(path.join(dir, "run.json")), dir };
         const task = loadTask(run, taskId);
         if (!task?.attempt) return send(200, "application/json", '{"events":[]}');
-        const attempt = Math.min(Number(url.searchParams.get("attempt") || task.attempt), task.attempt);
+        const attempt = Math.min(Number(asked || task.attempt), task.attempt);
         return send(200, "application/json", JSON.stringify({ events: eventLog(run, task, attempt, 400) }));
+      }
+      if (url.pathname === "/api/brief") {
+        const runId = url.searchParams.get("run") || "";
+        const taskId = url.searchParams.get("task") || "";
+        if (!/^\w[\w.-]*$/.test(runId) || !TASK_ID.test(taskId)) return send(400, "application/json", '{"error":"bad run or task"}');
+        const asked = url.searchParams.get("attempt") || "";
+        if (!ATTEMPT.test(asked)) return send(400, "application/json", '{"error":"bad attempt"}');
+        const dir = path.join(RUNS_DIR, runId);
+        if (!fs.existsSync(path.join(dir, "run.json"))) return send(404, "application/json", '{"error":"unknown run"}');
+        readBrief(dir, taskId, asked).then(
+          (brief) => send(brief.status, "application/json", JSON.stringify(brief.body)),
+          (error) => send(500, "text/plain", String(error?.message || error)),
+        );
+        return;
       }
       if (url.pathname === "/api/transcript") {
         const real = (f) => {

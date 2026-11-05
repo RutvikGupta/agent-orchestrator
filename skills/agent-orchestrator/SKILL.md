@@ -456,8 +456,10 @@ whose tab was opened another way.
 - The dashboard shows one section per launching session, holding all of its runs, and each child
   session: agent, model, why that agent was chosen, state, steps, tokens, session id, and current
   activity. Clicking a session shows its final report and its live event log, which opens at the
-  newest events and follows new output while the reader is at the bottom. The header shows both
-  agents' usage limits. A main session's state comes from `claude agents --json` when Claude Code
+  newest events and follows new output while the reader is at the bottom. For a task, the panel
+  also shows its receipts: its brief, one line per attempt (clicking one shows that attempt's log),
+  each check's saved evidence, and your `verify` runs, `verdict` rounds and acceptance. The header
+  shows both agents' usage limits. A main session's state comes from `claude agents --json` when Claude Code
   reports that session (`stateSource` on the row), and from its transcript otherwise; Codex's app
   server is read only with `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see
   threads another Codex process runs.
