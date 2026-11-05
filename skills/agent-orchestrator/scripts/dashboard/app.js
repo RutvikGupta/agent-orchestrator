@@ -178,7 +178,7 @@ function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.le
   const mark=(s,ok,bad)=>$("span",{class:"state "+(s===ok?"s-completed":s===bad?"s-bad":s==null||s==="not-run"?"s-idle":"s-running")},s||"unknown");
   const check=c=>{const e=c&&typeof c==="object"?c.evidence:null,warn=checkWarning(c);
     return $("span",{class:warn?"check mismatch":"check",title:warn||""},mark(c?.result,"pass","fail"),
-      e?$("span",{class:warn?"evw":"muted"}," · "+evidenceWords(e)+(warn?" ⚠":"")):null," "+(c?.cmd||"(no command)")+(c?.note?" — "+c.note:""))};
+      e&&["pass","fail"].includes(c?.result)?$("span",{class:warn?"evw":"muted"}," · "+evidenceWords(e)+(warn?" ⚠":"")):null," "+(c?.cmd||"(no command)")+(c?.note?" — "+c.note:""))};
   const unproven=r?.checks?.length&&!t.native&&!t.main&&!t.external&&!["running","prepared"].includes(t.state)&&r.checks.some(c=>c&&typeof c==="object"&&!c.evidence);
   const rows=r?.invalid?[["report","invalid orch-result block: "+r.error]]:r?[["outcome",mark(r.outcome,"done","blocked")],
     ["checks",r.checks?.length?[list(r.checks,check),unproven?$("p",{class:"muted note"},"evidence is worked out by `orch.mjs result`"):null]:null],
@@ -376,6 +376,9 @@ const PANEL_FOCUS=[[".att",["n"]],[".bsum",[]],[".linkish",[]],[".close",[]]];
 const REPORT_BLOCK=/^[\t ]*```orch-result[\t ]*\r?\n[\s\S]*?^[\t ]*```[\t ]*(?=\r?$)/gm;
 function shownMessage(t){const m=String(t.finalMessage||"");if(!t.report||t.report.invalid)return m;
   const blocks=[...m.matchAll(REPORT_BLOCK)],last=blocks.at(-1);return last?(m.slice(0,last.index)+m.slice(last.index+last[0].length)).trimEnd():m}
+// An agent's message in the event log, with its orch-result block shortened: the structured report
+// above shows it.
+const saysText=x=>{const m=String(x??"");return m.replace(REPORT_BLOCK,"[orch-result block: see the report above]")};
 // `ev` is null while the row's first log is still loading; it must be the log of the attempt the
 // panel shows (logKey). `keep` holds the scroll position as it is, after a click inside the panel.
 function paint(key,t,ext,ev,keep){
@@ -402,7 +405,7 @@ function paint(key,t,ext,ev,keep){
       ...(m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text)))))]:[]),
     $("h3",{},(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":""):" (loading…)"),
       past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
-    ...rows.map(e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.text))));
+    ...rows.map(e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.kind==="says"?saysText(e.text):e.text))));
   d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;
   if(focus)refocus(d,focus);
 }

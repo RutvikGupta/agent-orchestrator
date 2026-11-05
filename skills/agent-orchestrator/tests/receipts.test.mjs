@@ -288,6 +288,16 @@ test('the panel shows each check with its saved evidence, and marks a pass witho
   }
 });
 
+test('a not-run check shows no evidence, and an event-log message shortens its orch-result block', () => {
+  const { context } = page();
+  const view = context.reportView({ state: 'completed', report: { outcome: 'done', checks: [
+    { cmd: 'npm run bench', result: 'not-run', note: 'too slow', evidence: { ran: false } }] } });
+  assert.deepEqual(classed(view, 'check').map(textOf), ['not-run npm run bench — too slow']);
+  context.sample = 'Done.\n```orch-result\n{"outcome":"done"}\n```\nBye.';
+  const said = vm.runInContext('saysText(sample)', context);
+  assert.equal(said, 'Done.\n[orch-result block: see the report above]\nBye.');
+});
+
 test('the panel lists verifications, review rounds and the acceptance or rejection, and nothing without them', () => {
   const { context } = page();
   const at = '2026-11-05T10:00:00Z';
