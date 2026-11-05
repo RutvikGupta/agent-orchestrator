@@ -61,8 +61,8 @@ export function story(ids) {
           { at: 59, t: "bash", cmd: `${ORCH} agents`, out: "AGENT  VERSION  LOGIN  RELAY  READY\nclaude 2.3.4    yes    yes    yes\ncodex  0.98.0   yes    yes    yes" },
           { at: 58, t: "bash", cmd: `${ORCH} new --repo ~/src/example-shop --name one-page-checkout --goal "Ship the one-page checkout: live cart totals, promo codes and saved addresses"`, out: `run ${checkout}\n  dir:  ~/.local/state/agent-orchestrator/runs/${checkout}\n  repo: ~/src/example-shop\n  base: main @ 4c1e9b07d2aa` },
           { t: "write", file: `~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json` },
-          { at: 57, t: "bash", cmd: `${ORCH} plan ${checkout} ~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json`, out: "plan recorded: 6 tasks (2 depend on others); briefs to write: 6" },
-          { at: 56, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started schema-review → codex gpt-6.1-sol (effort medium, standard tier, read-only)\nwaiting on a brief: address-form, e2e-checkout, promo-codes, tax-rounding, cart-totals" },
+          { at: 57, t: "bash", cmd: `${ORCH} plan ${checkout} ~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json`, out: "plan recorded: 6 tasks (1 depends on others); briefs to write: 6" },
+          { at: 56, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started schema-review → codex gpt-6.1-sol (effort medium, standard tier, read-only)\nwaiting on a brief: address-form, e2e-checkout, tax-rounding, cart-totals\nblocked promo-codes: waits on schema-review (running)" },
           { at: 50, t: "bash", cmd: `${ORCH} start ${checkout} babysit-pr-212 --agent claude --babysit --pr 212 --why "babysits PR #212; Claude costs less than Codex" --brief briefs/babysit-pr-212.md`, out: "started babysit-pr-212 → claude claude-opus-5-5 (effort xhigh, write, babysitter: may commit and push, no sandbox)" },
           { at: 49, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started address-form → claude claude-opus-5-5 (effort xhigh, write, may commit and push, no sandbox)" },
           { at: 47, t: "bash", cmd: `${ORCH} result ${checkout} schema-review`, out: "task schema-review → codex (read-only), attempt 1: completed (exit 0)\n…\nOne breaking change: Cart.total changed from Float! to Money!." },
@@ -73,6 +73,9 @@ export function story(ids) {
           { at: 8, t: "bash", cmd: `${ORCH} wait ${checkout} --timeout 0`, out: "attention: e2e-checkout failed (Codex ran out of room in the model's context window)\nawaiting review: address-form (3m); review, commit, then run `accept`" },
           { at: 5, t: "bash", cmd: `${ORCH} result ${checkout} tax-rounding`, out: "task tax-rounding → codex (write), attempt 1: needs-decision\nNEEDS DECISION: …\n  - Should tax round per line item or once on the order total?" },
           { at: 4, t: "agent", type: "general-purpose", description: "Compare tax rounding rules", background: true, prompt: "Read src/tax, src/orders/receipt.ts and the refunds service. Report which rounding rule each one applies and what changes if checkout rounds per line item.", out: "Async agent launched in the background. You will be notified when it completes." },
+          { at: 3.8, t: "say", text: "e2e-checkout ran before the promo endpoint existed. I'm revising the plan: its retry waits for address-form, cart-totals and promo-codes, refunds follow the tax decision, and release notes come last." },
+          { at: 3.6, t: "write", file: `~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json` },
+          { at: 3.4, t: "bash", cmd: `${ORCH} plan ${checkout} ~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json`, out: "plan recorded: 8 tasks (4 depend on others); briefs to write: 2" },
           { at: 3, t: "say", text: "While the rounding comparison runs, I'm reviewing address-form's diff." },
           { at: 2.5, t: "bash", cmd: `cd ~/.local/state/agent-orchestrator/runs/${checkout}/worktrees/address-form && git diff --stat main`, out: " src/checkout/AddressForm.tsx              |  88 ++++++++------\n src/checkout/CheckoutPage.tsx             |  12 +-\n src/checkout/SavedAddressPicker.test.tsx  | 141 +++++++++++++++++++++\n src/checkout/SavedAddressPicker.tsx       | 104 ++++++++++++++++\n src/checkout/postcode.ts                  |  71 +++++++++--\n src/checkout/useSavedAddresses.ts         |  53 ++++++++\n 6 files changed, 412 insertions(+), 57 deletions(-)" },
           { at: 0.4, t: "read", file: `~/.local/state/agent-orchestrator/runs/${checkout}/worktrees/address-form/src/checkout/SavedAddressPicker.tsx`, pending: true, out: "     1\texport function SavedAddressPicker({ addresses, onPick }) {" },
@@ -173,9 +176,33 @@ export function story(ids) {
       {
         key: "checkout", session: "checkout", name: "one-page-checkout", createdMin: 58,
         goal: "Ship the one-page checkout: live cart totals, promo codes and saved addresses",
+        // The plan as revised after e2e-checkout failed, recorded with `orch.mjs plan`: the tasks
+        // below with their `type`, `owns` and `dependsOn` (the babysitter is started by hand, outside
+        // it), then the tasks not started yet, which the graph draws dashed.
+        plan: {
+          acceptance: [
+            "The cart shows subtotal, discounts, tax and shipping in integer cents, and updates as lines change",
+            "Promo codes are applied on the server, with stacking rules, expiry dates and per-customer limits",
+            "Customers can pick a saved address, and postcodes are validated per country",
+            "The mobile app's imports from src/cart and src/api keep working",
+            "Playwright covers the cart, promo code, address and payment steps",
+          ],
+          planned: [
+            {
+              id: "refund-rounding", agent: "codex", tier: "standard", owns: ["src/refunds/"], dependsOn: ["tax-rounding"],
+              why: "a small change in src/refunds once the rounding rule is settled; the standard tier fits",
+              goal: "Round tax in refunds by the rule tax-rounding settles on, so a refund matches its receipt to the cent.",
+            },
+            {
+              id: "release-notes", agent: "claude", owns: ["CHANGELOG.md", "docs/releases/"], dependsOn: ["e2e-checkout"],
+              why: "short prose for customers and the mobile team; Claude writes it well",
+              goal: "Write the one-page checkout's release notes, and the mobile team's note on the new Cart.totalMoney field.",
+            },
+          ],
+        },
         tasks: [
           {
-            id: "schema-review", agent: "codex", tier: "standard", readOnly: true, startedMin: 56, after: "result",
+            id: "schema-review", type: "review", agent: "codex", tier: "standard", readOnly: true, startedMin: 56, after: "result",
             why: "reviews a schema diff read-only; Codex runs git diff and the schema checker itself",
             goal: "Review the checkout schema changes in src/api/schema.graphql for breaking changes to the mobile app.",
             usage: { base: 22000, growLo: 1200, growHi: 3600, outLo: 90, outHi: 600 },
@@ -213,7 +240,7 @@ export function story(ids) {
             end: { status: "running" },
           },
           {
-            id: "address-form", agent: "claude", worktree: true, startedMin: 49,
+            id: "address-form", agent: "claude", worktree: true, startedMin: 49, owns: ["src/checkout/", "e2e/checkout-address.spec.ts"],
             why: "UI and hook work across five files with design choices left open; Claude at xhigh is strongest for it",
             goal: "Add a saved-address picker and form to the checkout page, with postcode validation per country.",
             usage: { base: 24000, growLo: 1400, growHi: 4800 },
@@ -246,6 +273,7 @@ export function story(ids) {
           },
           {
             id: "e2e-checkout", agent: "codex", tier: "standard", worktree: true, startedMin: 41,
+            owns: ["e2e/checkout.spec.ts", "e2e/fixtures/"], dependsOn: ["address-form", "cart-totals", "promo-codes"],
             why: "a well-specified test suite in two or three files with a clear done check; the standard tier fits",
             goal: "Add Playwright end-to-end tests for the one-page checkout: cart, promo code, address and payment steps.",
             usage: { base: 90000, growLo: 5000, growHi: 21000, outLo: 200, outHi: 1500 },
@@ -267,6 +295,7 @@ export function story(ids) {
           },
           {
             id: "promo-codes", agent: "codex", tier: "complex", worktree: true, startedMin: 39,
+            owns: ["src/promo/", "src/api/promo.ts"], dependsOn: ["schema-review"],
             why: "changes pricing rules across modules and an interface checkout calls; mistakes are costly, so the complex tier",
             goal: "Apply promo codes on the server with explicit stacking rules, expiry dates and per-customer limits.",
             usage: { base: 30000, growLo: 2500, growHi: 7000, outLo: 150, outHi: 1300 },
@@ -293,7 +322,7 @@ export function story(ids) {
             end: { status: "running" },
           },
           {
-            id: "tax-rounding", agent: "codex", tier: "standard", worktree: true, startedMin: 33,
+            id: "tax-rounding", agent: "codex", tier: "standard", worktree: true, startedMin: 33, owns: ["src/tax/"],
             why: "a small, well-bounded change to src/tax with tests; the standard tier fits",
             goal: "Round sales tax the same way in the cart, the order and the receipt.",
             usage: { base: 21000, growLo: 1500, growHi: 4200, outLo: 100, outHi: 900 },
@@ -312,7 +341,7 @@ export function story(ids) {
               finalMessage: "NEEDS DECISION: Should tax round per line item or once on the order total?\n- Per line item matches the receipts the stores print today; 37 of 1,204 October orders would change by €0.01 at checkout.\n- On the order total matches what refunds compute, so refunds reconcile exactly.\n- Recommendation: per line item, and change refunds to sum the rounded lines.\n\nI stopped before changing src/tax/round.ts, because receipts and refunds call it. src/tax/round.cases.test.ts pins both rules; I'll keep the cases for the rule you choose.\n\n```orch-result\n{\"outcome\":\"blocked\",\"changed\":[\"src/tax/round.cases.test.ts\"],\"checks\":[{\"cmd\":\"npm test -- src/tax\",\"result\":\"fail\",\"note\":\"2 cases fail until a rounding rule is chosen\"},{\"cmd\":\"node scripts/tax-diff.mjs --orders fixtures/orders-2026-10.json\",\"result\":\"pass\",\"note\":\"37 of 1,204 orders differ by a cent\"}],\"decisions\":[{\"question\":\"Should tax round per line item or once on the order total?\",\"options\":[\"per line item\",\"on the order total\"],\"recommendation\":\"per line item, and change refunds to sum the rounded lines\"}],\"unresolved\":[]}\n```" },
           },
           {
-            id: "cart-totals", agent: "claude", worktree: true, startedMin: 27, rateLimits: true,
+            id: "cart-totals", agent: "claude", worktree: true, startedMin: 27, rateLimits: true, owns: ["src/cart/"],
             why: "core money logic with subtle rounding; Claude at xhigh is strongest for hard implementation work",
             goal: "Live cart totals: recompute subtotal, discounts, tax and shipping in integer cents as the cart changes.",
             usage: { base: 25000, growLo: 1400, growHi: 4600 },

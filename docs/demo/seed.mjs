@@ -6,8 +6,8 @@
 // It builds a fictional project's runs (example-org/example-shop, story.mjs) in a new temporary
 // folder, with AGENT_ORCH_HOME, CLAUDE_CONFIG_DIR and CODEX_HOME pointing inside it, then starts
 // this repository's dashboard on that state and prints its address with the send key. The real CLI
-// does the work (`new`, `worktree`, `start`, `result`, `accept`, `reply`, the dashboard's own send
-// endpoint), with a scripted relay (relay.mjs) in place of the agents. Files are written directly
+// does the work (`new`, `plan`, `worktree`, `start`, `result`, `accept`, `reply`, the dashboard's own
+// send endpoint), with a scripted relay (relay.mjs) in place of the agents. Files are written directly
 // only for what the CLI cannot produce: the hosts' own transcripts (Claude Code, Codex), and aged
 // timestamps, so the board shows sessions that have run for a while.
 //
@@ -122,7 +122,6 @@ const dirs = {
   skills: path.join(root, "skills"),
   bin: path.join(root, "bin"),
   tmp: path.join(root, "tmp"),
-  briefs: path.join(root, "briefs"),
   scripts: path.join(root, "scripts"),
   recipes: path.join(root, "recipes"),
 };
@@ -412,6 +411,16 @@ function relayScript(t, sessionId) {
   };
 }
 
+// A run's plan, from its spec: every task but the babysitter, which is started by hand for an
+// existing pull request, then the tasks not started yet. Briefs are relative to the run directory.
+function planOf(r) {
+  const entry = (t) => ({
+    id: t.id, goal: t.goal, type: t.type || "implement", owns: t.owns || [], dependsOn: t.dependsOn || [],
+    agent: t.agent, tier: t.agent === "codex" ? t.tier : null, why: t.why, readOnly: Boolean(t.readOnly), brief: `briefs/${t.id}.md`,
+  });
+  return { goal: r.goal, acceptance: r.plan.acceptance, tasks: [...r.tasks.filter((t) => !t.babysit), ...r.plan.planned].map(entry) };
+}
+
 const seeded = { runs: {}, tasks: [] }; // run key -> { id, dir, spec }; every started task
 
 function seedRuns(spec, sessions) {
@@ -428,10 +437,17 @@ function seedRuns(spec, sessions) {
     const session = r.session && sessions[r.session];
     writeJson(path.join(dir, "run.json"), { ...record, id, createdAt: iso(r.createdMin), ...(session ? { orchestrator: { agent: session.agent, sessionId: session.sessionId } } : {}) });
     seeded.runs[r.key] = { id, dir, spec: r, env: parent };
+    // The plan goes through the CLI's own validation, from the draft the orchestrator wrote.
+    if (r.plan) {
+      const draft = path.join(dir, "plan-draft.json");
+      writeJson(draft, planOf(r));
+      orch(["plan", id, draft], { env: parent });
+    }
 
     for (const t of r.tasks) {
       if (t.worktree || t.branch) orch(["worktree", id, t.id, ...(t.branch ? ["--branch", t.branch] : [])], { env: parent });
-      const briefFile = path.join(dirs.briefs, `${id}-${t.id}.md`);
+      const briefFile = path.join(dir, "briefs", `${t.id}.md`);
+      fs.mkdirSync(path.dirname(briefFile), { recursive: true });
       fs.writeFileSync(briefFile, brief(r, t));
       const sessionId = t.agent === "claude" ? randomUUID() : uuid7(at(t.startedMin));
       const scriptFile = path.join(dirs.scripts, `${id}-${t.id}.json`);

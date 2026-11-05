@@ -22,6 +22,8 @@ What it shows:
 - A Claude Code session running "one-page checkout": tasks on Claude and on Codex at both tiers,
   in write and read-only mode, running, awaiting review, needing a decision, failed, and closed. It
   also holds a pull-request babysitter, a nested run under `promo-codes`, and two native sub-agents.
+  Its plan gives the graph view two dependency chains, the babysitter on its own, and two planned
+  tasks that have not started.
 - A Codex session whose run has an accepted task, a closed research task and a running benchmark.
 - A Claude Code session with no run, shown through its sub-agents.
 - The attention lane, an inbox with a read message, the agent's reply and a queued message (on
