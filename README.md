@@ -123,12 +123,6 @@ docs/                   screenshots and the demo board used to make them
 install.sh              links the skills and hooks into place
 ```
 
-## Development
-
-- Run the tests: `cd skills/agent-orchestrator && env -u AGENT_ORCH_DEPTH -u AGENT_ORCH_RUN -u AGENT_ORCH_TASK node --test tests/`.
-- Commit and push every change to `main` (merge branches with `--no-ff`, never force-push). Read `AGENTS.md` first.
-- Keep the repository free of employer or customer names and of secrets.
-
 ## Credits
 
 The delegate skills come from the MIT-licensed
