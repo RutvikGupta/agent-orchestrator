@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/block-pattern-kill.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$AGENT_ORCH_TASK\" ] && node $HOME/.agents/skills/agent-orchestrator/scripts/hooks/orch-inbox.mjs || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

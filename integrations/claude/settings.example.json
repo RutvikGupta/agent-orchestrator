@@ -1,0 +1,67 @@
+{
+  "env": {
+    "AGENT_ORCH_CODEX_APP_SERVER": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/block-pattern-kill.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$AGENT_ORCH_TASK\" ] && node $HOME/.agents/skills/agent-orchestrator/scripts/hooks/orch-inbox.mjs || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-dashboard.sh",
+            "timeout": 60,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-skill-session.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$AGENT_ORCH_TASK\" ] && node $HOME/.agents/skills/agent-orchestrator/scripts/hooks/orch-inbox.mjs PostToolUseFailure || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

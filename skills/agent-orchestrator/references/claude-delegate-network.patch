@@ -1,0 +1,162 @@
+--- a/scripts/relay.mjs
++++ b/scripts/relay.mjs
+@@ -71,6 +71,25 @@
+  *   --read-only                       Plan mode with Read, Glob, and Grep only.
+  *   --dangerously-skip-permissions    Opt into Claude's bypassPermissions mode.
+  *                                     Mutually exclusive with --read-only.
++ *   --allow-domain <host>             Let sandboxed shell commands reach <host>
++ *                                     (repeatable; "*.example.com" allowed, and "*"
++ *                                     allows every host). The shell sandbox denies
++ *                                     every host not listed.
++ *   --allow-go-tls                    macOS: let Go tools (gh, gcloud, terraform)
++ *                                     verify TLS certificates in the sandbox
++ *                                     (sandbox.enableWeakerNetworkIsolation).
++ *   --deny <rule>                     Extra permission deny rule, such as
++ *                                     "Bash(gh pr merge *)" (repeatable).
++ *   --allow-write <dir>               Let sandboxed shell commands write <dir>, an
++ *                                     absolute path outside --cd (repeatable), such
++ *                                     as a worktree's shared git directory.
++ *   --allow-publish                   Drop the git commit and git push deny rules,
++ *                                     for a session that must land its own work.
++ *                                     Add --deny rules for anything still off limits.
++ *   --no-sandbox                      Run shell commands outside Claude's shell
++ *                                     sandbox, with full user access, and pre-approve
++ *                                     the shell tool; deny rules still apply. Not
++ *                                     with --read-only (no shell there).
+  *   -h, --help                        Show this help.
+  *
+  * Claude is always launched with:
+@@ -276,6 +295,12 @@
+     session: null,
+     readOnly: false,
+     dangerouslySkipPermissions: false,
++    allowDomains: [],
++    allowGoTls: false,
++    extraDeny: [],
++    allowWrite: [],
++    allowPublish: false,
++    noSandbox: false,
+   };
+ 
+   for (let i = 0; i < argv.length; i += 1) {
+@@ -310,6 +335,12 @@
+         opts.dangerouslySkipPermissions = true;
+         flagged.add("dangerouslySkipPermissions");
+         break;
++      case "--allow-domain": opts.allowDomains.push(next()); break;
++      case "--allow-go-tls": opts.allowGoTls = true; break;
++      case "--deny": opts.extraDeny.push(next()); break;
++      case "--allow-write": opts.allowWrite.push(resolve(next())); break;
++      case "--allow-publish": opts.allowPublish = true; break;
++      case "--no-sandbox": opts.noSandbox = true; break;
+       default:
+         fail(`unknown option: ${arg}`);
+     }
+@@ -321,7 +352,16 @@
+   }
+   if (opts.readOnly && opts.dangerouslySkipPermissions) {
+     fail("--read-only and --dangerously-skip-permissions are mutually exclusive");
++  }
++  if (opts.readOnly && (opts.allowDomains.length || opts.allowGoTls || opts.allowWrite.length || opts.allowPublish || opts.noSandbox)) {
++    fail("--allow-domain, --allow-go-tls, --allow-write, --allow-publish, and --no-sandbox configure the shell; --read-only has no shell");
+   }
++  for (const host of opts.allowDomains) {
++    if (host !== "*" && !/^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host)) fail(`--allow-domain "${host}" is not a host name or "*"`);
++  }
++  for (const rule of opts.extraDeny) {
++    if (!/^[A-Za-z][A-Za-z0-9_]*(\(.+\))?$/.test(rule)) fail(`--deny "${rule}" is not a permission rule such as Bash(gh pr merge *)`);
++  }
+   if (opts.timeout !== null && parseDuration(opts.timeout) === null) {
+     fail(`--timeout "${opts.timeout}" is invalid or too long; use a positive h/m/s duration no longer than about 24 days`);
+   }
+@@ -510,7 +550,7 @@
+ 
+ function profileSettings(opts) {
+   const shell = shellTool();
+-  const shellSandboxEnabled = !opts.readOnly && process.platform !== "win32";
++  const shellSandboxEnabled = !opts.readOnly && process.platform !== "win32" && !opts.noSandbox;
+   return {
+     disableClaudeAiConnectors: true,
+     ...(process.platform === "win32"
+@@ -526,14 +566,19 @@
+             // position so reads mentioning it remain allowed. Keep
+             // `claude-delegate` as a substring rule to stop recursive relay
+             // invocation; any command containing it is denied.
+-            `${shell}(git commit *)`,
+-            `${shell}(git * commit *)`,
+-            `${shell}(git * commit)`,
+-            `${shell}(git push *)`,
+-            `${shell}(git * push *)`,
+-            `${shell}(git * push)`,
++            ...(opts.allowPublish
++              ? []
++              : [
++                  `${shell}(git commit *)`,
++                  `${shell}(git * commit *)`,
++                  `${shell}(git * commit)`,
++                  `${shell}(git push *)`,
++                  `${shell}(git * push *)`,
++                  `${shell}(git * push)`,
++                ]),
+             `${shell}(claude *)`,
+             `${shell}(*claude-delegate*)`,
++            ...opts.extraDeny,
+           ],
+     },
+     ...(shellSandboxEnabled
+@@ -546,10 +591,17 @@
+             excludedCommands: [],
+             filesystem: {
+               disabled: false,
++              ...(opts.allowWrite.length ? { allowWrite: [...new Set(opts.allowWrite)] } : {}),
+             },
++            // This block replaces any sandbox settings from the user or project, so a
++            // network allowlist must be set here to take effect.
++            ...(opts.allowGoTls ? { enableWeakerNetworkIsolation: true } : {}),
++            ...(opts.allowDomains.length ? { network: { allowedDomains: [...new Set(opts.allowDomains)] } } : {}),
+           },
+         }
+-      : {}),
++      : opts.noSandbox
++        ? { sandbox: { enabled: false } } // explicit, so user or project settings cannot re-enable it
++        : {}),
+   };
+ }
+ 
+@@ -600,8 +652,9 @@
+     argv.push("--permission-mode", "acceptEdits");
+     // Supported platforms auto-approve only commands that remain inside
+     // Claude's sandbox. Native Windows has no shell sandbox, so approving its
+-    // selected shell is the explicit tradeoff that keeps print mode headless.
+-    if (process.platform === "win32") argv.push("--allowedTools", "PowerShell");
++    // selected shell is the explicit tradeoff that keeps print mode headless;
++    // --no-sandbox makes the same tradeoff on every platform.
++    if (process.platform === "win32" || opts.noSandbox) argv.push("--allowedTools", shellTool());
+   }
+ 
+   // The selected permission profile is passed on every invocation, including
+@@ -951,15 +1004,21 @@
+       ...(opts.autocompact === null ? {} : { autocompact: opts.autocompact }),
+       timeout: opts.timeout,
+       readOnly: opts.readOnly,
++      allowedDomains: opts.allowDomains,
++      allowGoTls: opts.allowGoTls,
++      allowWrite: opts.allowWrite,
++      allowPublish: opts.allowPublish,
+       resumed: Boolean(opts.resumeLast || opts.session),
+       resumeLast: opts.resumeLast,
+       permissionMode: state.permissionMode || selectedPermissionMode(opts),
+       toolSurface: toolSurface(opts).split(","),
+       shellSandbox: opts.readOnly
+         ? "not-applicable"
+-        : process.platform === "win32"
+-          ? "unsupported-on-native-windows"
+-          : "strict",
++        : opts.noSandbox
++          ? "off"
++          : process.platform === "win32"
++            ? "unsupported-on-native-windows"
++            : "strict",
+       dangerouslySkipPermissions: opts.dangerouslySkipPermissions,
+       claudeVersion: version,
+       sessionId: state.sessionId,
