@@ -111,18 +111,6 @@ node ~/.agents/skills/agent-orchestrator/scripts/orch.mjs agents --refresh
 node ~/.agents/skills/agent-orchestrator/scripts/orch.mjs dashboard --detach --open
 ```
 
-## Layout
-
-```text
-skills/
-  agent-orchestrator/   the skill: SKILL.md, CLI (scripts/orch.mjs), dashboard, tests
-  claude-delegate/      relay that runs one Claude Code session
-  codex-delegate/       relay that runs one Codex session
-integrations/           hooks, browser agent, MCP server definition, example settings
-docs/                   screenshots and the demo board used to make them
-install.sh              links the skills and hooks into place
-```
-
 ## Credits
 
 The delegate skills come from the MIT-licensed
