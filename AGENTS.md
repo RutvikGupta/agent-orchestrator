@@ -17,6 +17,7 @@ symlinks into this checkout (`~/agent-orchestrator`), so a change here reaches e
   Claude Code and Codex.
 - `docs/`: screenshots and the demo board used to make them.
 - `install.sh`: links the skills and hooks into place.
+- `tools/check-public.sh`: the pre-push check for internal names.
 
 ## Rules
 
@@ -24,6 +25,9 @@ symlinks into this checkout (`~/agent-orchestrator`), so a change here reaches e
   into `main` with `--no-ff`, and push `main` to `origin` right after each commit or merge. Do not
   leave a change uncommitted or unpushed at the end of a task. Never force-push.
 - Use the repository's own identity for commits (set in `.git/config`); never a work email.
+- **The repository is public.** Before every push, run `bash tools/check-public.sh` and push only after it
+  passes. It checks the tracked files and the unpushed commit messages against a private denylist kept
+  outside the repository. Never commit that denylist.
 - Keep the repository free of anything internal to an employer or customer: no company, customer
   or internal system names, hostnames, IP addresses, repository URLs, emails or Slack IDs. Use
   neutral examples such as `example-org/example-repo`.
