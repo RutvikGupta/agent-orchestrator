@@ -156,8 +156,10 @@ test('dashboard does not reuse a foreign server that answers on its port', async
   await new Promise((resolve) => foreign.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => foreign.close(resolve)));
   const port = foreign.address().port;
-  t.after(() => f.command(['dashboard', '--stop']).catch(() => {}));
   const started = await f.json(['dashboard', '--detach', '--port', String(port)]);
+  // Stop it by PID: the fixture's cleanup may remove the state root, and with it the record that
+  // `dashboard --stop` reads, before this hook runs.
+  t.after(() => { try { process.kill(started.pid, 'SIGTERM'); } catch {} });
   assert.equal(started.reused, undefined);
   assert.notEqual(new URL(started.url).port, String(port));
   assert.equal((await fetch(new URL('api/health', started.url))).status, 200);
