@@ -1,3 +1,4 @@
+<!-- tier: Codex standard (only Codex has live web search); Claude light or standard for lookups and summaries; a test or gate run that only reports: Claude light (write mode, a brief that forbids edits) or Codex standard; complex only when the question needs deep judgment -->
 {{role}}
 
 ## Question

@@ -51,6 +51,25 @@ export function briefProblem(runDir, entry) {
   return count ? `${count} unfilled <fill in: ...> marker${count === 1 ? "" : "s"}` : null;
 }
 
+// "light, standard or complex": a tier list for messages.
+const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names.at(-1)}` : names.join(""));
+
+// What is wrong with a planned task's tier, or null. Every task names one, since `start` refuses a
+// new task without it. A pull-request babysitter is the exception: it always runs `complex`, so its
+// tier may be left out. `dispatch` uses this too, for a plan recorded before tiers were required.
+export function tierProblem(task, policy = loadPolicy()) {
+  if (task?.agent !== "claude" && task?.agent !== "codex") return null; // the agent is reported on its own
+  const label = task.agent === "claude" ? "Claude" : "Codex";
+  const names = Object.keys(policy[task.agent].tiers);
+  if (task.agent === "claude" && task.type === "babysit") {
+    return task.tier != null && task.tier !== CLAUDE_DEFAULT_TIER ? `a babysit task runs the ${CLAUDE_DEFAULT_TIER} tier` : null;
+  }
+  if (names.includes(task.tier)) return null;
+  return task.tier == null || task.tier === ""
+    ? `a ${label} task needs a tier (${orList(names)}): the lightest that does the task as well as the top one`
+    : `tier ${JSON.stringify(task.tier)} is not a ${label} tier (${orList(names)})`;
+}
+
 // Check a parsed plan. Returns the problems with its fields and graph (errors), and the pairs of
 // tasks that may run at the same time but share an owned path or a resource (conflicts). `held`
 // maps each running task to the plan entry it started with: until it finishes, it keeps the paths
@@ -67,8 +86,6 @@ export function validatePlan(plan, held = new Map()) {
     return { errors, conflicts: [] };
   }
   const policy = loadPolicy();
-  const tiers = Object.keys(policy.codex.tiers);
-  const claudeTiers = Object.keys(policy.claude.tiers);
   const ids = new Set();
   let graphReadable = true; // every task is an object whose dependsOn, if any, is a list of ids
   plan.tasks.forEach((task, i) => {
@@ -85,10 +102,10 @@ export function validatePlan(plan, held = new Map()) {
     if (!filled(task.goal)) bad("goal is empty");
     if (task.type !== undefined && !TASK_TYPES.includes(task.type)) bad(`type must be one of ${TASK_TYPES.join(", ")}`);
     if (!AGENTS[task.agent]) bad(`agent must be ${Object.keys(AGENTS).join(" or ")}`);
-    else if (task.agent === "codex" && !tiers.includes(task.tier)) bad(`a Codex task needs a tier (${tiers.join(" or ")})`);
-    else if (task.agent === "claude" && task.tier != null && !claudeTiers.includes(task.tier)) {
-      bad(`a Claude task's tier is one of ${claudeTiers.join(", ")}, or null for ${CLAUDE_DEFAULT_TIER}`);
-    } else if (task.type === "babysit" && task.tier != null && task.tier !== CLAUDE_DEFAULT_TIER) bad(`a babysit task runs the ${CLAUDE_DEFAULT_TIER} tier`);
+    else {
+      const problem = tierProblem(task, policy);
+      if (problem) bad(problem);
+    }
     if (!filled(task.why)) bad("why is empty: one line on why your assessment picked this agent");
     for (const key of LIST_FIELDS) if (task[key] !== undefined && !stringList(task[key])) bad(`${key} must be a list of non-empty strings`);
     if (task.readOnly !== undefined && typeof task.readOnly !== "boolean") bad("readOnly must be true or false");

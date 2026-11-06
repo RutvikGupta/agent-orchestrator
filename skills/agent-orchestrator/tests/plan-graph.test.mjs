@@ -17,7 +17,7 @@ function brief(run, id, config = {}) {
 function entry(run, id, extra = {}, config = {}) {
   return {
     id, goal: `Build ${id}`, type: 'implement', owns: [`src/${id}/`], uses: [], produces: [], resources: [],
-    dependsOn: [], agent: 'claude', tier: null, why: 'Fixture assessment', readOnly: false,
+    dependsOn: [], agent: 'claude', tier: 'complex', why: 'Fixture assessment', readOnly: false,
     brief: brief(run, id, config), ...extra,
   };
 }
@@ -84,7 +84,7 @@ test('/api/state draws each run of a section as a plan graph', async (t) => {
     state: 'completed', phase: 'awaiting-review', attempts: 1, attention: 'awaiting-review', key: rowKey(run, 'api'), delegated: 2,
   });
   assert.deepEqual(nodes.ui, {
-    id: 'ui', title: 'Build ui', type: 'implement', agent: 'claude', tier: null, planned: true, ready: false,
+    id: 'ui', title: 'Build ui', type: 'implement', agent: 'claude', tier: 'complex', planned: true, ready: false,
     state: null, phase: null, attempts: 0, attention: null, key: null, delegated: 0,
   });
   assert.deepEqual([nodes.docs.planned, nodes.docs.ready, nodes.docs.agent, nodes.docs.tier, nodes.docs.type], [true, true, 'codex', 'standard', 'research']);

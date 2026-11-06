@@ -10,7 +10,7 @@ import { inboxNote } from "../inbox.mjs";
 import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, modelFor, tierOrder } from "../policy.mjs";
+import { CLAUDE_DEFAULT_TIER, ModelRefused, modelFor, tierOrder } from "../policy.mjs";
 import { describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
@@ -88,10 +88,20 @@ export function startTask(args, extra = {}) {
   const prev = loadTask(run, id) || { id, createdAt: new Date().toISOString() };
   const sameAgent = Boolean(prev.attempt && prev.agent === key);
   const babysit = Boolean(args.babysit || (sameAgent && prev.babysit));
-  // A Claude follow-up keeps the earlier attempt's tier unless --tier is given; Claude tasks
-  // recorded before Claude had tiers ran `complex`. A babysitter always runs `complex`.
+  // A new task needs --tier (modelFor refuses it without). A Claude follow-up keeps the earlier
+  // attempt's tier unless --tier is given; Claude tasks recorded before Claude had tiers ran
+  // `complex`. A babysitter always runs `complex`, and --babysit implies it.
   const prevTier = sameAgent ? prev.tier || (key === "claude" ? CLAUDE_DEFAULT_TIER : null) : null;
-  const { tier, model, effort } = modelFor(key, args, babysit ? null : prevTier);
+  const tierArgs = babysit && key === "claude" ? { ...args, tier: args.tier || CLAUDE_DEFAULT_TIER } : args;
+  let choice;
+  try {
+    choice = modelFor(key, tierArgs, babysit ? null : prevTier);
+  } catch (error) {
+    // A refused start, not an exit: `dispatch` goes on with its other tasks.
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
+  const { tier, model, effort } = choice;
   if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
@@ -116,10 +126,11 @@ export function startTask(args, extra = {}) {
   }
   // --sandbox carries over to follow-up attempts by the same agent.
   const sandbox = Boolean(args.sandbox || (sameAgent && prev.sandboxRequested));
+  const confine = Boolean(args.confine || (sameAgent && prev.confine));
   // A write task publishes (commits, pushes, writes to GitHub) unless the user said to review its
   // work first: --no-publish, which carries over to follow-up attempts.
   const noPublish = Boolean(args["no-publish"] || (prev.attempt && prev.noPublish));
-  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, babysit, publish: !noPublish });
+  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish });
   const why =
     String(args.why ?? "").replace(/\s+/g, " ").trim() ||
     (keepsChoice ? prev.why : null) ||
@@ -201,6 +212,7 @@ export function startTask(args, extra = {}) {
     offline,
     babysit,
     sandboxRequested: sandbox,
+    confine,
     noPublish,
     sandboxed: net.sandboxed,
     pr,

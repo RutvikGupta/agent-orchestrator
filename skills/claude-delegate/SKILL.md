@@ -131,6 +131,13 @@ The normal profile is deliberately explicit:
 
 - `acceptEdits` permission mode.
 - Built-in tools restricted to Read, Glob, Grep, Edit, Write, and the platform shell.
+- With `--no-sandbox`, file tools can read and write home and the agent's `$TMPDIR`. Read-only
+  tasks can read those folders. `--confine` keeps file tools in the working directory instead.
+  Sandboxed write tasks retain their existing file confinement. Read, Edit and Write always deny
+  SSH, AWS, gcloud and Claude credentials, Docker login config, netrc, git credentials, Codex auth
+  and the orchestrator dashboard token, plus GitHub/Graphite/Copilot config, boto, kube, fly, GPG,
+  npmrc and `.claude.json`. The orchestrator also denies resolved credential paths when their
+  directories move. An unsandboxed shell can still read these files.
 - On macOS, Linux, and WSL2, Claude's shell sandbox is enabled with startup failure on missing
   dependencies and no unsandboxed retry. Commands that stay sandboxed are auto-approved so ordinary
   gates can run headlessly. The sandbox governs shell processes and their children only; merged
@@ -139,8 +146,8 @@ The normal profile is deliberately explicit:
   skills, commands, and Claude's Agent tool are unavailable to the child. Project `CLAUDE.md`, hooks,
   normal authentication, session persistence, and other local settings still load.
 - String rules deny common direct shell forms of `git commit`, `git push`, and nested `claude`, plus
-  any command containing `claude-delegate`. Aliases, scripts, and wrappers can bypass them, so they
-  are only a speed bump; the brief's no-commit instruction and orchestrator review remain the boundary.
+  node commands invoking either delegate's `relay.mjs`. Aliases, scripts, and wrappers can bypass
+  them, so they are only a speed bump; the brief's no-commit instruction and orchestrator review remain the boundary.
 
 Native Windows does not support Claude's shell sandbox. The relay restricts the tool surface and
 pre-approves PowerShell so the run remains non-interactive, but that shell is not OS-isolated. Native

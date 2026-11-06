@@ -1,3 +1,4 @@
+<!-- tier: complex, always: --babysit implies it, so no --tier is needed -->
 {{include ../babysit-brief.md}}
 
 ## House rules

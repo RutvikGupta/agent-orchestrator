@@ -28,7 +28,7 @@ function skills(f) {
 }
 function plan(run, tasks) {
   writeJson(path.join(run.dir, 'plan.json'), { goal: 'Strict parsing', acceptance: [], tasks: tasks.map((t) => ({
-    goal: GOAL, type: 'implement', owns: OWNS, uses: [], produces: [], resources: [], dependsOn: [], agent: 'claude', tier: null,
+    goal: GOAL, type: 'implement', owns: OWNS, uses: [], produces: [], resources: [], dependsOn: [], agent: 'claude', tier: 'standard',
     why: 'fixture', readOnly: false, brief: `briefs/${t.id}.md`, ...t })) });
 }
 async function draft(f, run, id, extra = [], env = {}) {

@@ -1,3 +1,4 @@
+<!-- tier: standard for a small diff, on the agent that did not write it; complex for a large or risky diff -->
 {{role}}
 
 ## Goal

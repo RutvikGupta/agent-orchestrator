@@ -1,3 +1,4 @@
+<!-- tier: by the criteria: light or standard to reproduce a bug or test a narrow hypothesis; complex when the cause is unknown across modules or a wrong fix would be costly or subtle -->
 {{role}}
 
 ## Goal

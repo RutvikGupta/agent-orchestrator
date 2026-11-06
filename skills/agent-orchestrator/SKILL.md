@@ -91,10 +91,13 @@ Host-specific rules, which matter for every later step:
   (step 5), then call it again. Ignore the delegate skills' advice to wait with `codex-background`,
   which does not run on macOS: `orch.mjs` owns waiting for this skill.
 - **Inside a delegated agent.** If `AGENT_ORCH_DEPTH` is set, another agent delegated this task
-  to you. Hand slow side work to other agents by default and keep working while it runs: test
-  suites, bringing up test environments, long pipeline or replay runs, and reviews. The
-  "Delegating further" section of your brief says how. Split the change itself only where its parts
-  are independent. If you delegate, keep every constraint of your own brief in your
+  to you. Delegate instead of doing parts one after another. When the task has two or more
+  independent parts, split it and start one agent per part. Hand slow side work (test suites, gates,
+  builds, deploys, long or replay runs, reviews) to an agent and keep working while it runs. Pick the
+  lightest tier for each piece ("Choose the agent and model"), and in every brief you write for work
+  that has such parts, tell that agent to delegate the same way. You are notified when an agent you
+  started finishes. The "Delegating further" section of your brief says how. Do a few-minute or
+  tightly coupled edit yourself. If you delegate, keep every constraint of your own brief in your
   agents' briefs, review and integrate their results, close them before you finish, and cover their
   work in your report. Handle what your agents send you first, as in "Decisions agents hand back",
   and pass a decision beyond your brief up at once with `$ORCH ask` instead of asking the user.
@@ -133,7 +136,7 @@ lines:
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex`, or `null` for `complex`; Codex `standard` or `complex`), and your one-line assessment |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard` or `complex`; Codex `standard` or `complex`; required, except that a babysit task may leave it out), and your one-line assessment |
 | `brief` | The brief file, relative to the run directory |
 
 Rules for the plan:
@@ -156,17 +159,18 @@ Rules for the plan:
 
 You choose the agent and its tier for every task by assessing that task. No table or default rule
 makes the choice for you, and you must not prefer an agent just because it is the CLI you are
-running in. `start` refuses a dispatch without `--why`, a one-line statement of your assessment (the
-plan's `why`) that names the task's complexity behind the tier, and shows that reason in `status`,
-`result`, and the dashboard. A follow-up attempt that keeps the same agent and tier may omit
-`--why`, and reuses the earlier reason.
+running in. `start` refuses a new task without `--tier` and without `--why`. `--why` is a one-line
+statement of your assessment (the plan's `why`) that names the deciding factor behind the tier, and
+`status`, `result` and the dashboard show it. A follow-up attempt that keeps the same agent and tier
+may omit `--why`; a Claude follow-up may also omit `--tier`. Each keeps its earlier value.
 
 Each tier's model is fixed by `policy.json` (`$ORCH agents` lists them), and `start` enforces it. Do
 not pass `--model` or `--effort`.
 
 - **Claude**: `--tier light` runs `claude-haiku-5-5`, `standard` runs `claude-sonnet-5-5`, and
-  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. Without `--tier` a task runs `complex`, and a
-  follow-up attempt keeps its earlier tier. A babysitter always runs `complex`.
+  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. A new task needs `--tier`; a follow-up
+  attempt keeps its earlier tier (a task recorded before tiers existed resumes at `complex`). A
+  babysitter always runs `complex`, and `--babysit` implies it.
 - **Codex** needs `--tier`. `standard` runs `gpt-6.1-sol` at effort `medium`. `complex` runs
   `gpt-6-astra` at effort `high`.
 
@@ -175,8 +179,8 @@ Assess each task with these questions, then weigh the answers together:
 1. **Did the user choose?** Then keep that choice ("Keep the user's choices" above).
 2. **What must the agent be able to do?** These are hard limits of the relays on this machine:
    - Run commands without being allowed to edit (reproduce a bug, run tests or scripts and report,
-     read `git log`): only Codex. Its read-only sandbox still runs commands; Claude's read-only mode
-     has no shell.
+     read `git log`): Codex read-only. Its sandbox still runs commands; Claude's read-only mode has
+     no shell, so a Claude run-and-report task is a write-mode task whose brief forbids edits.
    - Look things up on the live web: only Codex, with `-- --web-search live`. The Claude relay
      removes Claude's web tools.
    - Review a diff on its own: Codex can run `git diff`. A Claude reviewer needs the diff pasted
@@ -186,8 +190,8 @@ Assess each task with these questions, then weigh the answers together:
    - Babysitting a pull request: only Claude, with `--babysit` (step 8).
 3. **Does it check another agent's work?** Give a review, verification, or second opinion to the
    agent that did not write the work, so that a different model looks at it.
-4. **How hard and how risky is it?** Use the tier criteria below. Claude `complex` is the strongest
-   choice for hard implementation work. On Codex, hard work needs the `complex` tier.
+4. **How hard and how risky is it?** Take the lightest tier that will do the task as well as the
+   top one (below), not a bigger model for comfort.
 5. **What has this run already shown?** If an agent failed this task twice, or a similar task, give
    the next attempt to the other agent; rework that is converging stays in the same session.
    `$ORCH stats [<run>] [--since DUR]` (default: the last 30 days) adds evidence from earlier runs:
@@ -196,6 +200,20 @@ Assess each task with these questions, then weigh the answers together:
 
 When the answers do not favor Codex, choose Claude. Re-assess after each failure and whenever you
 change the plan, not only at the start.
+
+**Prefer the lightest tier.** Most delegated work does not need the top model. These fit `light` or
+`standard`:
+
+- running tests or gates and reporting the result; reproducing a bug;
+- lookups, inventories and summaries; mechanical edits (renames, pattern refactors, lint or type fixes);
+- well-specified small changes with clear done criteria (1 to 5 files), docs and config edits, and
+  tests for existing behavior;
+- reviews of small diffs.
+
+Take Claude `light` when there is nothing to judge: the brief says what to run, find or change, and
+the result is facts or a mechanical edit. Take `standard` (Codex's lower tier too) when the agent
+makes small judgment calls, such as writing a change or test from a clear spec or reviewing a small
+diff. Reviews and verification of another agent's work run at `standard` or above.
 
 For either agent, choose `complex` if **any** of these is true:
 
@@ -209,22 +227,23 @@ For either agent, choose `complex` if **any** of these is true:
 - It reviews a large or high-risk diff, or babysits a pull request.
 - A lighter-tier attempt at this task already failed review or its gates.
 
-`standard` fits: a well-specified change to 1 to 5 files with clear done criteria; mechanical work
-(renames, pattern refactors, tests for existing behavior, lint or type fixes, docs or config
-edits); read-only inventories, searches, test runs, or documentation lookups; and reviews of small
-diffs. Claude `light` fits only mechanical and lookup work with nothing to judge: renames,
-formatting, simple searches and summaries, and gathering facts from files the brief names.
+When unsure between two tiers, take the lower one if a failure would be caught by the gates or
+review and is cheap to redo. Take the higher one only when a mistake would be costly or subtle.
 
-A lighter tier must not lower the quality of the result. On Claude, choose `light` or `standard`
-only when you judge that model will do the task as well as Opus would; when unsure, choose
-`complex`. On Codex, when unsure, start at `standard` unless a failure would be costly. Reviews and
-verification of another agent's work run at `standard` or above, and at `complex` for a large or
-risky diff. Redo a lighter-tier result that fails review or its gates one tier up, never at the
-same tier (see Rework in step 6); `start` prints the next tier when you do not.
+**Quality guard.** A lighter tier must not lower the quality of the result, and the workflow checks
+it: every task has gates (step 3), and you review every result (step 6). A lighter-tier result that
+fails review or its gates is redone one tier up, never retried at the same tier (Rework in step 6);
+`start` prints the next tier when you try.
 
-Write the deciding factors in the plan's `why`, for example `"standard: a specified 2-file fix with
-tests"` or `"runs the test suite read-only; Claude's read-only mode has no shell"`. Per-agent
-behavior (sandboxes, read-only limits, flags) is in [references/agents.md](references/agents.md).
+**Pass the habit on.** When the work you brief has two or more independent parts or slow side work
+(test suites, gates, builds, deploys, long runs, reviews), say in that brief that the agent should
+delegate them, each at the lightest tier that fits. The "Delegating further" note that `start`
+appends tells it how.
+
+Write the deciding factor in the plan's `why`, for example `"light: runs the test suite and reports
+failures; nothing to judge"`, `"standard: a specified 2-file fix with tests"` or `"complex: changes the
+lock protocol used by three modules"`. Per-agent behavior (sandboxes, read-only limits, flags) is in
+[references/agents.md](references/agents.md).
 
 #### Usage limits
 
@@ -348,12 +367,14 @@ $ORCH dispatch <run> [--max N] [--dry-run]
   task, babysitters, and tasks that need relay flags, such as research with live web search.
 
 ```bash
-$ORCH start <run> <task-id> --agent claude [--tier light|standard|complex] --why "<assessment>" \
+$ORCH start <run> <task-id> --agent claude --tier light|standard|complex --why "<assessment>" \
   --brief <brief-file> [--read-only] [--timeout 2h]
 $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
 
+- `--tier` is required for a new task. Exceptions: a Claude follow-up attempt keeps its earlier tier
+  (a task recorded before tiers existed resumes at `complex`), and `--babysit` implies `complex`.
 - `start` runs the agent's `<agent>-delegate/scripts/relay.mjs` as a detached background process
   and returns at once. It looks for the relay in the folder that holds this skill, then
   `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills`; `AGENT_ORCH_SKILLS_DIR` replaces
@@ -363,8 +384,13 @@ $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" -
   choice too): it may commit, push without force, open pull requests, and write to GitHub, as a
   `--babysit` task does (step 8). Force pushes, admin merges, secrets and creating or deleting
   repositories stay denied. Pass `--no-publish` only when the user asks to review a task's work
-  before it lands; that denies commits, pushes and `gh` writes again. `--sandbox` keeps writes
-  inside the working directory, `--offline` also blocks the network, and `--read-only` maps to
+  before it lands; that denies commits, pushes and `gh` writes again. Claude file tools can read
+  and write the home directory and the agent's `$TMPDIR` by default; read-only tasks can read them
+  even with `--sandbox` or `--offline`. Read, Edit and Write deny credential stores, including
+  configured Claude/Codex directories and the resolved dashboard token. An unsandboxed shell can
+  still read those files. `--confine` keeps file tools in the
+  working directory. `--sandbox` and `--offline` retain write-task file confinement; the latter also blocks
+  the network. `--read-only` maps to
   Codex's `read-only` sandbox and Claude's `plan` mode ([references/agents.md](references/agents.md)).
 - Other flags after `--` go to the relay unchanged; `relay.mjs --help` lists them. Common ones:
   Codex `--network-access`, `--web-search live`; Claude `--max-turns 60`, `--max-budget-usd 10`.
