@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
 import { CHILD_FIRST, INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, fromAgent, inboxWake, markRead, markSteered, readInbox, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
-import { describe, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
+import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration } from "../util.mjs";
 
@@ -74,8 +74,10 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   if (!text && !images.length) throw new SendError("the message is empty", 400);
   const kinds = images.map(imageKind);
   if (kinds.some((kind) => !kind)) throw new SendError("attachments must be PNG, JPEG, GIF or WebP images", 400);
-  // A message reaches only a running agent; a finished one gets it in the brief that resumes it.
-  if (!relayAlive(task.pid, task.startedAt)) {
+  // A message reaches only a running agent; a finished one gets it in the brief that resumes it. A
+  // parked babysitter counts as running: its watcher resumes it with the message (park.mjs).
+  const parked = !relayAlive(task.pid, task.startedAt) && isParked(run, task);
+  if (!relayAlive(task.pid, task.startedAt) && !parked) {
     const row = describe(run, task);
     if (row.state === "prepared") throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
     throw new SendError(
@@ -101,9 +103,11 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
       ...paths.map((file) => `- ${file}`)].join("\n")
     : text;
   // The plan is made before the message is written, so the agent learns its command was stopped.
-  const plan = steer ? planSteer(task) : null;
+  const plan = steer && !parked ? planSteer(task) : null;
   const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, kind, about });
-  const { delivery: how, reaches } = messageReach(task);
+  const { delivery: how, reaches } = parked
+    ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
+    : messageReach(task);
   let steered = null;
   if (plan?.stop) steered = stopCommand(plan).length ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" };
   else if (plan) steered = { waiting: plan.wait };

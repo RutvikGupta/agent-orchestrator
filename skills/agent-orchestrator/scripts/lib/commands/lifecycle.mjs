@@ -190,7 +190,7 @@ export function cmdDispatch(args) {
   const dryRun = Boolean(args["dry-run"]);
   const rows = listTasks(run);
   const progress = planProgress(plan, phaseMap(run, rows, plan));
-  const running = rows.filter((r) => r.state === "running").length;
+  const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
   const limit = parallelAt(DEPTH);
   const slots = Math.max(0, Math.min(limit - running, args.max === undefined ? Infinity : Number(args.max)));
   if (progress.ready.length && slots && !dryRun && DEPTH >= MAX_NEST_DEPTH) {
@@ -590,6 +590,13 @@ function recoverRun(run, rows) {
       items: phase("running"),
       show: (r) => `${r.id} (${r.agent}, ${r.elapsed}${r.quietMs > QUIET_AFTER_MS ? `, quiet ${formatElapsed(r.quietMs)}` : ""})`,
       next: () => `${CLI} wait ${run.id} --timeout 0 (in the background)`,
+    },
+    {
+      key: "parked",
+      label: "parked babysitters (a watcher resumes each on its next pull-request event or message)",
+      items: phase("parked"),
+      show: (r) => `${r.id} (${r.parked?.waitsFor || "waits for its pull request"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
+      next: (items) => (items.some((r) => !["alive", "starting"].includes(r.parked?.watcher)) ? `${CLI} status ${run.id} (starts a watcher that is not running)` : null),
     },
     {
       key: "needs-decision",

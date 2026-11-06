@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { INBOX_FILE, QUESTIONS_FILE, inboxWake } from "../inbox.mjs";
 import { acceptedNow, lifecycleHints } from "../lifecycle.mjs";
+import { reviveParked } from "../park.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
@@ -92,7 +93,10 @@ export async function cmdWait(args, resumed = null) {
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
   const deadline = resumed ? (resumed.deadline ?? Infinity) : timeout === 0 ? Infinity : Date.now() + timeout;
   const snapshot = () => {
-    const rows = listTasks(run);
+    let rows = listTasks(run);
+    // A parked babysitter whose watcher died (after a reboot, say) gets a new one; an adopted
+    // relay changes the rows, so read them again.
+    if (reviveParked(run, rows).length) rows = listTasks(run);
     // The relay can write its result and exit between describe()'s result read and process
     // check. Health then sees that file; reread this inconsistent snapshot before waking wait.
     return rows.some((t) => t.state === "aborted" && !t.result && t.health === "ok") ? listTasks(run) : rows;

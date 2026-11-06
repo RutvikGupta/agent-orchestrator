@@ -9,8 +9,8 @@ dispatch it with `start <run> babysit-<pr> --agent claude --babysit --pr <n> --c
 ---
 
 You are the babysitter for pull request <PR URL> (branch `<branch>` into `<base>`), working in
-this directory. Your job ends when the pull request leaves `OPEN`. Do not end your session before
-that unless one of the stop rules below applies.
+this directory. Your job ends when the pull request leaves `OPEN`. Until then, end your turn only
+to park (see "Park") or when one of the stop rules below applies.
 
 ## Rules
 
@@ -49,12 +49,13 @@ fix is waiting:
 
 ## Loop
 
-1. Run `node <orch-path> pr-watch <PR number or URL> --repo . --timeout 9m`, with the Bash tool's
-   timeout set to 600000. Exit 3 only means nothing new happened: run it again. Exit 0 prints what
-   needs you. Exit 4 means this checkout has commits that the pull request lacks: push them before
-   watching. Exit 6 means a message arrived: Claude receives it as context when the command
-   returns; otherwise read it with `node <orch-path> inbox <run> <task> --ack`. Act on it, then
-   watch again.
+1. Run `node <orch-path> pr-watch <PR number or URL> --repo . --timeout 4m`, with the Bash tool's
+   timeout set to 600000.
+   - Exit 0 prints what needs you: handle it (step 2).
+   - Exit 3 means nothing new happened: park (see "Park").
+   - Exit 4 means this checkout has commits that the pull request lacks: push them, then watch again.
+   - Exit 6 means a message arrived: Claude receives it as context when the command returns;
+     otherwise read it with `node <orch-path> inbox <run> <task> --ack`. Act on it, then watch again.
 2. Handle every item it printed:
    - **Failed check:** read its log, fix the cause, run the gates, commit, and push. If the failure
      is unrelated to this change (a flaky test or an infrastructure fault), re-run it once with
@@ -66,11 +67,37 @@ fix is waiting:
      stop rules and "Decisions" at the end of this brief).
    - **Conflict with the base:** merge the base branch in (do not rebase), resolve the conflict,
      run the gates, and push.
-   - **Every check passed, and only a human review is missing:** keep watching.
+   - **Every check passed, and only a human review is missing:** nothing to do; watch again, and
+     park when the watch finds nothing new.
 3. After every push, confirm that the pull request's head is your local head:
    `gh pr view <n> --json headRefOid` against `git rev-parse HEAD`. Reply to a reviewer only after
    that matches.
 4. Go back to step 1.
+
+## Park
+
+When a watch finds nothing new (exit 3), park instead of watching again: end your turn, so that
+your session stops holding memory. A small watcher then checks the pull request every minute and
+your inbox every few seconds. On the first new check result, review, comment, conflict, change of
+state, unpushed commit or message, it resumes this same session with a short brief that says what
+it saw. Then go back to step 1: the watch prints those items again and records them as seen.
+
+Park only when all of these hold:
+
+- the start checks passed;
+- nothing is unpushed (`git status --short --branch`), so no fix waits to be published;
+- every item a watch printed, and every message, is handled.
+
+To park, make this line the first line of your final message, neither quoted nor indented, then
+add a line or two on the state:
+
+```
+PARKED: PR #<n> waits for <what, for example "a human review" or "the checks of abc1234">
+```
+
+End it with the `orch-result` block, with `"outcome": "parked"`: a message whose outcome says
+otherwise does not park. A parked message never holds `NEEDS DECISION:`. A question you asked
+with `ask` can wait while you are parked: its answer arrives as a message, which wakes you.
 
 ## Stop when
 
@@ -92,7 +119,8 @@ fix is waiting:
 
 ## Final message
 
-When you stop on a decision, start with the `NEEDS DECISION:` block. Then list each commit you
+When you park, start with the `PARKED:` line (see "Park"). When you stop on a decision, start with
+the `NEEDS DECISION:` block. Then list each commit you
 pushed with its purpose, each reply you posted, the final state of the pull request and its checks,
 and everything left for the user. For a blocker, give the exact command
 and error, and the local commits that still need publishing.
@@ -100,14 +128,14 @@ and error, and the local commits that still need publishing.
 Finish the message with this block, filled in:
 
 ```orch-result
-{"outcome": "done | partial | blocked",
+{"outcome": "done | partial | blocked | parked",
  "changed": ["path", "..."],
  "checks": [{"cmd": "...", "result": "pass | fail | not-run", "note": "..."}],
  "decisions": [{"question": "...", "options": ["..."], "recommendation": "..."}],
  "unresolved": ["..."]}
 ```
 
-`outcome` is `done` when the pull request left `OPEN`, and `blocked` when you stopped on a blocker
-or a decision. `changed` lists the files your commits changed. `checks` lists the gates you ran
+`outcome` is `done` when the pull request left `OPEN`, `parked` when you park, and `blocked` when
+you stopped on a blocker or a decision. `changed` lists the files your commits changed. `checks` lists the gates you ran
 before your last push. `decisions` lists the questions you hand back. `unresolved` lists what is
 left for the user.

@@ -689,9 +689,17 @@ the user's limits than Codex. Do not babysit with Codex, whether that is you, a 
    commit hooks, and SSH work as they do for the user. Force pushes, admin merges, closing the pull
    request, and repository settings stay denied. Its timeout defaults to `24h`, and it waits with
    `orch.mjs pr-watch`, which spends no tokens while waiting and exits 0 when a PR needs attention,
-   3 on timeout, 4 for unpushed commits, or 6 for a new unread message to this agent: read it,
-   then watch again. Its checkout must have
-   the branch checked out: prefer the run's worktree for it, where no other task may then write.
+   3 when nothing is new, 4 for unpushed commits, or 6 for a new unread message to this agent.
+   Its checkout must have the branch checked out: prefer the run's worktree for it, where no other
+   task may then write.
+   - **Parking.** When a watch finds nothing new, the babysitter parks: it ends its turn with a
+     final message whose first line is `PARKED: PR #<n> waits for <what>`, and its agent exits. A
+     watcher of about 3 MB (a shell loop) then checks the pull request every minute and the task's
+     inbox every few seconds, and resumes the same session, at the same tier, on the first event.
+     `status` and the dashboard show the task as parked, with what it waits for; `wait` treats it
+     as running; it takes no parallel slot but keeps its checkout. A message you `send` wakes it.
+     `stop` and `close` end the watcher. `status`, `start` and the dashboard restart a watcher that
+     died, for example after a reboot.
 3. Do not stay active only to watch it.
    - In Claude Code, run `$ORCH wait <run> babysit-<pr> --timeout 0` in the background.
    - In Codex, do not loop on `wait`, because every wake-up spends Codex usage. Tell the user that
