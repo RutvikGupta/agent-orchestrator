@@ -1,6 +1,8 @@
 // The dashboard's local web server: serves the page in scripts/dashboard/ and its JSON API, and
 // pushes a "change" event to open tabs as soon as an agent writes.
 
+import { heavyStatus } from "./heavy.mjs";
+import { CLI_PATH } from "./config.mjs";
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -166,6 +168,17 @@ export async function serveDashboard({ host, port, args }) {
   let lastPage = null;
   let address = null;
   const tabs = new Set(); // presence streams of the open tabs
+  // Tabs and change events can request state many times a second. Share one lane
+  // snapshot between endpoints so process inspection runs at most every five seconds.
+  let cachedHeavy = null, heavyCheckedAt = 0;
+  const dashboardHeavy = () => {
+    const now = Date.now();
+    if (cachedHeavy === null || now - heavyCheckedAt >= 5000) {
+      cachedHeavy = heavyStatus();
+      heavyCheckedAt = now;
+    }
+    return cachedHeavy;
+  };
   // Tell open tabs to refresh as soon as an agent writes, not on their next poll: the skill's own
   // run state, and the Claude and Codex files of sessions on the board (or newly created files,
   // such as a new sub-agent's). Bursts are combined into at most one notice every 500 ms.
@@ -316,9 +329,10 @@ export async function serveDashboard({ host, port, args }) {
         });
         return;
       }
+      if (url.pathname === "/api/heavy") return reply(200, dashboardHeavy());
       if (url.pathname === "/api/state") {
         lastPage = Date.now();
-        return send(200, "application/json", JSON.stringify(dashboardState()));
+        return send(200, "application/json", JSON.stringify(dashboardState()), { "x-orch-heavy": JSON.stringify(dashboardHeavy()) });
       }
       if (url.pathname === "/api/usage") {
         const view = (l) => {
@@ -424,6 +438,20 @@ export async function serveDashboard({ host, port, args }) {
     setInterval(checkAttention, escalationCheckMs());
   } catch (error) {
     process.stderr.write(`orch: cannot track escalations: ${error.message}\n`);
+  }
+
+  // Reclaim in a child so lsof and the termination grace do not block HTTP requests.
+  // Do not wait for other sessions: the reclaim command checks each workspace's owners.
+  let reclaimer = null;
+  if (process.env.AGENT_ORCH_RECLAIM !== "off") {
+    const timer = setInterval(() => {
+      if (reclaimer) return;
+      reclaimer = spawn(process.execPath, [CLI_PATH, "reclaim"], { stdio: ["ignore", "inherit", "inherit"] });
+      reclaimer.on("error", (error) => { process.stderr.write(`orch: reclaim failed: ${error.message}\n`); });
+      reclaimer.on("close", () => { reclaimer = null; });
+    }, 5 * 60000);
+    timer.unref();
+    process.on("exit", () => { clearInterval(timer); reclaimer?.kill("SIGTERM"); });
   }
 
   // In the background, exit once nothing is running and no browser tab has polled for a while.

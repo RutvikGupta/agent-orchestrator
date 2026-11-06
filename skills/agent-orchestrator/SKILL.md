@@ -101,6 +101,40 @@ Host-specific rules, which matter for every later step:
   Runs at the second level allow 6 tasks at once, the third 4, and the fourth 2; agents below the
   fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
 
+## Memory and tests
+
+- Wrap Docker-based test suites, builds and container runs in `$ORCH heavy -- <command>`. Use
+  `--label "focused tests"` before `--` to name the work. Only heavy commands wait; this lane
+  never limits agents or sub-agents. Waiters enter in arrival order. A new message returns exit 6.
+- Prefer the narrowest test target that proves the change. Leave a full suite to one agent.
+  Reuse a running container instead of starting one per command when the project allows it.
+- Stop containers and daemons you started when done. `$ORCH reclaim --dry-run` lists forgotten
+  build daemons; `$ORCH reclaim` stops ones with no live workspace owner or running task.
+  Task cleanup only covers its managed worktree under the run folder; it never reclaims a main
+  checkout or an external worktree. The dashboard checks for orphans every five minutes.
+  `AGENT_ORCH_RECLAIM=off` disables it.
+- Reclaim recognizes `pantsd [/workspace]`. It skips Bazel and shared Gradle daemons: their
+  command lines do not reliably identify a workspace for this cleanup.
+- An empty heavy lane always starts a command immediately. While another command runs, admission
+  needs available memory above `AGENT_ORCH_HEAVY_MIN_FREE` (default `2.5GB`, or set bytes, MB or
+  GiB) and macOS pressure below critical (level 4). Warning pressure does not block admission.
+  macOS uses the kernel's available-memory percentage, falling back to free and speculative pages.
+  Linux uses `MemAvailable`, or free memory plus reclaimable slab when that field is absent;
+  inactive memory never counts. Admissions wait 20 seconds apart (`AGENT_ORCH_HEAVY_RAMP_MS`, in
+  milliseconds) only while the previously admitted command still runs, so its memory use can
+  settle. No agent count is capped.
+- Nested heavy calls run immediately. Suspended or dead holders do not block the queue. Process
+  start times prevent reused PIDs from retaining a slot. An unwritable lane or an unreadable process
+  start time prints one note and runs the command directly. Steering signals the outer heavy wrapper only; it forwards once,
+  waits for command cleanup, and never force-kills it. Commands keep the caller’s stdio but cannot
+  open `/dev/tty`. Dashboard lane counts refresh at most every five seconds.
+- Put optional local agent environment values in `~/.config/agent-orchestrator/agent-env.json`
+  (`$XDG_CONFIG_HOME/agent-orchestrator/agent-env.json` when set). It is a flat JSON object, for
+  example `{"PANTS_PANTSD_MAX_MEMORY_USAGE": "1GiB"}` to limit a Pants daemon. `start` merges it
+  over the inherited environment. Keys starting with `AGENT_ORCH_`, plus `XDG_STATE_HOME`, `HOME`,
+  `PATH` and `NODE_OPTIONS`, are ignored with a warning. Bad JSON warns once and does not block
+  the task. Keep this file local, outside the repository.
+
 ## Recover first
 
 After a restart, a context compaction, or any doubt about what is running, first run
