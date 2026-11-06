@@ -11,7 +11,8 @@ import { externalAgents, externalRow } from "./external.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { planPath, planProgress, readPlan } from "./plan.mjs";
-import { listRuns, listTasks, loadTask, relayAlive } from "./runs.mjs";
+import { reviveParked } from "./park.mjs";
+import { isParked, listRuns, listTasks, loadTask, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
 
@@ -56,6 +57,8 @@ export function attentionOf(t, closed, now = Date.now()) {
     const reason = [firstLine(q.text, 140), q.options?.length ? `options: ${q.options.join(" | ")}` : null, q.recommend ? `recommends ${q.recommend}` : null, q.open > 1 ? `+${q.open - 1} more` : null];
     return { ...item("question", "question", reason.filter(Boolean).join(" · ")), sinceMs: Date.parse(q.time) || t.lastActiveMs || 0 };
   }
+  // A parked babysitter (park.mjs) waits for its pull request: nothing to review, decide or fix.
+  if (t.phase === "parked") return null;
   if (t.state === "needs-decision" || t.phase === "needs-decision") {
     const question = [t.decisions?.[0], t.report?.decisions?.[0]].map((d) => (typeof d === "string" ? d : d?.question)).find(Boolean);
     return item("needs-decision", "needs decision", firstLine(question, 140) || "read its final message");
@@ -106,7 +109,7 @@ function runStamp(run, ownsMain) {
   return latest;
 }
 
-// Whether any task of the run still has its relay process, from the task records alone.
+// Whether any task of the run still has its relay process, or is parked, from the task records alone.
 function anyRelayAlive(run) {
   const dir = path.join(run.dir, "tasks");
   let ids = [];
@@ -117,7 +120,7 @@ function anyRelayAlive(run) {
   }
   return ids.some((id) => {
     const task = loadTask(run, id);
-    return Boolean(task?.pid) && relayAlive(task.pid, task.startedAt);
+    return Boolean(task?.pid) && (relayAlive(task.pid, task.startedAt) || isParked(run, task));
   });
 }
 
@@ -415,6 +418,7 @@ function buildDashboardState() {
       continue;
     }
     const described = listTasks(run);
+    reviveParked(run, described); // a parked task whose watcher is not running gets a new one
     const main = mainRow(run);
     const natives = listNative(run, described, runs);
     if (boardIdle(run, [...(main ? [main] : []), ...described, ...natives], ownsMain, idleMs)) {
@@ -496,6 +500,7 @@ function buildDashboardState() {
   return shown.sort((a, b) => b.running - a.running || (a.running ? b.startedMs - a.startedMs : b.activeMs - a.activeMs) || b.startedMs - a.startedMs);
 }
 
+// A parked babysitter holds no agent, so it does not keep a detached dashboard open.
 export function anyTaskRunning() {
-  return dashboardState().some((run) => run.tasks.some((t) => !t.main && t.state === "running"));
+  return dashboardState().some((run) => run.tasks.some((t) => !t.main && t.state === "running" && t.phase !== "parked"));
 }

@@ -11,7 +11,9 @@
 // (parent-notice.json) that makes its notice go out exactly once and records what happened to it.
 // A later attempt that starts first never cancels an earlier attempt's notice. A top-level run's
 // parent is the user's own session, which has no inbox and whose `wait` already wakes, so `start`
-// starts no watcher there.
+// starts no watcher there, except beside a pull-request babysitter: an attempt that ends parked sends
+// no notice (it still runs, as far as its parent can tell), and its watcher starts the park watcher
+// that resumes it (park.mjs).
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -20,7 +22,8 @@ import { fileURLToPath } from "node:url";
 import { decisionsIn } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
 import { firstLine } from "./format.mjs";
-import { attemptAgent, describe, loadTask, taskDir } from "./runs.mjs";
+import { spawnParkWatcher } from "./park.mjs";
+import { attemptAgent, describe, loadTask, parkedSignal, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -166,7 +169,21 @@ export function sendFinishNotice(runDir, id, attempt, { pid = null, started = nu
   }
   const parent = attemptParent(run, task, attempt);
   try {
-    if (!parent) record.skipped = "a top-level run: the user's own session is the parent";
+    // Whether this attempt parked comes from its own final message, even when a later attempt has
+    // started since; only a park that is still the task's current one gets a watcher.
+    const own = readJson(path.join(taskDir(run, id), `attempt-${attempt}`, "result.json"));
+    const parked = Boolean((task.babysit || task.plan?.type === "babysit") && own?.status === "completed" && parkedSignal(own.finalMessage));
+    if (parked) {
+      const current = attempt === task.attempt && (!pid || pid === task.pid) && describe(run, task).phase === "parked";
+      const watcher = current ? spawnParkWatcher(run, task, { by: "park" }) : null;
+      Object.assign(record, {
+        parked: true,
+        watcher: watcher?.pid ?? null,
+        skipped: current
+          ? "the babysitter parked: it still runs as far as its parent can tell, and its watcher resumes it on the next event"
+          : "the babysitter parked this attempt, and a later attempt has started or its park has ended since",
+      });
+    } else if (!parent) record.skipped = "a top-level run: the user's own session is the parent";
     else {
       const row = endedRow(run, task, attempt, pid);
       const parentRun = runById(parent.run);

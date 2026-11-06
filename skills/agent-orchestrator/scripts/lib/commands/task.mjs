@@ -5,7 +5,8 @@ import path from "node:path";
 import { compact, formatElapsed, shortText } from "../format.mjs";
 import { verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
-import { describe, listTasks, loadRun, loadTask, relayAlive, saveTask, validTask, waitForExit } from "../runs.mjs";
+import { endPark } from "../park.mjs";
+import { describe, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -69,7 +70,7 @@ export function cmdResult(args) {
   const r = d.result;
   const session = d.session;
   const lines = [
-    `task ${id} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
+    `task ${id} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
     `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,
@@ -103,8 +104,25 @@ export function cmdLog(args) {
 export function cmdStop(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
-  const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  let task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  // A parked babysitter has no relay. Mark it stopped first, so that a resume that has not started
+  // its relay yet starts nothing and one that has keeps the stop; then end its park, stopping its
+  // watcher and any relay a resume started.
+  if (isParked(run, task)) {
+    saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString() });
+    const parked = endPark(run, task, "stop");
+    parked?.ended?.();
+    const latest = loadTask(run, id) || task;
+    if (latest.attempt === task.attempt || !relayAlive(latest.pid)) {
+      const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
+      process.stdout.write(`stopped parked ${id}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
+      return;
+    }
+    task = latest; // a resume saved its attempt first: stop that attempt too
+  }
   if (!relayAlive(task.pid)) die(`task ${id} is not running`);
+  // Recorded on the task, whatever its attempt: a babysitter stopped as it ends parked never parks.
+  if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString() });
   try {
     process.kill(-task.pid, "SIGTERM"); // detached → the relay leads its own process group
   } catch {
@@ -132,6 +150,19 @@ export function cmdClose(args) {
 // verdict adds its own). Returns what happened, in words.
 export function closeTask(run, task, extra = {}) {
   let note = "closed";
+  const now = new Date().toISOString();
+  // A parked babysitter has no relay. Mark it closed first, so that a resume that has not started
+  // its relay yet starts nothing and one that has keeps the close; then end its park, stopping its
+  // watcher and any relay a resume started.
+  if (isParked(run, task)) {
+    saveTask(run, { ...(loadTask(run, task.id) || task), ...extra, closedAt: now });
+    const parked = endPark(run, task, "close");
+    parked?.ended?.();
+    if (parked?.ended) note = `stopped its park watcher${parked.stopped.length ? ` (pid ${parked.stopped.join(", ")})` : ""} and closed`;
+    else if (parked?.busy) note = `closed, though \`${parked.busy}\` was resuming it${parked.relayStopped ? `; stopped the relay it had started (pid ${parked.relayStopped})` : ""}`;
+    else if (parked?.error) note = `closed, though ending its park failed: ${parked.error}`;
+    task = loadTask(run, task.id) || task; // a resume may have saved its attempt first: stopped below
+  }
   if (relayAlive(task.pid)) {
     try {
       process.kill(-task.pid, "SIGTERM");
@@ -143,10 +174,9 @@ export function closeTask(run, task, extra = {}) {
   // Closing a task that handed back a decision means the orchestrator dealt with it without
   // resuming the task, so the decision shows as resolved instead of still waiting.
   const row = describe(run, task);
-  const now = new Date().toISOString();
   const decision = row.state === "needs-decision"
     ? { decisionResolvedAt: now, decisionResolvedAttempt: row.attempt, decisionNote: "closed by the orchestrator without resuming the task" }
     : {};
-  saveTask(run, { ...task, ...decision, ...extra, closedAt: now });
+  saveTask(run, { ...(loadTask(run, task.id) || task), ...decision, ...extra, closedAt: now });
   return `${note}${row.state === "needs-decision" ? "; its decision is marked resolved" : ""}`;
 }

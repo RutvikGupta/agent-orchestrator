@@ -28,7 +28,8 @@ function parseReport(message) {
     const value = JSON.parse(last.trim());
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("orch-result must contain a JSON object");
     return {
-      outcome: ["done", "partial", "blocked"].includes(value.outcome) ? value.outcome : null,
+      // `parked`: a babysitter that ended its turn to wait for its pull request (park.mjs).
+      outcome: ["done", "partial", "blocked", "parked"].includes(value.outcome) ? value.outcome : null,
       ...Object.fromEntries(["changed", "checks", "decisions", "unresolved"].map((key) => [key, Array.isArray(value[key]) ? value[key] : []])),
     };
   } catch (error) {
@@ -274,7 +275,7 @@ function health(task, row) {
 // failures, firstMs, lastMs, firstIndex }, or null. A finished task is never stuck. The file is
 // named as describe() names it (runs.mjs, attemptDirs), so its summary is the one just updated.
 function stuck(run, task, row) {
-  if (row.state !== "running" || !task.attempt || !run.dir) return null;
+  if (row.state !== "running" || row.parked || !task.attempt || !run.dir) return null;
   const file = path.join(run.dir, "tasks", task.id, `attempt-${task.attempt}`, "events.jsonl");
   return stuckOf(task.attemptAgents?.[task.attempt] || task.agent, file, task.cd);
 }

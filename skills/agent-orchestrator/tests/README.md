@@ -29,7 +29,9 @@ process. All other run/task bookkeeping is produced by CLI commands.
 `fixtures/relay.mjs` is copied into each fake delegate skill. A brief can contain
 `<!-- fake-relay {"status":"failed","error":"Usage limit reached"} -->`.
 Supported controls are `status`, `finalMessage`, `delayMs` (capped at 30 seconds),
-`error`, `extraEvents`, `touchedFiles`, `readOnlyViolation`, and `hold`. The fake accepts the
+`error`, `extraEvents`, `touchedFiles`, `readOnlyViolation`, and `hold`. A brief without that
+comment, such as the one a parked babysitter's watcher writes, takes its controls from the
+`FAKE_RELAY_CONFIG` environment variable (the same JSON). The fake accepts the
 real relay arguments, records its invocation, emits agent-specific JSONL events,
 and writes `result.json` and `final.txt`. SIGTERM writes a stopped result.
 

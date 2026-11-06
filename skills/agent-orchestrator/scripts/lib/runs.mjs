@@ -10,7 +10,7 @@ import { attemptReasonOf, lifecycleFields } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
-import { firstLine, formatElapsed } from "./format.mjs";
+import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { modelLabel } from "./policy.mjs";
 import { die, readJson, writeJson } from "./util.mjs";
 
@@ -149,17 +149,199 @@ function attemptDirs(run, task) {
   return dirs;
 }
 
-// The outcome word of a final message's last orch-result block (done, partial or blocked), and
-// whether it hands back decisions; report.mjs parses the current attempt's report in full.
+// The outcome word of a final message's last orch-result block (done, partial, blocked or parked),
+// whether it hands back decisions, and whether the message has such a block at all (`present`, also
+// for one that does not parse); report.mjs parses the current attempt's report in full.
 function reportOutcome(message) {
   let last;
   for (const block of String(message || "").matchAll(/^[\t ]*```orch-result[\t ]*\r?\n([\s\S]*?)^[\t ]*```[\t ]*(?=\r?$)/gm)) last = block[1];
+  if (last === undefined) return { present: false, outcome: null, decisions: false };
   try {
-    const value = last === undefined ? null : JSON.parse(last.trim());
-    return { outcome: ["done", "partial", "blocked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
+    const value = JSON.parse(last.trim());
+    return { present: true, outcome: ["done", "partial", "blocked", "parked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
   } catch {
-    return { outcome: null, decisions: false };
+    return { present: true, outcome: null, decisions: false };
   }
+}
+
+// Parking (park.mjs). A pull-request babysitter that has nothing left to do ends its turn with a
+// final message whose first line starts with `PARKED:` (and an orch-result outcome `parked`). Its
+// relay and agent exit, and a small watcher resumes the same session on the next event. Until then
+// describe() reports the task as running, in phase `parked`, so `wait` keeps waiting for it. Each
+// parked attempt's folder holds the park's files: park-watcher-<k>.json, one per watcher started
+// (the highest k is the current one); park-check.json, the latest check; and park-claim-<k>.json,
+// the claims that end the park (a resume, `stop` or `close`), each created exclusively with the
+// next k, so exactly one claimant wins, and recording its owner's PID and start time.
+export const PARK_CHECK_FILE = "park-check.json";
+const PARK_WATCHER_RE = /^park-watcher-(\d+)\.json$/;
+const PARK_CLAIM_RE = /^park-claim-(\d+)\.json$/;
+export const parkWatcherFile = (dir, generation) => path.join(dir, `park-watcher-${generation}.json`);
+export const parkClaimFile = (dir, generation) => path.join(dir, `park-claim-${generation}.json`);
+const PARKED_RE = /^PARKED:\s*(.*?)\s*$/;
+const WATCHER_GRACE_MS = 15000;
+const CLAIM_GRACE_MS = 60000; // a claim that names no owner counts as live this long
+
+// What a final message says the babysitter waits for ("PR #42 waits for a human review"), or null
+// when it does not park. Its first line must start with `PARKED:` itself, neither quoted nor
+// indented. When it has an orch-result block, that block's outcome must be `parked` too: a message
+// whose two signals disagree does not park. A message that hands back a decision does not park.
+export function parkedSignal(message) {
+  const text = String(message || "");
+  const first = text.split("\n").find((line) => line.trim());
+  const m = first ? PARKED_RE.exec(first.replace(/\r$/, "")) : null;
+  if (!m) return null;
+  const report = reportOutcome(text);
+  if ((report.present && report.outcome !== "parked") || report.decisions || decisionsIn(text)) return null;
+  return m[1] || "its pull request";
+}
+
+// Whether a task can be parked now: a babysitter's started attempt, neither closed nor stopped.
+// `close` and `stop` mark the task itself (closedAt, stoppedAt), whatever its attempt, and only a
+// `start` by hand clears them.
+const parkable = (task) => Boolean((task?.babysit || task?.plan?.type === "babysit") && task.attempt && !task.closedAt && !task.stoppedAt);
+
+// `ps` prints start times in the local time zone and language: read them in UTC and the C locale, so
+// that processes with other settings record and compare the same text.
+const PS_ENV = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
+
+// A process's start time (`ps -o lstart=`), which tells it apart from a later process with the same
+// PID; null when `ps` cannot read it.
+export function processStarted(pid) {
+  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV() });
+  return r.stdout?.replace(/\s+/g, " ").trim() || null;
+}
+
+// Every process's start time and command line, from one `ps` call: a Map from PID to
+// { started, command }, or null when `ps` fails. Park checks share it, so that reviving the parked
+// tasks of a run costs a single `ps`.
+export function parkProcessTable() {
+  const r = spawnSync("ps", ["-axww", "-o", "pid=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: PS_ENV() });
+  if (r.status !== 0) return null;
+  const rows = new Map();
+  for (const line of r.stdout.split("\n")) {
+    const m = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec(line);
+    if (m) rows.set(Number(m[1]), { started: m[2].replace(/\s+/g, " "), command: m[3] });
+  }
+  return rows;
+}
+
+export const exists = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+// The highest k of the files in `dir` that `re` matches, or 0.
+function highest(dir, re) {
+  let generation = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      const m = re.exec(name);
+      if (m) generation = Math.max(generation, Number(m[1]));
+    }
+  } catch {}
+  return generation;
+}
+
+// The current watcher of a parked attempt's folder: { generation, pid, state }, where state is
+// `alive`, `starting` (spawned in the last few seconds), `dead`, or `none` when none was started.
+// `table` (parkProcessTable) saves a `ps` per watcher.
+export function parkWatcher(dir, table = null) {
+  const generation = highest(dir, PARK_WATCHER_RE);
+  if (!generation) return { generation: 0, pid: null, state: "none" };
+  const record = readJson(parkWatcherFile(dir, generation)) || {};
+  // Just after the spawn, the record may lack its PID, or `ps` may not show the process yet.
+  const young = Date.now() - (Date.parse(record.createdAt) || 0) < WATCHER_GRACE_MS;
+  const alive = parkWatcherAlive(dir, generation, record.pid, table);
+  const state = alive ? "alive" : young && (!record.pid || alive === null) ? "starting" : "dead";
+  return { generation, pid: record.pid || null, state };
+}
+
+// Whether `pid` is the watcher of generation `generation` for the attempt folder `dir`: it exists,
+// and its command line is that watcher's, so a reused PID never counts. Null when the process
+// exists without that command line shown, as for a moment while a watcher starts.
+export function parkWatcherAlive(dir, generation, pid, table = null) {
+  if (!pid || !exists(pid)) return false;
+  const command = table ? table.get(pid)?.command : processCommand(pid);
+  return command?.includes(" park-watch ") && command.includes(` ${dir} ${generation} `) ? true : null;
+}
+
+// Whether a claim's owner ({ pid, started }) still runs: its PID exists, with the same start time.
+function ownerAlive(owner, table) {
+  if (!owner?.pid || !exists(owner.pid)) return false;
+  const started = table ? table.get(owner.pid)?.started ?? null : processStarted(owner.pid);
+  return !owner.started || !started || started === owner.started; // an unreadable time proves nothing
+}
+
+// The claim on a parked attempt's folder, from its highest park-claim-<k>.json: { generation,
+// record, state }. The state is `none` (no claim, or the last was released), `done` (a resume saved
+// the next attempt, or a stop or close ended the park), `live` (its owner still runs, or it names no
+// owner and is under a minute old), or `abandoned`: its owner is gone without saving anything, so
+// the next claimant may take it over. Claims are created whole (park.mjs), so an empty or unreadable
+// one comes from outside; past a minute it is abandoned too. Callers ask only about the task's
+// current attempt, so an abandoned claim's attempt was never saved.
+export function parkClaim(dir, table = null) {
+  const generation = highest(dir, PARK_CLAIM_RE);
+  if (!generation) return { generation: 0, record: null, state: "none" };
+  const file = parkClaimFile(dir, generation);
+  const record = readJson(file);
+  let state;
+  if (!record) {
+    let age = Infinity;
+    try {
+      age = Date.now() - fs.statSync(file).mtimeMs;
+    } catch {}
+    state = age < CLAIM_GRACE_MS ? "live" : "abandoned";
+  } else if (record.released) state = "none";
+  else if (record.attempt || record.ended) state = "done";
+  else if (record.owner?.pid) state = ownerAlive(record.owner, table) ? "live" : "abandoned";
+  else state = Date.now() - (Date.parse(record.claimedAt) || 0) < CLAIM_GRACE_MS ? "live" : "abandoned";
+  return { generation, record, state };
+}
+
+// The parked state of a task's current attempt, from its result, or null when it is not parked: a
+// babysitter's completed attempt whose final message parks (parkedSignal), while the task is not
+// closed and the park was not ended.
+export function parkedOf(run, task, result) {
+  if (!parkable(task) || result?.status !== "completed") return null;
+  const waitsFor = parkedSignal(result.finalMessage);
+  if (!waitsFor) return null;
+  const dir = path.join(taskDir(run, task.id), `attempt-${task.attempt}`);
+  const check = readJson(path.join(dir, PARK_CHECK_FILE));
+  const claim = parkClaim(dir);
+  const watcher = parkWatcher(dir);
+  return {
+    attempt: task.attempt,
+    pr: task.pr?.number ?? null,
+    url: task.pr?.url ?? null,
+    waitsFor,
+    since: result.finishedAt || null,
+    watcher: watcher.state,
+    watcherPid: watcher.pid,
+    generation: watcher.generation,
+    lastCheckAt: check?.at || null,
+    lastCheckError: check?.error || null,
+    resumeWaits: check?.waiting || null,
+    claim: claim.state,
+    resuming: ["live", "done"].includes(claim.state) ? claim.record?.by || "another command" : null,
+  };
+}
+
+// Whether a task's current attempt is parked, from its records alone, without looking at processes.
+export function isParked(run, task) {
+  if (!parkable(task) || !task.outDir) return false;
+  const result = readJson(path.join(task.outDir, "result.json"));
+  return result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
+}
+
+// A parked row's activity line: what it waits for, and its watcher when that needs saying.
+function parkedNow(p) {
+  const watcher = p.resuming ? "resuming" : p.watcher === "dead" || p.watcher === "none" ? "watcher not running (status, start or the dashboard restarts it)" : null;
+  const extra = [watcher, p.resumeWaits ? `resume waits: ${p.resumeWaits}` : null, p.lastCheckError ? `last check failed: ${p.lastCheckError}` : null].filter(Boolean);
+  return shortText(`parked · ${p.waitsFor}${extra.length ? ` · ${extra.join(" · ")}` : ""}`, 300);
 }
 
 // What an earlier attempt's result.json says, reread only when the file changes: the dashboard
@@ -183,6 +365,7 @@ function attemptResult(dir) {
     error: firstLine(typeof result.error === "string" ? result.error : result.error ? JSON.stringify(result.error) : "", 160) || null,
     decisions: result.status === "completed" && Boolean(decisionsIn(result.finalMessage) || report.decisions),
     outcome: report.outcome,
+    parked: result.status === "completed" && Boolean(parkedSignal(result.finalMessage)),
     startedAt: result.startedAt || null,
     finishedAt: result.finishedAt || null,
     model: result.model || null,
@@ -233,13 +416,14 @@ function attemptsOf(task, seen, row) {
     const from = explicit || (flagged && session && sessions.includes(session) ? session : null);
     const resumedAttempt = from ? sessions.lastIndexOf(from) + 1 || null : null;
     sessions.push(session);
-    let state = now ? row.state : r ? r.status : "aborted";
+    let state = now ? (row.phase === "parked" ? "parked" : row.state) : r ? r.status : "aborted";
     if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
+    else if (!now && state === "completed" && r.parked && (task.babysit || task.plan?.type === "babysit")) state = "parked";
     const startedAt = now ? row.startedAt : r?.startedAt || null;
     const finishedAt = now ? result?.finishedAt || null : r?.finishedAt || null;
     const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
     const errorText = now ? (typeof result?.error === "string" ? result.error : result?.error ? JSON.stringify(result.error) : "") : r?.error || "";
-    const failed = !["completed", "needs-decision", "running", "prepared"].includes(state);
+    const failed = !["completed", "needs-decision", "running", "prepared", "parked"].includes(state);
     return {
       n,
       reason: attemptReasonOf(task, n),
@@ -276,6 +460,10 @@ export function describe(run, task) {
   // A session that ended by handing back a question is waiting on its orchestrator, not done.
   const decisions = state === "completed" ? decisionsIn(result.finalMessage) : null;
   if (decisions) state = "needs-decision";
+  // A parked babysitter still runs as far as anyone waiting on it can tell; a stopped park has ended.
+  const parked = state === "completed" ? parkedOf(run, task, result) : null;
+  if (parked) state = "running";
+  else if (state === "completed" && task.stoppedAt && parkedSignal(result.finalMessage)) state = "stopped";
   const started = task.startedAt ? Date.parse(task.startedAt) : null;
   const ended = running ? Date.now() : result?.finishedAt ? Date.parse(result.finishedAt) : null;
   const elapsedMs = started && ended ? ended - started : null;
@@ -323,10 +511,11 @@ export function describe(run, task) {
   // A task that stopped because its agent ran out of usage: the one case where limits matter.
   const finishedText = [current.error, result?.error, result?.finalMessage, result?.stderrTail].filter(Boolean).join("\n");
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
-  const limitHit = !running && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
+  const limitHit = !running && !parked && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
   let now;
   if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${current.activity || "starting"}`;
   else if (decisions) now = firstLine(`asks: ${decisions.join(" · ")}`);
+  else if (parked) now = parkedNow(parked);
   else if (result) now = firstLine(result.finalMessage) || current.error || "(empty final message)";
   else now = state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
 
@@ -363,9 +552,11 @@ export function describe(run, task) {
     decisions,
     limitHit,
     result,
+    ...(parked ? { parked } : {}),
   };
   const reported = { ...row, ...reportFields(run, task, row) };
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
+  if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };
   described.attempts = attemptsOf(task, seen, described);
   return described;

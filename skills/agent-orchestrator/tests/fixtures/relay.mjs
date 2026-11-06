@@ -8,7 +8,9 @@ const argv = process.argv.slice(2);
 const value = (flag) => argv[argv.indexOf(flag) + 1];
 const out = value('--out-dir');
 const brief = fs.readFileSync(value('--brief'), 'utf8');
-const config = JSON.parse(/<!-- fake-relay (.*?) -->/.exec(brief)?.[1] || '{}');
+// A brief without a fake-relay comment, such as one a parked babysitter's watcher writes, uses
+// FAKE_RELAY_CONFIG from the environment.
+const config = JSON.parse(/<!-- fake-relay (.*?) -->/.exec(brief)?.[1] || process.env.FAKE_RELAY_CONFIG || '{}');
 const claude = process.argv[1].includes('claude-delegate');
 const session = argv.includes('--session') ? value('--session') : `fixture-${claude ? 'claude' : 'codex'}`;
 const startedAt = new Date().toISOString();

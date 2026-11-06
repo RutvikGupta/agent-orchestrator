@@ -5,6 +5,7 @@ import path from "node:path";
 import { CLI_PATH } from "./config.mjs";
 import { compact, shortText, table } from "./format.mjs";
 import { listNative, mainRow } from "./native.mjs";
+import { reviveParked } from "./park.mjs";
 import { listRuns, listTasks } from "./runs.mjs";
 
 export function totals(tasks) {
@@ -24,9 +25,10 @@ export function totalsText(t) {
   return `${t.running} running · ${t.finished} finished · ${approx}${compact(t.tokensIn)} in / ${approx}${compact(t.tokensOut)} out`;
 }
 
-// A closed session shows its outcome; a sub-agent that went idle and was closed has completed.
+// A closed session shows its outcome; a sub-agent that went idle and was closed has completed. A
+// parked babysitter (park.mjs) runs as far as `wait` can tell, and shows as parked.
 function stateLabel(t) {
-  return t.closed && t.state === "idle" ? "completed" : t.state;
+  return t.phase === "parked" ? "parked" : t.closed && t.state === "idle" ? "completed" : t.state;
 }
 
 // "(2 attempts, 1 rework round)": the attempts, and the review rounds that asked for changes.
@@ -59,6 +61,8 @@ export function statusText(run, tasks) {
   const native = listNative(run, tasks);
   const main = mainRow(run);
   if (!tasks.length && !native.length) return `run ${run.id}: no tasks yet`;
+  // A parked task whose watcher is not running (after a reboot, say) gets a new one, and is reported.
+  const revived = reviveParked(run, tasks);
   const cols = ["id", "agent", "model", "mode", "state", "elapsed", "steps", "tokens", "now"];
   return [
     `run ${run.id}${orchestratorLabel(run)}`,
@@ -66,6 +70,9 @@ export function statusText(run, tasks) {
     tasks.length ? table(statusRows(tasks), cols) : "(no orch.mjs tasks)",
     ...(native.length ? ["native sub-agents (started with the host's own tool, not orch.mjs):", table(statusRows(native), cols)] : []),
     `total: ${totalsText(totals([...tasks, ...native]))}`,
+    ...revived.map((r) => (r.adopted
+      ? `${r.id}: a resume died after starting its relay (pid ${r.pid}), which still runs; recorded it as attempt ${r.adopted}`
+      : `${r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run),
     ...whyLines(tasks),
   ].join("\n");

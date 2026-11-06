@@ -1,9 +1,9 @@
 const $=(t,a={},...kids)=>{const e=document.createElement(t);for(const[k,v]of Object.entries(a)){if(k==="class")e.className=v;else if(k.startsWith("on"))e.addEventListener(k.slice(2),v);else e.setAttribute(k,v)}
 for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextNode(String(c)));return e};
 const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":(n/1e6).toFixed(1)+"M";
-const outcome=t=>t.closed&&t.state==="idle"?"completed":t.state;
+const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
-const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="idle"?"s-idle":"s-bad";
+const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="idle"||s==="parked"?"s-idle":"s-bad";
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
 // A row with sub-agents opens while any agent under it runs and closes once none do; clicking its
 // arrow, or the row itself, overrides that until the running state under it changes.
@@ -25,7 +25,7 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
     if(dy==null)b.animate([{opacity:0},{opacity:1}],{duration:350,easing:"ease-out"});
     else if(Math.abs(dy)>1)b.animate([{transform:"translateY("+dy+"px)"},{transform:"none"}],{duration:550,easing:"cubic-bezier(.2,.8,.2,1)"})}};
 const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run,.gnode.d-run .gdot"))for(const a of d.getAnimations())a.startTime=0};
-const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"?"":"d-bad"};
+const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="parked"?"":"d-bad"};
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A session's activity line, after a short marker while it is stuck on one failing command.
 const nowText=t=>(t.stuck?"stuck: `"+(t.stuck.command.length>30?t.stuck.command.slice(0,29)+"…":t.stuck.command)+"` failed "+t.stuck.failures+"× · ":"")+(t.now||"");
@@ -297,7 +297,7 @@ function graphPanel(sec,r,depth){const nodes=r.graph.nodes,running=nodes.filter(
 const $s=(t,a={},...kids)=>{const e=document.createElementNS("http://www.w3.org/2000/svg",t);for(const[k,v]of Object.entries(a))if(v!=null)e.setAttribute(k,v);
   for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextNode(String(c)));return e};
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
-const nodeWord=n=>n.planned?(n.ready?"ready":"planned"):((n.state==="completed"&&n.phase)||n.state||"not started").replace(/-/g," ");
+const nodeWord=n=>n.planned?(n.ready?"ready":"planned"):((n.state==="completed"&&n.phase)||(n.phase==="parked"&&"parked")||n.state||"not started").replace(/-/g," ");
 function graphSvg(sec,r,fit=Infinity){const{nodes,edges}=r.graph,L=graphLayout(nodes,edges,{fit}),at=new Map(L.nodes.map(p=>[p.id,p])),byId=new Map(nodes.map(n=>[n.id,n]));
   const keyOf=n=>n.key?sec.id+"/"+n.key:null,hot=new Set(nodes.filter(n=>keyOf(n)&&keyOf(n)===sel).map(n=>n.id));
   // Drawn one unit to a pixel, at least as wide as its panel, so the lanes' bands span the panel.
@@ -312,7 +312,7 @@ function graphSvg(sec,r,fit=Infinity){const{nodes,edges}=r.graph,L=graphLayout(n
   // Awaiting review has a color of its own, apart from the green of accepted and integrated work.
   // Nodes go in as the eye reads them (L.order), so Tab moves through them in that order.
   for(const n of L.order.map(id=>byId.get(id))){const p=at.get(n.id),k=keyOf(n),word=nodeWord(n),review=!n.planned&&n.phase==="awaiting-review";
-    const dc=n.planned||!n.state?"":review?"d-review":dotClass({state:n.state});
+    const dc=n.planned||!n.state?"":review?"d-review":dotClass({state:n.state,phase:n.phase});
     const tip=[n.id+(n.type?" ("+n.type+")":""),n.title,word+(n.attempts>1?" · "+n.attempts+" attempts":""),n.attention?"needs attention: "+n.attention.replace(/-/g," "):null,
       n.delegated?n.delegated+" task"+(n.delegated>1?"s":"")+" delegated to a nested run":null,k?null:"not started yet: nothing to show"].filter(Boolean);
     const badge=n.delegated?"+"+n.delegated:"",bw=10+badge.length*7;
@@ -324,7 +324,7 @@ function graphSvg(sec,r,fit=Infinity){const{nodes,edges}=r.graph,L=graphLayout(n
       $s("text",{class:"gid",x:24,y:20},clip(n.id,21)),
       $s("text",{class:"gsub",x:10,y:36},clip([n.agent,n.tier].filter(Boolean).join(" · ")||"agent not chosen",n.attempts>1?18:24)),
       n.attempts>1?$s("text",{class:"gsub",x:p.w-10,y:36,"text-anchor":"end"},"×"+n.attempts):null,
-      $s("text",{class:"gword "+(n.planned||!n.state?"s-idle":review?"s-review":cls(n.state)),x:10,y:50},clip(word,26)),
+      $s("text",{class:"gword "+(n.planned||!n.state?"s-idle":review?"s-review":cls(outcome(n))),x:10,y:50},clip(word,26)),
       badge?$s("g",{class:"gbadge"},$s("rect",{x:p.w-bw+6,y:-7,width:bw,height:15,rx:7.5}),$s("text",{x:p.w+6-bw/2,y:4,"text-anchor":"middle"},badge)):null))}
   return svg}
 // Where the details panel scrolls when it is rebuilt: a session just chosen opens at its newest
@@ -390,9 +390,9 @@ function paint(key,t,ext,ev,keep){
   // A tool event with no output text gets no OUTPUT row.
   const rows=(ev||[]).filter(e=>e.kind!=="output"||String(e.text??"").trim()),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
-  d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.state)},t.state)),
+  d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
-    $("dl",{},...[["state",t.state+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state?t.phase:null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
+    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
     ...(own?[...contextView(t,n),...briefView(key,t,n),...attemptsView(key,t,n)]:[]),
@@ -454,8 +454,8 @@ function contextView(t,n){const a=(t.attempts||[]).find(x=>x.n===n);
   const read=t.inbox?.read||0;
   const bits=[a?.briefBytes!=null?"brief "+bytesText(a.briefBytes):null,resumed,t.inbox?read+" message"+(read===1?"":"s")+" received":null,t.cd?t.cd+(t.branch?" @ "+t.branch:""):null].filter(Boolean);
   return bits.length?[$("p",{class:"ctx"},$("span",{class:"k"},"Context"),bits.join(" · "))]:[]}
-// How an attempt ended, in words: completed, needs decision, stopped, or failed with its error.
-const attemptEnd=a=>a.state==="completed"?"completed":a.state==="needs-decision"?"needs decision":a.state==="running"||a.state==="stopped"?a.state:(a.state||"unknown")+(a.error?": "+a.error:"");
+// How an attempt ended, in words: completed, needs decision, parked, stopped, or failed with its error.
+const attemptEnd=a=>a.state==="completed"?"completed":a.state==="needs-decision"?"needs decision":a.state==="running"||a.state==="stopped"||a.state==="parked"?a.state:(a.state||"unknown")+(a.error?": "+a.error:"");
 // The attempts, newest first, one line each; choosing one shows its events (and brief) below.
 function attemptsView(key,t,n){const list=t.attempts||[];if(!list.length)return[];
   return[$("h3",{},"Attempts"),$("div",{class:"attempts"},...list.map(a=>{const on=a.n===n,end=attemptEnd(a);
@@ -543,7 +543,7 @@ function compose(){const box=document.getElementById("compose"),area=document.ge
   const why=t.main?"This is the session that launched the run: type in its own terminal."
     :t.external?"A command started this agent outside the orchestrator, so it takes no messages. Message the session or task that ran the command."
     :t.native?"This agent was started by its session's own sub-agent tool, which takes no messages from outside. Message the session or task that started it."
-    :outcome(t)!=="running"?"This task is not running ("+outcome(t)+"). A message reaches only a running agent: ask its orchestrator to resume it.":"";
+    :!["running","parked"].includes(outcome(t))?"This task is not running ("+outcome(t)+"). A message reaches only a running agent: ask its orchestrator to resume it.":"";
   document.getElementById("compose-title").textContent=why?"Messages":"Message "+t.id;
   note.textContent=why||(sendKey()?"":NO_KEY);note.hidden=!note.textContent;
   area.hidden=document.querySelector("#compose .crow").hidden=!!why;document.getElementById("compose-send").disabled=sending||!sendKey();box.hidden=false;
