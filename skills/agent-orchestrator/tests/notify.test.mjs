@@ -220,7 +220,7 @@ test('ask reaches a running parent task as a labelled question, and the answer c
   await notice(child, 'asker');
 });
 
-test('ask from a top-level task is a question in the attention lane, wakes wait with exit 5, and clears once a later message is read', async (t) => {
+test('ask from a top-level task is a question in the attention lane, wakes wait with exit 5, and clears as soon as a later message is sent', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('top');
   const asker = await f.start(run, 'asker', { config: { hold: true }, flags: ['--read-only'] });
@@ -256,9 +256,7 @@ test('ask from a top-level task is a question in the attention lane, wakes wait 
   await f.command(['inbox', run.id, 'asker', '--ack'], { env: me });
   assert.deepEqual(await open(), ['question'], 'reading an earlier message does not clear it');
   await f.command(['send', run.id, 'asker', 'Use pg.']);
-  assert.deepEqual(await open(), ['question'], 'an unread answer does not clear it');
-  await f.command(['inbox', run.id, 'asker', '--ack'], { env: me });
-  assert.deepEqual(await open(), []);
+  assert.deepEqual(await open(), [], 'a sent answer clears it before the agent reads it');
   await eventually(async () => (await lane()).every((a) => a.id !== 'asker'), 'the question stayed in the lane');
 });
 

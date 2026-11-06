@@ -605,3 +605,18 @@ test('an adoption during start counts toward the parallel limit', async (t) => {
   f.release({ outDir: attemptDir(run, 'sit', 2) });
   await f.finished(run, 'sit');
 });
+
+test('wait restarts a parked task\'s dead watcher while it waits', async (t) => {
+  const f = await fixture(t);
+  await github(f);
+  const run = await f.newRun();
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  const [first] = watchers(run, 'sit', 1);
+  process.kill(-first, 'SIGTERM');
+  await eventually(() => watchers(run, 'sit', 1).length === 0, 'the watcher did not stop');
+  // The parked task still counts as running, so wait times out; its poll starts a new watcher.
+  await f.command(['wait', run.id, 'sit', '--timeout', '1s'], { code: 3 });
+  assert.equal(watchers(run, 'sit', 1).length, 1);
+  assert.equal((await parkedRow(f, run, 'sit')).parked.generation, 2);
+});

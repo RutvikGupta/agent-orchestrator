@@ -193,13 +193,21 @@ export function cmdReply(args) {
 
 // `sleep` for agents: returns after DUR (exit 0), or as soon as a message arrives for the agent
 // running it (exit 6), so a waiting agent stays reachable.
-export async function cmdNap(args) {
+export async function cmdNap(args, resumed = null) {
   const ms = parseDuration(args._[0] || "");
   if (!(ms > 0)) die("give a duration, like 30s or 5m", 2);
-  const wake = inboxWake();
-  const until = Date.now() + ms;
-  while (Date.now() < until) {
-    await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
+  let checkedAt = Date.now();
+  const wake = inboxWake(resumed?.inbox);
+  const until = resumed?.until ?? Date.now() + ms;
+  const { parkHelper } = await import("./monitor.mjs");
+  while (resumed || Date.now() < until) {
+    if (!resumed) {
+      const interval = Math.max(0, Math.min(1000, until - Date.now()));
+      parkHelper(until, "cmdNap", args, { until, inbox: wake.snapshot }, { files: wake.files, checkedAt });
+      await new Promise((resolve) => setTimeout(resolve, interval));
+    }
+    resumed = null;
+    checkedAt = Date.now();
     const message = wake.check();
     if (message) {
       process.stdout.write(`${message.hint}\n`);

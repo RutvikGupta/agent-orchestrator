@@ -1,5 +1,6 @@
 // `new`, `worktree`, `runs`, and `cleanup`: create a run and its worktrees, list runs, and clean up.
 
+import { reclaimTask } from "../reclaim.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
@@ -93,6 +94,7 @@ export async function cmdCleanup(args) {
       for (const result of teardown) {
         if (result.exitCode !== 0) report.push(`teardown ${t.id} failed (${result.exitCode ?? result.signal}): ${result.command}\n${result.output}`);
       }
+      reclaimTask(run, task);
       // Teardown can leave artifacts, so force removal after the pre-teardown dirty check.
       // git refuses to remove a worktree with untracked files, caches included.
       git(run.repo, ["worktree", "remove", "--force", wt]);

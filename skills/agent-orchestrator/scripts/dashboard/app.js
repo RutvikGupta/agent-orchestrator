@@ -82,8 +82,10 @@ document.addEventListener("pointerup",release,true);
 document.addEventListener("pointercancel",release,true);
 document.addEventListener("selectionchange",()=>{if(getSelection().isCollapsed)catchUp()});
 async function refresh(){
-  let text;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;text=await r.text()}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
+  let text,heavy={running:0,waiting:0};try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text()}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
   const st=document.getElementById("stamp");st.className="live";st.textContent="";st.title="updated "+new Date().toLocaleTimeString();
+  const heavyText=" · heavy: "+heavy.running+" running, "+heavy.waiting+" waiting";
+  const grand=document.getElementById("grand");grand.textContent=grand.textContent.replace(/ · heavy:.*$/, "")+heavyText;
   if(text===lastState)return;if(holding(document.getElementById("runs"))){behind=true;return}lastState=text;state=JSON.parse(text);
   let tin=0,tout=0,running=0;
   const root=document.getElementById("runs");
@@ -106,7 +108,7 @@ async function refresh(){
   refocus(root,focus);
   syncPulses(root);
   slide(root,before);
-  document.getElementById("grand").textContent=running+" running · "+fmt(tin)+" in / "+fmt(tout)+" out";
+  document.getElementById("grand").textContent=running+" running · "+fmt(tin)+" in / "+fmt(tout)+" out"+heavyText;
   compose();
 }
 // One section of the board: its header, with the view toggle, and its session tree or plan graphs.

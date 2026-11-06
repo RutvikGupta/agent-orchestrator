@@ -12,6 +12,8 @@
 
 import { STATE_ROOT } from "./lib/config.mjs";
 import { die, parseArgs } from "./lib/util.mjs";
+import { cmdHeavy } from "./lib/commands/heavy.mjs";
+import { cmdReclaim } from "./lib/commands/reclaim.mjs";
 import { cmdAgents } from "./lib/commands/agents.mjs";
 import { cmdAsk } from "./lib/commands/ask.mjs";
 import { cmdBrief } from "./lib/commands/brief.mjs";
@@ -139,6 +141,9 @@ Usage: node orch.mjs <command> [args] [--json]
                                   a commit, push, rebase, merge or other publishing command)
   steer RUN TASK                  Push a task's queued messages through now: stop its current shell
                                   command (never a publishing one) so it reads them
+  heavy [--label TEXT] -- COMMAND [ARG...]
+                                  Queue a heavy command until memory is available; exit 6 on a message
+  reclaim [--dry-run] [--json]     Stop orphan build daemons and report their resident memory
   nap DUR                         Sleep like \`sleep\`, but return at once (exit 6) when a message
                                   arrives for the agent running it; agents wait with this
   inbox RUN TASK [--ack] [--all]  A task's unread messages (--all: every one); --ack marks them read
@@ -198,6 +203,8 @@ const specs = {
   brief: { value: ["type", "out"], bool: ["force", "read-only"] },
   send: { value: ["file"], bool: ["steer"] },
   nap: {},
+  heavy: { value: ["label"] },
+  reclaim: { bool: ["dry-run"] },
   steer: {},
   inbox: { bool: ["ack", "all"] },
   reply: { value: ["to", "file"] },
@@ -235,6 +242,8 @@ const handlers = {
   reply: cmdReply,
   ask: cmdAsk,
   nap: cmdNap,
+  heavy: cmdHeavy,
+  reclaim: cmdReclaim,
   steer: cmdSteer,
   lesson: cmdLesson,
   plan: cmdPlan,
