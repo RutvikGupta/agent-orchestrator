@@ -116,10 +116,10 @@ export function appendQuestion(dir, entry) {
   return question;
 }
 
-// The questions of `attempt` that went to the user and are still open: the agent has read no
-// message sent after the question.
+// The questions of `attempt` that went to the user and are still open: no message was sent after
+// the question. A sent answer closes it at once; the agent reads it at its next tool call.
 export function openQuestions(questions, messages, attempt) {
-  const answered = (q) => messages.some((m) => m.read && Date.parse(m.time) > Date.parse(q.time));
+  const answered = (q) => messages.some((m) => Date.parse(m.time) > Date.parse(q.time));
   return questions.filter((q) => q.to === "user" && q.attempt === attempt && !answered(q));
 }
 

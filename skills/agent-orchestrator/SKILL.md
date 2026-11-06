@@ -446,7 +446,7 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
   [--recommend a]` and keeps working. The question reaches the parent task's inbox, or, when the
   parent is the user's session or will not read it, the dashboard's lane, first, as a `question`
   that wakes `wait` (exit 5). Answer with `$ORCH send <run> <task-id> "<answer>"` (or the dashboard's box); it clears
-  once the agent has read a message sent after it.
+  as soon as a message is sent after it.
 
 A task whose final message starts with `NEEDS DECISION:`, or whose `orch-result` block lists
 `decisions`, shows as `needs-decision` in `wait`, `status`, and the dashboard, and `result` lists
