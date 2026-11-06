@@ -83,9 +83,12 @@ fix is waiting:
   merge queues often close a pull request instead of merging it.
 - The same failure survives two fix attempts.
 - A point needs a decision beyond this pull request's scope: one that changes scope, product
-  behavior, the security posture, or the cost, or that needs an approval or credentials. Push and
-  reply on everything else first, then stop with `NEEDS DECISION:` as the first line of your final
-  message. The agent that started you decides and resumes you, and you return to the loop.
+  behavior, the security posture, or the cost, or that needs an approval or credentials. Ask it at
+  once with `node <orch-path> ask "<question>" --options "a|b" --recommend a` and keep working on
+  everything else: the answer arrives in your inbox. Stop with `NEEDS DECISION:` as the first line
+  of your final message only when nothing else can move until it is answered, after pushing and
+  replying on everything else. The agent that started you decides and resumes you, and you return
+  to the loop.
 
 ## Final message
 
