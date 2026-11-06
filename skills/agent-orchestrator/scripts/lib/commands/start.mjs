@@ -115,10 +115,11 @@ export function startTask(args, extra = {}) {
   }
   // --sandbox carries over to follow-up attempts by the same agent.
   const sandbox = Boolean(args.sandbox || (sameAgent && prev.sandboxRequested));
+  const confine = Boolean(args.confine || (sameAgent && prev.confine));
   // A write task publishes (commits, pushes, writes to GitHub) unless the user said to review its
   // work first: --no-publish, which carries over to follow-up attempts.
   const noPublish = Boolean(args["no-publish"] || (prev.attempt && prev.noPublish));
-  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, babysit, publish: !noPublish });
+  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish });
   const why =
     String(args.why ?? "").replace(/\s+/g, " ").trim() ||
     (keepsChoice ? prev.why : null) ||
@@ -198,6 +199,7 @@ export function startTask(args, extra = {}) {
     offline,
     babysit,
     sandboxRequested: sandbox,
+    confine,
     noPublish,
     sandboxed: net.sandboxed,
     pr,

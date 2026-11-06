@@ -3,7 +3,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { HOME, PR_DIR, SKILL_DIR } from "./config.mjs";
+import { DASHBOARD_TOKEN_FILE, HOME, PR_DIR, SKILL_DIR } from "./config.mjs";
 import { die, git } from "./util.mjs";
 
 // Network access for one task. Delegated agents get the network by default, as sub-agents inside
@@ -11,8 +11,11 @@ import { die, git } from "./util.mjs";
 // host, plus the macOS certificate service that Go tools such as gh need, and deny rules for
 // common gh write commands keep publishing with the orchestrator. Codex gets network access in
 // write mode only, because its read-only sandbox stays offline.
+const GH_AUTH_DENY = ["login", "logout", "refresh", "setup-git", "switch", "token"].map((c) => `auth ${c}`);
+const GH_TOKEN_DENY = ["Bash(gh auth status *--show-token*)"];
 const GH_WRITE_COMMANDS = [
-  "auth", "gist", "label", "release", "secret", "variable",
+  ...GH_AUTH_DENY,
+  "gist", "label", "release", "secret", "variable",
   "pr create", "pr merge", "pr close", "pr reopen", "pr comment", "pr review", "pr edit", "pr ready",
   "issue create", "issue comment", "issue close", "issue reopen", "issue edit", "issue delete",
   "repo create", "repo delete", "repo edit", "repo fork", "repo rename",
@@ -28,7 +31,8 @@ export function relayHasNetworkPatch(relay) {
 // push (never force) and reply on GitHub. It also writes the worktree's shared git directory and
 // the pr-watch state, both outside its working directory.
 const BABYSIT_GH_DENY = [
-  "auth", "gist", "secret", "variable", "release", "repo create", "repo delete", "repo edit", "repo fork",
+  ...GH_AUTH_DENY,
+  "gist", "secret", "variable", "release", "repo create", "repo delete", "repo edit", "repo fork",
   "repo rename", "pr close", "issue delete", "workflow enable", "workflow disable", "run delete",
 ];
 const FORCE_PUSH_DENY = [
@@ -99,18 +103,18 @@ function networkRelayArgs(key, relay, readOnly, offline) {
 }
 
 // What a task may do. By the user's choice, tasks run outside the agents' sandboxes by default,
-// like sub-agents of an interactive session: full network, and the user's own files, tools, and
-// credentials. `--sandbox` confines a task as before, and `--offline` implies it, because only the
-// sandbox can block the network. Read-only tasks keep their read-only enforcement either way.
+// like sub-agents of an interactive session: full network and the user's files and tool state.
+// Credential file tools remain denied. `--sandbox` confines a task as before; `--offline` implies
+// it, because only the sandbox can block the network. Read-only tasks keep their read-only enforcement either way.
 // Permission rules still deny commits, pushes, and gh write commands (a babysitter may commit and
 // push, but never force).
 // `publish`: a write task may commit, push without force, and write to GitHub, as babysitters do,
 // unless the user asked to review its work first (start --no-publish). The dangerous commands stay
 // denied either way: force pushes, admin merges, secrets, and creating or deleting repositories.
-export function relaySafetyArgs({ key, relay, cd, readOnly, offline, sandbox, babysit, publish = true }) {
+function relaySafetyProfile({ key, relay, cd, readOnly, offline, sandbox, confine = false, babysit, publish = true }) {
   if (readOnly || offline || sandbox) {
     const net = babysit ? { network: "on", args: babysitRelayArgs(relay, cd), note: null } : networkRelayArgs(key, relay, readOnly, offline);
-    return { ...net, sandboxed: !readOnly, httpsGit: key === "claude" && net.network === "on" };
+    return { ...net, args: [...net.args, ...(key === "claude" && (confine || (!readOnly && (offline || sandbox))) ? ["--confine"] : [])], sandboxed: !readOnly, httpsGit: key === "claude" && net.network === "on" };
   }
   if (key === "codex") return { network: "on", args: ["--sandbox", "danger-full-access"], note: null, sandboxed: false, httpsGit: false };
   if (!fs.readFileSync(relay, "utf8").includes('"--no-sandbox"')) {
@@ -125,9 +129,36 @@ export function relaySafetyArgs({ key, relay, cd, readOnly, offline, sandbox, ba
     : [...GH_WRITE_COMMANDS.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]), ...GH_API_WRITE_FLAGS.map((f) => `Bash(gh api *${f} *)`)];
   return {
     network: "on",
-    args: ["--no-sandbox", ...(publishes ? ["--allow-publish"] : []), ...deny.flatMap((r) => ["--deny", r])],
+    args: ["--no-sandbox", ...(confine ? ["--confine"] : []), ...(publishes ? ["--allow-publish"] : []), ...deny.flatMap((r) => ["--deny", r])],
     note: null,
     sandboxed: false,
     httpsGit: false,
   };
+}
+
+// Claude's absolute file-rule form has two leading slashes. One slash is project-relative.
+function credentialRelayArgs() {
+  const paths = [
+    DASHBOARD_TOKEN_FILE,
+    path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials*"),
+    path.join(process.env.CODEX_HOME || path.join(HOME, ".codex"), "auth.json"),
+  ];
+  return paths.flatMap((p) => ["Read", "Edit", "Write"].flatMap((tool) =>
+    ["--deny", `${tool}(//${path.resolve(p).replaceAll("\\", "/").replace(/^\/+/, "")})`]));
+}
+
+export function relaySafetyArgs(options) {
+  const profile = relaySafetyProfile(options);
+  if (options.key !== "claude") return profile;
+  const publishing = profile.args.includes("--allow-publish");
+  const commands = publishing ? BABYSIT_GH_DENY : GH_WRITE_COMMANDS;
+  const rules = [
+    ...commands.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]),
+    ...(!publishing ? GH_API_WRITE_FLAGS.map((f) => `Bash(gh api *${f} *)`) : []),
+    ...FORCE_PUSH_DENY.map((r) => `Bash(${r})`),
+    ...GH_TOKEN_DENY,
+  ];
+  const existingRules = new Set(profile.args.filter((_, i) => profile.args[i - 1] === "--deny"));
+  const extraRules = rules.filter((rule) => !existingRules.has(rule));
+  return { ...profile, args: [...profile.args, ...credentialRelayArgs(), ...extraRules.flatMap((r) => ["--deny", r])] };
 }
