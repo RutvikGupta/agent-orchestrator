@@ -42,12 +42,20 @@ const boardRow = ({ result, activeMs, ...t }) => ({
 // task is stuck when it keeps re-running one failing command with no change in between (`stuck`,
 // from report.mjs); its wait counts from the first of those failures when the events carry a time.
 // /api/state exposes each kind's rank, so stuck takes 2.5 and the ranks before it stay as they were.
-const ATTENTION = { "needs-decision": 1, failed: 2, stuck: 2.5, "awaiting-review": 3, silent: 4 };
+// A running task that asked the user a question with `ask` (its row's `question`, from inbox.mjs)
+// comes first, at 0.5: it waits on the user while it works, and the item clears once the agent has
+// read a message sent after the question.
+const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, "awaiting-review": 3, silent: 4 };
 const UNFAILED = new Set(["running", "prepared", "completed", "needs-decision", "idle"]);
 
 export function attentionOf(t, closed, now = Date.now()) {
   if (t.main || closed) return null;
   const item = (kind, label, reason) => ({ kind, rank: ATTENTION[kind], label, reason, sinceMs: t.lastActiveMs || 0 });
+  if (t.state === "running" && t.question?.text) {
+    const q = t.question;
+    const reason = [firstLine(q.text, 140), q.options?.length ? `options: ${q.options.join(" | ")}` : null, q.recommend ? `recommends ${q.recommend}` : null, q.open > 1 ? `+${q.open - 1} more` : null];
+    return { ...item("question", "question", reason.filter(Boolean).join(" · ")), sinceMs: Date.parse(q.time) || t.lastActiveMs || 0 };
+  }
   if (t.state === "needs-decision" || t.phase === "needs-decision") {
     const question = [t.decisions?.[0], t.report?.decisions?.[0]].map((d) => (typeof d === "string" ? d : d?.question)).find(Boolean);
     return item("needs-decision", "needs decision", firstLine(question, 140) || "read its final message");

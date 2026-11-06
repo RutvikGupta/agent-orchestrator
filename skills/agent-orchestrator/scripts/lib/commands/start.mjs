@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { AGENTS, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
 import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
+import { startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
 import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
@@ -192,6 +193,8 @@ export function startTask(args, extra = {}) {
   child.unref();
   fs.closeSync(log);
 
+  // The orch task that runs this `start` is the parent this attempt reports to (finish-notice.mjs).
+  const startedBy = startedByCaller(run, id);
   const task = {
     ...prev,
     agent: key,
@@ -220,9 +223,14 @@ export function startTask(args, extra = {}) {
     pid: child.pid,
     argv: relayArgs,
     startedAt: new Date().toISOString(),
+    startedBy,
+    // Each attempt reports to the task that started it, even after a later attempt starts.
+    attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
     ...extra,
   };
   saveTask(run, task);
+  // Started once the record is saved, so the watcher always reads this attempt.
+  if (startedBy) watchForFinish(run, task);
   const warn =
     sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
   return {

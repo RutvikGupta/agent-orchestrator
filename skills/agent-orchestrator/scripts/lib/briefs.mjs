@@ -34,8 +34,9 @@ The user asked to review this work before it lands: do not commit, push, or open
 `;
 }
 
-// Appended to every brief: nobody answers a running agent, so a question it leaves open stalls the
-// work. It decides what its brief covers and hands anything else back in a form `orch.mjs` detects.
+// Appended to every brief: a question an agent leaves open stalls the work. It decides what its
+// brief covers, asks about the rest with `ask` while it keeps working, and hands back what is still
+// open at the end in a form `orch.mjs` detects.
 export function decisionNote(babysit) {
   return `
 
@@ -43,11 +44,12 @@ export function decisionNote(babysit) {
 
 ## Decisions
 
-Nobody reads your messages until your session ends, so never stop to wait for an answer, and never leave a point open as "pending a decision" (in a reply on GitHub or anywhere else).
+Questions reach whoever started you while you work, so never stop to wait for an answer, and never leave a point open as "pending a decision" (in a reply on GitHub or anywhere else). When you finish, the agent that started you is told at once.
 
 - When you are blocked (a gate cannot run here, a credential or service is missing, or the same failure has survived two fix attempts), stop and report it right away in your final message, with the exact command and error. Do not keep retrying or work around it silently.
 - Decide yourself whatever this brief's goal and scope cover, choosing what the brief, the repository's rules, and the existing code point to. List those choices in your final message.${babysit ? " For a reviewer's request: make it when it is within the pull request's scope; otherwise reply that it is a follow-up and list it in the pull request description." : ""}
-- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). First finish${babysit ? " and push" : ""} everything that does not depend on it. Then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
+- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it${babysit ? ", and keep your loop going" : ""}; when only that is left, wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives.
+- If nothing else is left and no answer has come (or you cannot run \`ask\`), finish${babysit ? " and push" : ""} what you can, then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
 
 ## Keep the final message short
 
