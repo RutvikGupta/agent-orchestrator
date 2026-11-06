@@ -100,9 +100,11 @@ export async function fixture(t) {
       fs.writeFileSync(file, `Fixture task ${name}.\n<!-- fake-relay ${JSON.stringify(config).replaceAll('-->', '--\\u003e')} -->\n`);
       return file;
     },
+    // Every new task names its tier. The default keeps the model the fixtures assumed (`complex`
+    // for Claude, `standard` for Codex); `flags` may name another tier, which wins.
     async start(run, id, { agent = 'claude', config = {}, flags = [], env: extra = {} } = {}) {
       return f.json(['start', run.id, id, '--agent', agent,
-        ...(agent === 'codex' ? ['--tier', 'standard'] : []),
+        '--tier', agent === 'codex' ? 'standard' : 'complex',
         '--why', 'Exercises the CLI with a local fake relay', '--brief', f.brief(id, config), ...flags], { env: extra });
     },
     taskFile(run, id) { return path.join(run.dir, 'tasks', id, 'task.json'); },

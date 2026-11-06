@@ -48,7 +48,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   unless the plan says otherwise. Writes the plan's brief path
                                   (default <run-dir>/briefs/TASK.md) or --out, and refuses to
                                   overwrite it without --force
-  start RUN TASK --agent claude|codex --why TEXT --brief FILE [--tier TIER] [--cd DIR]
+  start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
         [--max-parallel N] [--force] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
@@ -63,10 +63,11 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reply on GitHub; its timeout defaults to 24h.
                                   --why records the assessment behind the choice of agent and tier;
                                   it is required unless this attempt keeps the previous attempt's
-                                  agent and tier. --tier picks the model from policy.json: Claude
-                                  light|standard|complex (default complex, or the previous
-                                  attempt's tier; a babysitter always runs complex); Codex
-                                  standard|complex, required. "agents" lists each tier's model
+                                  agent and tier. --tier picks the model from policy.json and is
+                                  required for a new task: Claude light|standard|complex, Codex
+                                  standard|complex. A Claude follow-up keeps its earlier tier (a
+                                  task recorded before tiers resumes at complex), and --babysit
+                                  implies complex, so it needs none. "agents" lists each tier's model
   status RUN                      Every task: state, steps, current activity, tokens; also
                                   the sub-agents that the launching session started with its
                                   host's own tool (Claude Code's Agent tool, Codex's spawn_agent)

@@ -7,11 +7,11 @@ model"); the models themselves live in `../policy.json`.
 
 | | Claude Code (`claude`) | Codex (`codex`) |
 | --- | --- | --- |
-| Model and effort | `--tier light`: `claude-haiku-5-5`; `--tier standard`: `claude-sonnet-5-5`; `--tier complex` (the default, and every babysitter): `claude-opus-5-5`; all at `xhigh` | `--tier standard`: `gpt-6.1-sol`, `medium`; `--tier complex`: `gpt-6-astra`, `high` |
+| Model and effort | `--tier` is required for a new task. `light`: `claude-haiku-5-5`; `standard`: `claude-sonnet-5-5`; `complex` (also every babysitter's, implied by `--babysit`): `claude-opus-5-5`; all at `xhigh` | `--tier` is required. `standard`: `gpt-6.1-sol`, `medium`; `complex`: `gpt-6-astra`, `high` |
 | Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) |
 | Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; may commit, push without force, and write to GitHub (force pushes, admin merges, secrets, repository creation and deletion, and nested `claude` denied); `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
 | `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run |
-| Session id (for `-- --session`) | `sessionId`; a resumed session keeps its tier unless `--tier` switches it | `threadId`; a resumed thread may switch tier |
+| Session id (for `-- --session`) | `sessionId`; a follow-up attempt keeps its tier unless `--tier` switches it (a task recorded before tiers resumes at `complex`) | `threadId`; a resumed thread may switch tier |
 | Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost |
 | Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` |
 | `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged |

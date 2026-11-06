@@ -58,6 +58,20 @@ test('pr-watch refuses unpushed local commits with exit 4, including --once', as
   assert.equal(fs.existsSync(path.join(f.state, 'prs')), false);
 });
 
+test('start --babysit needs no --tier: it runs complex, and a follow-up keeps it', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  set();
+  const run = await f.newRun();
+  const started = await f.json(['start', run.id, 'babysit', '--agent', 'claude', '--babysit', '--pr', '42',
+    '--why', 'Babysits the fixture PR', '--brief', f.brief('babysit')]);
+  assert.deepEqual([started.tier, started.model, started.effort, started.babysit], ['complex', 'claude-opus-5-5', 'xhigh', true]);
+  await f.finished(run, 'babysit');
+  const again = await f.json(['start', run.id, 'babysit', '--agent', 'claude', '--brief', f.brief('babysit-again'), '--json', '--', '--session', 'fixture-claude']);
+  assert.deepEqual([again.attempt, again.tier, again.babysit], [2, 'complex', true]);
+  await f.finished(run, 'babysit');
+});
+
 for (const [name, changes, message] of [
   ['draft', { isDraft: true }, /still a draft/],
   ['closed', { state: 'CLOSED' }, /is closed; there is nothing to babysit/],

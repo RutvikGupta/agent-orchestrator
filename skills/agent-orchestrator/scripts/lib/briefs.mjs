@@ -9,16 +9,16 @@ export function nestingNote(depth) {
 
 ## Delegating further
 
-Use the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first) to keep slow side work off your own path. By default, hand to another agent anything that would otherwise make you wait, and keep working while it runs:
+Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, then \`new\` a run and \`start\` each agent) rather than doing things one after another:
 
-- running test suites, gates or reproductions;
-- bringing up or refreshing a test environment;
-- long pipeline, replay or smoke runs, and watching them;
-- reviews, investigations, and the other model's opinion.
+- When the task has two or more independent parts, split it and start one agent per part.
+- When it has slow side work (test suites, gates, builds, deploys, long runs, reviews, the other model's opinion), start an agent for it and keep working.
 
-A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. Split the change itself across agents only where its parts are independent; do small or tightly coupled work yourself, since every agent adds briefing and review work. Do not weigh usage limits in this choice.
+Pick the lightest tier that does each piece as well as the top one (its SKILL.md, "Choose the agent and model"): running tests or gates, reproducing a bug, lookups, mechanical edits, small well-specified changes, docs and reviews of small diffs usually fit \`light\` or \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
 
-If you delegate, give each agent a brief that keeps every constraint of this brief (the agents you start never commit, push or publish; you do), run at most ${parallelAt(depth)} at a time, review and integrate their results yourself, close them before you finish, and cover their work in your final report. When one of them finishes with \`NEEDS DECISION:\`, decide it yourself if this brief covers it and resume that agent's session with the answer; pass it up in your own \`NEEDS DECISION:\` only when it is beyond this brief. You are ${depth} level${depth === 1 ? "" : "s"} below the user's session; agents ${MAX_NEST_DEPTH} levels down cannot delegate.
+A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. If an agent's own work has such parts, tell it in its brief to delegate them the same way. You are notified when an agent you started finishes, so do not poll.
+
+Each agent's brief keeps every constraint of this brief (the agents you start never commit, push or publish; you do). Run at most ${parallelAt(depth)} at a time, review and integrate their results yourself, close them before you finish, and cover their work in your final report. When one of them finishes with \`NEEDS DECISION:\`, decide it yourself if this brief covers it and resume that agent's session with the answer; pass it up in your own \`NEEDS DECISION:\` only when it is beyond this brief. You are ${depth} level${depth === 1 ? "" : "s"} below the user's session; agents ${MAX_NEST_DEPTH} levels down cannot delegate.
 `;
 }
 

@@ -1,12 +1,16 @@
 // Model policy (policy.json): each agent's tiers, lightest first, and the model and effort each
 // tier runs. The orchestrating agent picks a task's tier from its own assessment of the task
-// (SKILL.md, "Choose the agent and model"); no rule picks it. Every Codex task names its tier, since
-// Codex usage is the scarcer budget. A Claude task without --tier runs `complex`, as every Claude
-// task did before Claude had tiers, and so does every pull-request babysitter.
+// (SKILL.md, "Choose the agent and model"); no rule picks it. Every new task, Claude or Codex,
+// names its tier with --tier, so that the choice is explicit and leans to the lightest tier that
+// does the task as well as the top one. Two things run `complex` without it: every pull-request
+// babysitter, and a Claude task recorded before Claude had tiers when it gets a follow-up attempt.
+// A follow-up attempt keeps its earlier tier unless --tier names another.
 
 import { POLICY_PATH } from "./config.mjs";
 import { die, readJson } from "./util.mjs";
 
+// Not a default for new tasks: the tier of every babysitter, and of a Claude task recorded before
+// Claude had tiers (which ran `complex`, then Opus).
 export const CLAUDE_DEFAULT_TIER = "complex";
 const POLICY_AGENTS = ["claude", "codex"];
 // The model names the relays accept, and an effort level such as "high".
@@ -38,7 +42,7 @@ export function policyProblems(policy) {
       if (tier.use !== undefined && typeof tier.use !== "string") problems.push(`${at}.use must be a string`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
-      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: the default, and every babysitter's`);
+      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: every babysitter's, and that of tasks recorded before tiers`);
     }
   }
   return problems;
@@ -67,27 +71,50 @@ function passthroughValue(argv, flag) {
 
 // "light = claude-haiku-5-5, standard = ...": an agent's tiers with their models, for messages.
 const tierList = (tiers) => Object.entries(tiers).map(([t, v]) => `${t} = ${v.model}`).join(", ");
+// One line per tier on when to use it, for the error that asks for --tier.
+const tierUses = (tiers) => {
+  const width = Math.max(...Object.keys(tiers).map((t) => t.length));
+  return Object.entries(tiers).map(([t, v]) => `\n  ${t.padEnd(width)}  ${v.use || v.model}`).join("");
+};
 // A tier by name; never an inherited key such as "constructor".
 const tierOf = (tiers, name) => (typeof name === "string" && Object.hasOwn(tiers, name) ? tiers[name] : null);
 
+// A model choice that policy.json or the arguments do not allow: no --tier, an unknown tier, or
+// --model/--effort. `code` is the exit status `start` gives.
+export class ModelRefused extends Error {
+  constructor(message, code = 2) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function refuse(message, code = 2) {
+  throw new ModelRefused(message, code);
+}
+
 // The tier, model and effort (null: the CLI's default) a task runs. `previousTier` is the tier of
 // the task's earlier attempt by the same agent: a Claude follow-up keeps it unless --tier is given.
+// A new task needs --tier, for both agents. A choice it cannot accept throws ModelRefused, which
+// `start` turns into its own refusal: `dispatch` skips that one task and starts the others.
 export function modelFor(key, args, previousTier = null) {
   const policy = loadPolicy();
   const { tiers } = policy[key];
   const override = args.model ?? passthroughValue(args.passthrough, "--model") ?? passthroughValue(args.passthrough, "--effort");
   if (key === "claude") {
     if (override !== null) {
-      die(`choose the Claude model with --tier (${tierList(tiers)}), not --model/--effort (edit ${POLICY_PATH} to change the models)`, 2);
+      refuse(`choose the Claude model with --tier (${tierList(tiers)}), not --model/--effort (edit ${POLICY_PATH} to change the models)`, 2);
     }
-    const name = args.tier || (tierOf(tiers, previousTier) ? previousTier : CLAUDE_DEFAULT_TIER);
-    const tier = tierOf(tiers, name) || die(`unknown --tier "${args.tier}" for Claude (choose: ${tierList(tiers)}; without --tier: ${CLAUDE_DEFAULT_TIER})`, 2);
+    const name = args.tier || (tierOf(tiers, previousTier) ? previousTier : null);
+    if (!name) {
+      refuse(`--tier is required for a new Claude task: ${tierList(tiers)}. Choose the lightest tier that does the task as well as the top one (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
+    }
+    const tier = tierOf(tiers, name) || refuse(`unknown --tier "${args.tier}" for Claude (choose: ${tierList(tiers)})`, 2);
     return { tier: name, model: tier.model, effort: tier.effort || null };
   }
   const names = Object.keys(tiers);
-  if (override !== null) die(`choose the Codex model with --tier (${names.join(" | ")}), not --model/--effort`, 2);
-  if (!args.tier) die(`--tier is required for Codex: ${tierList(tiers)} (see SKILL.md, "Choose the agent and model")`, 2);
-  const tier = tierOf(tiers, args.tier) || die(`unknown --tier "${args.tier}" (choose: ${names.join(", ")})`, 2);
+  if (override !== null) refuse(`choose the Codex model with --tier (${names.join(" | ")}), not --model/--effort`, 2);
+  if (!args.tier) refuse(`--tier is required for Codex: ${tierList(tiers)} (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
+  const tier = tierOf(tiers, args.tier) || refuse(`unknown --tier "${args.tier}" (choose: ${names.join(", ")})`, 2);
   return { tier: args.tier, model: tier.model, effort: tier.effort || null };
 }
 
