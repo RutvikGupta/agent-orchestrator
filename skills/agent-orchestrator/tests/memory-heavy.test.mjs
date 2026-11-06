@@ -169,6 +169,19 @@ function heavy(f, name, { mode = 'hold', env = {}, detached = false } = {}) {
     proc, dir, pid: proc.pid, cpid: null,
     async ready() {
       item.cpid = Number(await eventually(() => text(path.join(dir, 'ready')), `${name} did not run: ${proc.errors}`));
+      // The wrapper records its running entry and the admission just after it starts the command,
+      // so under load the command can signal before those writes land. Wait for them when the
+      // wrapper is in the lane (a skipped lane or a nested call writes neither).
+      const lane = path.join(f.state, 'heavy');
+      const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+      const entry = () => { try { return fs.readdirSync(lane).find((n) => n.endsWith(`-${proc.pid}.json`)); } catch { return null; } };
+      if (entry()) {
+        await eventually(() => {
+          const own = entry() && read(path.join(lane, entry()));
+          const last = read(path.join(lane, 'admitted.json'));
+          return own?.state === 'running' && own.childPid === item.cpid && last && last.ticket >= own.ticket;
+        }, `${name} was not recorded as running: ${proc.errors}`);
+      }
       return item.cpid;
     },
     release: () => fs.writeFileSync(path.join(dir, 'release'), ''),
