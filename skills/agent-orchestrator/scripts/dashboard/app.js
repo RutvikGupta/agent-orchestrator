@@ -99,7 +99,7 @@ async function refresh(){
   const lane=state.flatMap(run=>(run.attention||[]).map(a=>({...a,run,k:run.id+"/"+a.key}))).sort((a,b)=>a.rank-b.rank||a.sinceMs-b.sinceMs);
   const need=document.getElementById("need");need.hidden=!lane.length;need.textContent=lane.length+(lane.length===1?" needs":" need")+" attention";
   if(lane.length)root.append($("div",{class:"lane"},$("h2",{},"Needs attention"),...lane.map(a=>$("div",{class:"attn a-"+a.kind+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",title:a.reason},
-    $("span",{class:"tag"},a.label),$("b",{},a.id),$("span",{class:"where"},sectionTitle(a.run)),
+    $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)",title:"Asked while it keeps working: answer in the box under its details"}:{})},a.label),$("b",{},a.id),$("span",{class:"where"},sectionTitle(a.run)),
     a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs),title:"waiting since "+new Date(a.sinceMs).toLocaleTimeString()},dur(Date.now()-a.sinceMs)):null,
     $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,""))))));
   tick();

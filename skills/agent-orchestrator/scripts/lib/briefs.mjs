@@ -9,16 +9,16 @@ export function nestingNote(depth) {
 
 ## Delegating further
 
-Use the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first) to keep slow side work off your own path. By default, hand to another agent anything that would otherwise make you wait, and keep working while it runs:
+Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, then \`new\` a run and \`start\` each agent) rather than doing things one after another:
 
-- running test suites, gates or reproductions;
-- bringing up or refreshing a test environment;
-- long pipeline, replay or smoke runs, and watching them;
-- reviews, investigations, and the other model's opinion.
+- When the task has two or more independent parts, split it and start one agent per part.
+- When it has slow side work (test suites, gates, builds, deploys, long runs, reviews, the other model's opinion), start an agent for it and keep working.
 
-A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. Split the change itself across agents only where its parts are independent; do small or tightly coupled work yourself, since every agent adds briefing and review work. Do not weigh usage limits in this choice.
+Pick the lightest tier that does each piece as well as the top one (its SKILL.md, "Choose the agent and model"): running tests or gates, reproducing a bug, lookups, mechanical edits, small well-specified changes, docs and reviews of small diffs usually fit \`light\` or \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
 
-If you delegate, give each agent a brief that keeps every constraint of this brief (the agents you start never commit, push or publish; you do), run at most ${parallelAt(depth)} at a time, review and integrate their results yourself, close them before you finish, and cover their work in your final report. When one of them finishes with \`NEEDS DECISION:\`, decide it yourself if this brief covers it and resume that agent's session with the answer; pass it up in your own \`NEEDS DECISION:\` only when it is beyond this brief. You are ${depth} level${depth === 1 ? "" : "s"} below the user's session; agents ${MAX_NEST_DEPTH} levels down cannot delegate.
+A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. If an agent's own work has such parts, tell it in its brief to delegate them the same way. You are notified when an agent you started finishes, so do not poll.
+
+Each agent's brief keeps every constraint of this brief (the agents you start never commit, push or publish; you do). Run at most ${parallelAt(depth)} at a time, review and integrate their results yourself, close them before you finish, and cover their work in your final report. When one of them finishes with \`NEEDS DECISION:\`, decide it yourself if this brief covers it and resume that agent's session with the answer; pass it up in your own \`NEEDS DECISION:\` only when it is beyond this brief. You are ${depth} level${depth === 1 ? "" : "s"} below the user's session; agents ${MAX_NEST_DEPTH} levels down cannot delegate.
 `;
 }
 
@@ -34,8 +34,9 @@ The user asked to review this work before it lands: do not commit, push, or open
 `;
 }
 
-// Appended to every brief: nobody answers a running agent, so a question it leaves open stalls the
-// work. It decides what its brief covers and hands anything else back in a form `orch.mjs` detects.
+// Appended to every brief: a question an agent leaves open stalls the work. It decides what its
+// brief covers, asks about the rest with `ask` while it keeps working, and hands back what is still
+// open at the end in a form `orch.mjs` detects.
 export function decisionNote(babysit) {
   return `
 
@@ -43,11 +44,12 @@ export function decisionNote(babysit) {
 
 ## Decisions
 
-Nobody reads your messages until your session ends, so never stop to wait for an answer, and never leave a point open as "pending a decision" (in a reply on GitHub or anywhere else).
+Questions reach whoever started you while you work, so never stop to wait for an answer, and never leave a point open as "pending a decision" (in a reply on GitHub or anywhere else). When you finish, the agent that started you is told at once.
 
 - When you are blocked (a gate cannot run here, a credential or service is missing, or the same failure has survived two fix attempts), stop and report it right away in your final message, with the exact command and error. Do not keep retrying or work around it silently.
 - Decide yourself whatever this brief's goal and scope cover, choosing what the brief, the repository's rules, and the existing code point to. List those choices in your final message.${babysit ? " For a reviewer's request: make it when it is within the pull request's scope; otherwise reply that it is a follow-up and list it in the pull request description." : ""}
-- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). First finish${babysit ? " and push" : ""} everything that does not depend on it. Then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
+- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it${babysit ? ", and keep your loop going" : ""}; when only that is left, wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives.
+- If nothing else is left and no answer has come (or you cannot run \`ask\`), finish${babysit ? " and push" : ""} what you can, then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
 
 ## Keep the final message short
 

@@ -1,9 +1,13 @@
-// Messages sent to a running agent, by its orchestrator (orch.mjs send) or by the user from the
-// dashboard, and how they reach it. Each task folder holds inbox.jsonl, one message per line
-// ({id, time, attempt, text, from}; `from` is "user" for the dashboard, absent otherwise), and
+// Messages sent to a running agent, by its orchestrator (orch.mjs send), by the user from the
+// dashboard, or by an agent it started (a finish notice or an `ask`), and how they reach it. Each
+// task folder holds inbox.jsonl, one message per line ({id, time, attempt, text, from}; `from` is
+// "user" for the dashboard, "agent:<run>/<task>" for an agent it started, absent otherwise; an
+// agent's message adds `kind`, "finished" or "question", and `about`, {run, task, attempt}), and
 // inbox-read.jsonl, one {id, time} line per message the agent has read. A Claude agent receives
 // them as context after a tool call, through the orch-inbox hook; a Codex agent, and Claude as a
 // fallback, runs `orch.mjs inbox --ack`. The hook imports this module, so it loads only config.mjs.
+// questions.jsonl holds the questions the task asked with `ask`, one
+// {id, time, attempt, question, options, recommend, to, message} per line.
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -16,6 +20,7 @@ export const READ_FILE = "inbox-read.jsonl";
 export const REPLY_FILE = "replies.jsonl";
 // Queued messages that "Send now" pushed through by stopping the agent's command: {id, command, time}.
 export const STEERED_FILE = "steered.jsonl";
+export const QUESTIONS_FILE = "questions.jsonl";
 // A read-only agent has no shell for `reply`, so it answers in a message that starts with this.
 export const REPLY_PREFIX = "Reply to the user:";
 // The heading of the note below; `send` looks for it to tell whether an agent's brief has the note.
@@ -75,20 +80,47 @@ export function logSize(dir, attempt) {
 // `text` is what the agent receives. `body` is what the sender typed, kept when `text` adds to it
 // (the paths of attached images); `images` lists those paths. `logOffset` places the message in
 // the attempt's event log.
-// `steered` is the command that was stopped so the message reaches the agent at once.
-export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null } = {}) {
+// `steered` is the command that was stopped so the message reaches the agent at once. `kind` and
+// `about` mark a message from an agent the task started (see the header).
+export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, kind = null, about = null } = {}) {
   const message = {
     id: randomUUID().slice(0, 8), time: new Date().toISOString(), attempt, text,
-    ...(from === "user" ? { from } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
-    ...(steered ? { steered } : {}),
+    ...(from === "user" || fromAgent({ from }) ? { from } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
+    ...(steered ? { steered } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}),
   };
   fs.appendFileSync(path.join(dir, INBOX_FILE), `${JSON.stringify(message)}\n`);
   return message;
 }
 
+// Whether a message came from an agent the task started: "agent:<run>/<task>".
+export const fromAgent = (message) => typeof message?.from === "string" && message.from.startsWith("agent:");
+
 // How the agent sees who sent a message.
 export function senderLabel(message) {
-  return message.from === "user" ? "Message from the user, sent from the orchestrator dashboard" : "Message from your orchestrator";
+  if (message.from === "user") return "Message from the user, sent from the orchestrator dashboard";
+  if (fromAgent(message)) return `Message from ${message.from}, an agent you started`;
+  return "Message from your orchestrator";
+}
+
+// What the agent is told about a message from an agent it started: that agent is waiting on it.
+export const CHILD_FIRST = "It comes first: that agent is waiting on you. Handle it now, before your next step on your own work, then resume where you left off.";
+
+// The questions the task folder `dir` asked with `ask`, oldest first.
+export function readQuestions(dir) {
+  return readLines(path.join(dir, QUESTIONS_FILE)).filter((q) => typeof q?.id === "string" && typeof q.question === "string");
+}
+
+export function appendQuestion(dir, entry) {
+  const question = { id: randomUUID().slice(0, 8), time: new Date().toISOString(), ...entry };
+  fs.appendFileSync(path.join(dir, QUESTIONS_FILE), `${JSON.stringify(question)}\n`);
+  return question;
+}
+
+// The questions of `attempt` that went to the user and are still open: no message was sent after
+// the question. A sent answer closes it at once; the agent reads it at its next tool call.
+export function openQuestions(questions, messages, attempt) {
+  const answered = (q) => messages.some((m) => Date.parse(m.time) > Date.parse(q.time));
+  return questions.filter((q) => q.to === "user" && q.attempt === attempt && !answered(q));
 }
 
 // What the agent is told about a message from the user: it comes before the work in hand.
@@ -147,14 +179,23 @@ Stay reachable, so a message from the user is handled before the work in hand:
 }
 
 // The task's messages for its row from describe(): counts, and the unread ones for the dashboard's
-// tooltip. Nothing when no message was ever sent.
+// tooltip; and `question`, the oldest question of a running task that waits on the user (`open`
+// counts them all), which attentionOf() lists. Nothing when no message was ever sent or asked.
 export function inboxFields(run, task, row) {
   const dir = folder(run, task.id);
-  if (!fs.existsSync(path.join(dir, INBOX_FILE))) return {};
-  const messages = readInbox(dir);
+  const asked = row.state === "running" && fs.existsSync(path.join(dir, QUESTIONS_FILE));
+  const sent = fs.existsSync(path.join(dir, INBOX_FILE));
+  if (!asked && !sent) return {};
+  const messages = sent ? readInbox(dir) : [];
+  const open = asked ? openQuestions(readQuestions(dir), messages, row.attempt) : [];
+  const question = open.length
+    ? { question: { id: open[0].id, time: open[0].time, text: open[0].question.slice(0, 2000), options: open[0].options || [], recommend: open[0].recommend || null, open: open.length } }
+    : {};
+  if (!sent) return question;
   const unread = messages.filter((m) => !m.read);
   const replies = readReplies(dir);
   return {
+    ...question,
     inbox: {
       unread: unread.length,
       read: messages.length - unread.length,
@@ -174,6 +215,8 @@ export function inboxFields(run, task, row) {
 }
 
 // Snapshot only unread ids at entry: an undelivered old message must not cause a busy loop.
+// `check(skip)` passes over the messages `skip` returns true for, such as finish notices about
+// tasks that `wait` reports itself.
 export function inboxWake() {
   const run = process.env.AGENT_ORCH_RUN, task = process.env.AGENT_ORCH_TASK;
   const name = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -184,8 +227,8 @@ export function inboxWake() {
   let pending;
   try { pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"))?.id; } catch {}
   const previous = new Set(unread().filter((m) => m.id !== pending).map((m) => m.id));
-  return { pendingPath, check: () => {
-    const message = unread().find((m) => !previous.has(m.id));
+  return { pendingPath, check: (skip = () => false) => {
+    const message = unread().find((m) => !previous.has(m.id) && !skip(m));
     if (!message) return null;
     const text = message.text.slice(0, 200);
     const hint = `message waiting (${message.time}): ${text.replace(/\s/g, " ")} — Claude receives it as context when this command returns; otherwise read it with \`node ${CLI_PATH} inbox ${run} ${task} --ack\`; then run the same command again`;

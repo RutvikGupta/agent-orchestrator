@@ -1,7 +1,7 @@
 // `brief`: write a draft brief for a task from references/briefs/<type>.md. It fills in what the
 // run's plan.json says about the task, lists the repository's house-rule files for the orchestrator
-// to copy rules from and its testing skills for the agent to use, and leaves `<fill in: ...>`
-// markers wherever only the orchestrator knows.
+// to copy rules from and its testing skills for the agent to use, leaves `<fill in: ...>`
+// markers wherever only the orchestrator knows, and prints the tier its template suggests.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -34,6 +34,9 @@ const COMMON_WORDS = new Set(
   src lib libs app apps pkg package packages internal common core util utils main index scripts script
   test tests testing spec specs doc docs file files code data customer customers project projects platform`.split(/\s+/),
 );
+// Each template opens with `<!-- tier: ... -->`, the tier it suggests for a task of its type. A
+// suggestion for the orchestrator, not a rule: it is printed here and left out of the brief.
+const TIER_HINT = /^<!--\s*tier:\s*([\s\S]*?)\s*-->[ \t]*\r?\n(?:[ \t]*\r?\n)*/;
 const MARKER = "<fill in:";
 const fill = (what) => `${MARKER} ${what}>`;
 const code = (s) => `\`${s}\``;
@@ -77,16 +80,18 @@ export function cmdBrief(args) {
   const markers = text.split(MARKER).length - 1;
   const source = entry ? "goal and scope from plan.json" : `not in ${plan ? "plan.json" : "a plan"}: fill in its goal and scope`;
   const required = testing.skills.filter((s) => s.required).length;
+  const suggestedTier = tierHint(type);
   emit(
     args,
     {
-      path: file, task: id, type, readOnly, fromPlan: Boolean(entry), markers, houseRules: rules,
+      path: file, task: id, type, readOnly, fromPlan: Boolean(entry), markers, houseRules: rules, suggestedTier,
       testingSkills: testing.skills.map(({ name, path: rel, required: req, note }) => ({ name, path: rel, required: req, note })),
     },
     [
       `wrote ${file}`,
       `  ${type}, ${type === "babysit" ? "babysitter" : readOnly ? "read-only" : "write"}; ${source}`,
       `  ${markers} "${MARKER} ...>" marker${markers === 1 ? "" : "s"} to replace${type === "babysit" ? ", plus the <...> placeholders from references/babysit-brief.md" : ""}`,
+      `  suggested tier: ${suggestedTier} (a suggestion; SKILL.md, "Choose the agent and model")`,
       `  house rules: ${rules.length ? rules.join(", ") : "no AGENTS.md or CLAUDE.md found"}`,
       ...(TESTING_TYPES.includes(type)
         ? [`  testing skills: ${testing.skills.length ? `${testing.skills.length} listed${required ? `, ${required} required` : ""}` : "none found"}`]
@@ -109,6 +114,14 @@ function loadPlan(run) {
   return plan;
 }
 
+// The tier a template suggests: the text of its `<!-- tier: ... -->` line, on one line.
+function tierHint(type) {
+  const file = path.join(TEMPLATES, `${type}.md`);
+  if (!fs.existsSync(file)) die(`template not found: ${file}`);
+  const hint = TIER_HINT.exec(fs.readFileSync(file, "utf8"))?.[1];
+  return hint ? hint.replace(/\s+/g, " ") : "none (the template has no tier line)";
+}
+
 // `{{include FILE}}` inserts the brief part of a reference template (below its first `---` line);
 // `{{name}}` inserts a computed section, and one alone on its line disappears with that line when
 // the section is empty.
@@ -117,6 +130,7 @@ function render(type, values) {
   if (!fs.existsSync(file)) die(`template not found: ${file}`);
   const text = fs
     .readFileSync(file, "utf8")
+    .replace(TIER_HINT, "")
     .replace(/\{\{include ([^}]+)\}\}/g, (_, rel) => included(path.resolve(TEMPLATES, rel.trim())))
     .replace(/^\{\{(\w+)\}\}\n\n?/gm, (m, key) => (values[key] === "" ? "" : m))
     .replace(/\{\{(\w+)\}\}/g, (m, key) => values[key] ?? m);

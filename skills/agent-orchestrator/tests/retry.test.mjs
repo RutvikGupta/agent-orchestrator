@@ -98,7 +98,7 @@ test('start refuses all unfilled markers with code 2 and the first marked line',
   const run = await f.newRun();
   const brief = f.brief('unfilled');
   fs.appendFileSync(brief, 'First <fill in: goal> and <fill in: scope>\nLater <fill in: checks>\n');
-  const refused = await f.command(['start', run.id, 'task', '--agent', 'claude', '--why', 'Fixture assessment', '--brief', brief], { code: 2 });
+  const refused = await f.command(['start', run.id, 'task', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture assessment', '--brief', brief], { code: 2 });
   assert.match(refused.stderr, /3 unfilled markers: First <fill in: goal> and <fill in: scope>/);
   assert.doesNotMatch(refused.stderr, /Later/);
   assert.equal(fs.existsSync(f.taskFile(run, 'task')), false);
@@ -110,7 +110,7 @@ test('dispatch reports an unfilled brief without launching its task', async (t) 
   const brief = f.brief('unfilled');
   fs.appendFileSync(brief, '<fill in: goal>\n');
   const plan = path.join(f.root, 'plan.json');
-  writeJson(plan, { goal: 'Validate briefs', tasks: [{ id: 'task', goal: 'Inspect', type: 'research', owns: [], uses: [], produces: [], resources: [], dependsOn: [], agent: 'claude', tier: null, why: 'Fixture assessment', readOnly: true, brief }] });
+  writeJson(plan, { goal: 'Validate briefs', tasks: [{ id: 'task', goal: 'Inspect', type: 'research', owns: [], uses: [], produces: [], resources: [], dependsOn: [], agent: 'claude', tier: 'standard', why: 'Fixture assessment', readOnly: true, brief }] });
   await f.command(['plan', run.id, plan]);
   const refused = await f.command(['dispatch', run.id], { code: 1 });
   assert.match(refused.stdout, /could not start task: brief contains 1 unfilled marker: <fill in: goal>/);
@@ -134,7 +134,7 @@ test('start accepts a brief that only mentions the marker syntax in prose', asyn
   const run = await f.newRun();
   const brief = f.brief('mentions');
   fs.appendFileSync(brief, 'Refuse briefs with `<fill in:` markers when dispatching.\n');
-  await f.command(['start', run.id, 'task', '--agent', 'claude', '--why', 'Fixture assessment', '--brief', brief]);
+  await f.command(['start', run.id, 'task', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture assessment', '--brief', brief]);
   assert.equal((await f.finished(run, 'task')).state, 'completed');
 });
 
@@ -143,6 +143,6 @@ test('start accepts a brief that quotes a full marker inside a code span', async
   const run = await f.newRun();
   const brief = f.brief('quoted');
   fs.appendFileSync(brief, 'start refuses briefs with `<fill in: …>` markers.\n');
-  await f.command(['start', run.id, 'task', '--agent', 'claude', '--why', 'Fixture assessment', '--brief', brief]);
+  await f.command(['start', run.id, 'task', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture assessment', '--brief', brief]);
   assert.equal((await f.finished(run, 'task')).state, 'completed');
 });

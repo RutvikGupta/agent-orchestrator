@@ -10,7 +10,7 @@ import path from "node:path";
 import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, parallelAt } from "../config.mjs";
 import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
-import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, validatePlan, waitsOnText } from "../plan.mjs";
+import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { StartRefused, startTask } from "./start.mjs";
@@ -205,6 +205,9 @@ export function cmdDispatch(args) {
   const lines = [];
   for (const entry of progress.ready) {
     try {
+      // A plan recorded before tiers were required may lack one: refuse this task, not the batch.
+      const noTier = tierProblem(entry);
+      if (noTier) throw new StartRefused(`${noTier}; set its tier in the plan and record it again (${CLI} plan ${run.id} FILE)`);
       const unready = briefRefusal(run, entry);
       if (unready) throw new StartRefused(unready);
       if (started.length >= slots) {

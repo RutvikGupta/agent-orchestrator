@@ -91,13 +91,16 @@ Host-specific rules, which matter for every later step:
   (step 5), then call it again. Ignore the delegate skills' advice to wait with `codex-background`,
   which does not run on macOS: `orch.mjs` owns waiting for this skill.
 - **Inside a delegated agent.** If `AGENT_ORCH_DEPTH` is set, another agent delegated this task
-  to you. Hand slow side work to other agents by default and keep working while it runs: test
-  suites, bringing up test environments, long pipeline or replay runs, and reviews. The
-  "Delegating further" section of your brief says how. Split the change itself only where its parts
-  are independent. If you delegate, keep every constraint of your own brief in your
+  to you. Delegate instead of doing parts one after another. When the task has two or more
+  independent parts, split it and start one agent per part. Hand slow side work (test suites, gates,
+  builds, deploys, long or replay runs, reviews) to an agent and keep working while it runs. Pick the
+  lightest tier for each piece ("Choose the agent and model"), and in every brief you write for work
+  that has such parts, tell that agent to delegate the same way. You are notified when an agent you
+  started finishes. The "Delegating further" section of your brief says how. Do a few-minute or
+  tightly coupled edit yourself. If you delegate, keep every constraint of your own brief in your
   agents' briefs, review and integrate their results, close them before you finish, and cover their
-  work in your report. Decide what your agents hand back as in "Decisions agents hand back", but
-  pass a decision beyond your brief up as your own `NEEDS DECISION:` instead of asking the user.
+  work in your report. Handle what your agents send you first, as in "Decisions agents hand back",
+  and pass a decision beyond your brief up at once with `$ORCH ask` instead of asking the user.
   Runs at the second level allow 6 tasks at once, the third 4, and the fourth 2; agents below the
   fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
 
@@ -167,7 +170,7 @@ lines:
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex`, or `null` for `complex`; Codex `standard` or `complex`), and your one-line assessment |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard` or `complex`; Codex `standard` or `complex`; required, except that a babysit task may leave it out), and your one-line assessment |
 | `brief` | The brief file, relative to the run directory |
 
 Rules for the plan:
@@ -190,17 +193,18 @@ Rules for the plan:
 
 You choose the agent and its tier for every task by assessing that task. No table or default rule
 makes the choice for you, and you must not prefer an agent just because it is the CLI you are
-running in. `start` refuses a dispatch without `--why`, a one-line statement of your assessment (the
-plan's `why`) that names the task's complexity behind the tier, and shows that reason in `status`,
-`result`, and the dashboard. A follow-up attempt that keeps the same agent and tier may omit
-`--why`, and reuses the earlier reason.
+running in. `start` refuses a new task without `--tier` and without `--why`. `--why` is a one-line
+statement of your assessment (the plan's `why`) that names the deciding factor behind the tier, and
+`status`, `result` and the dashboard show it. A follow-up attempt that keeps the same agent and tier
+may omit `--why`; a Claude follow-up may also omit `--tier`. Each keeps its earlier value.
 
 Each tier's model is fixed by `policy.json` (`$ORCH agents` lists them), and `start` enforces it. Do
 not pass `--model` or `--effort`.
 
 - **Claude**: `--tier light` runs `claude-haiku-5-5`, `standard` runs `claude-sonnet-5-5`, and
-  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. Without `--tier` a task runs `complex`, and a
-  follow-up attempt keeps its earlier tier. A babysitter always runs `complex`.
+  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. A new task needs `--tier`; a follow-up
+  attempt keeps its earlier tier (a task recorded before tiers existed resumes at `complex`). A
+  babysitter always runs `complex`, and `--babysit` implies it.
 - **Codex** needs `--tier`. `standard` runs `gpt-6.1-sol` at effort `medium`. `complex` runs
   `gpt-6-astra` at effort `high`.
 
@@ -209,8 +213,8 @@ Assess each task with these questions, then weigh the answers together:
 1. **Did the user choose?** Then keep that choice ("Keep the user's choices" above).
 2. **What must the agent be able to do?** These are hard limits of the relays on this machine:
    - Run commands without being allowed to edit (reproduce a bug, run tests or scripts and report,
-     read `git log`): only Codex. Its read-only sandbox still runs commands; Claude's read-only mode
-     has no shell.
+     read `git log`): Codex read-only. Its sandbox still runs commands; Claude's read-only mode has
+     no shell, so a Claude run-and-report task is a write-mode task whose brief forbids edits.
    - Look things up on the live web: only Codex, with `-- --web-search live`. The Claude relay
      removes Claude's web tools.
    - Review a diff on its own: Codex can run `git diff`. A Claude reviewer needs the diff pasted
@@ -220,8 +224,8 @@ Assess each task with these questions, then weigh the answers together:
    - Babysitting a pull request: only Claude, with `--babysit` (step 8).
 3. **Does it check another agent's work?** Give a review, verification, or second opinion to the
    agent that did not write the work, so that a different model looks at it.
-4. **How hard and how risky is it?** Use the tier criteria below. Claude `complex` is the strongest
-   choice for hard implementation work. On Codex, hard work needs the `complex` tier.
+4. **How hard and how risky is it?** Take the lightest tier that will do the task as well as the
+   top one (below), not a bigger model for comfort.
 5. **What has this run already shown?** If an agent failed this task twice, or a similar task, give
    the next attempt to the other agent; rework that is converging stays in the same session.
    `$ORCH stats [<run>] [--since DUR]` (default: the last 30 days) adds evidence from earlier runs:
@@ -230,6 +234,20 @@ Assess each task with these questions, then weigh the answers together:
 
 When the answers do not favor Codex, choose Claude. Re-assess after each failure and whenever you
 change the plan, not only at the start.
+
+**Prefer the lightest tier.** Most delegated work does not need the top model. These fit `light` or
+`standard`:
+
+- running tests or gates and reporting the result; reproducing a bug;
+- lookups, inventories and summaries; mechanical edits (renames, pattern refactors, lint or type fixes);
+- well-specified small changes with clear done criteria (1 to 5 files), docs and config edits, and
+  tests for existing behavior;
+- reviews of small diffs.
+
+Take Claude `light` when there is nothing to judge: the brief says what to run, find or change, and
+the result is facts or a mechanical edit. Take `standard` (Codex's lower tier too) when the agent
+makes small judgment calls, such as writing a change or test from a clear spec or reviewing a small
+diff. Reviews and verification of another agent's work run at `standard` or above.
 
 For either agent, choose `complex` if **any** of these is true:
 
@@ -243,22 +261,23 @@ For either agent, choose `complex` if **any** of these is true:
 - It reviews a large or high-risk diff, or babysits a pull request.
 - A lighter-tier attempt at this task already failed review or its gates.
 
-`standard` fits: a well-specified change to 1 to 5 files with clear done criteria; mechanical work
-(renames, pattern refactors, tests for existing behavior, lint or type fixes, docs or config
-edits); read-only inventories, searches, test runs, or documentation lookups; and reviews of small
-diffs. Claude `light` fits only mechanical and lookup work with nothing to judge: renames,
-formatting, simple searches and summaries, and gathering facts from files the brief names.
+When unsure between two tiers, take the lower one if a failure would be caught by the gates or
+review and is cheap to redo. Take the higher one only when a mistake would be costly or subtle.
 
-A lighter tier must not lower the quality of the result. On Claude, choose `light` or `standard`
-only when you judge that model will do the task as well as Opus would; when unsure, choose
-`complex`. On Codex, when unsure, start at `standard` unless a failure would be costly. Reviews and
-verification of another agent's work run at `standard` or above, and at `complex` for a large or
-risky diff. Redo a lighter-tier result that fails review or its gates one tier up, never at the
-same tier (see Rework in step 6); `start` prints the next tier when you do not.
+**Quality guard.** A lighter tier must not lower the quality of the result, and the workflow checks
+it: every task has gates (step 3), and you review every result (step 6). A lighter-tier result that
+fails review or its gates is redone one tier up, never retried at the same tier (Rework in step 6);
+`start` prints the next tier when you try.
 
-Write the deciding factors in the plan's `why`, for example `"standard: a specified 2-file fix with
-tests"` or `"runs the test suite read-only; Claude's read-only mode has no shell"`. Per-agent
-behavior (sandboxes, read-only limits, flags) is in [references/agents.md](references/agents.md).
+**Pass the habit on.** When the work you brief has two or more independent parts or slow side work
+(test suites, gates, builds, deploys, long runs, reviews), say in that brief that the agent should
+delegate them, each at the lightest tier that fits. The "Delegating further" note that `start`
+appends tells it how.
+
+Write the deciding factor in the plan's `why`, for example `"light: runs the test suite and reports
+failures; nothing to judge"`, `"standard: a specified 2-file fix with tests"` or `"complex: changes the
+lock protocol used by three modules"`. Per-agent behavior (sandboxes, read-only limits, flags) is in
+[references/agents.md](references/agents.md).
 
 #### Usage limits
 
@@ -349,11 +368,11 @@ decisions already made, the agreed shape of each interface in `uses` and `produc
 `AGENTS.md`; the **gates**, the project's real test, lint, and build commands plus the applicable
 testing skill; and the **report contract**.
 
-`start` appends two sections to every brief. "Decisions" tells the agent that nobody answers it
-mid-run, so it never waits or leaves a point "pending a decision": it decides what the brief
-covers, reports a blocker at once (a gate that cannot run, a missing credential or service, or a
-failure that survived two fixes), and hands back anything beyond the brief by ending with
-`NEEDS DECISION:` (step 5). "Structured result" asks for an `orch-result` block, which `result`
+`start` appends two sections to every brief. "Decisions" tells the agent never to wait idle or
+leave a point "pending a decision": it decides what the brief covers, reports a blocker at once (a
+gate that cannot run, a missing credential or service, or a failure that survived two fixes), asks
+about anything beyond the brief with `ask` while it keeps working, and ends with `NEEDS DECISION:`
+only when nothing else is left (step 5). "Structured result" asks for an `orch-result` block, which `result`
 parses: outcome, changed files, checks (including the testing-skill check, or why none ran),
 decisions handed back, and what is unresolved. It also caps the final message at about 25 lines,
 with long evidence in a file; `wait` flags a longer report. Put the decisions you already made in
@@ -382,12 +401,14 @@ $ORCH dispatch <run> [--max N] [--dry-run]
   task, babysitters, and tasks that need relay flags, such as research with live web search.
 
 ```bash
-$ORCH start <run> <task-id> --agent claude [--tier light|standard|complex] --why "<assessment>" \
+$ORCH start <run> <task-id> --agent claude --tier light|standard|complex --why "<assessment>" \
   --brief <brief-file> [--read-only] [--timeout 2h]
 $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
 
+- `--tier` is required for a new task. Exceptions: a Claude follow-up attempt keeps its earlier tier
+  (a task recorded before tiers existed resumes at `complex`), and `--babysit` implies `complex`.
 - `start` runs the agent's `<agent>-delegate/scripts/relay.mjs` as a detached background process
   and returns at once. It looks for the relay in the folder that holds this skill, then
   `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills`; `AGENT_ORCH_SKILLS_DIR` replaces
@@ -397,8 +418,13 @@ $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" -
   choice too): it may commit, push without force, open pull requests, and write to GitHub, as a
   `--babysit` task does (step 8). Force pushes, admin merges, secrets and creating or deleting
   repositories stay denied. Pass `--no-publish` only when the user asks to review a task's work
-  before it lands; that denies commits, pushes and `gh` writes again. `--sandbox` keeps writes
-  inside the working directory, `--offline` also blocks the network, and `--read-only` maps to
+  before it lands; that denies commits, pushes and `gh` writes again. Claude file tools can read
+  and write the home directory and the agent's `$TMPDIR` by default; read-only tasks can read them
+  even with `--sandbox` or `--offline`. Read, Edit and Write deny credential stores, including
+  configured Claude/Codex directories and the resolved dashboard token. An unsandboxed shell can
+  still read those files. `--confine` keeps file tools in the
+  working directory. `--sandbox` and `--offline` retain write-task file confinement; the latter also blocks
+  the network. `--read-only` maps to
   Codex's `read-only` sandbox and Claude's `plan` mode ([references/agents.md](references/agents.md)).
 - Other flags after `--` go to the relay unchanged; `relay.mjs --help` lists them. Common ones:
   Codex `--network-access`, `--web-search live`; Claude `--max-turns 60`, `--max-budget-usd 10`.
@@ -423,7 +449,7 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
   `resolve` its decision; a task that finished while no `wait` ran wakes the next `wait` at once.
   `result` on a task that handed back a decision marks the decision seen, and `close` on it marks
   the decision resolved. It exits 5 as soon as a task
-  newly needs **attention**: a decision, a failure, a dead or silent task, or a transient error
+  newly needs **attention**: a decision, a question, a failure, a dead or silent task, or a transient error
   with no retries left. Handle it, then wait again; attention that was there when `wait` started is
   listed, but does not wake it. `wait` also names the tasks ready to dispatch or awaiting review.
 - **Automatic retry.** When a task fails with a transient provider or network error, `wait` resumes
@@ -444,24 +470,36 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 
 #### Decisions agents hand back
 
+**The parent acts first**: it handles what its agents send before its next step on its own work.
+
+- **Finish notice.** When an orch task started a task, it gets one inbox message from
+  `agent:<run>/<task>` when each attempt ends: ready for review, needs a decision (with the
+  questions), or failed (with the error's first line), and the `result` command. `nap`, `wait` and
+  `pr-watch` wake on it (exit 6). The user's session gets none; its `wait` wakes on the result.
+- **Questions.** A running agent asks with `$ORCH ask "<question>" [--options "a|b|c"]
+  [--recommend a]` and keeps working. The question reaches the parent task's inbox, or, when the
+  parent is the user's session or will not read it, the dashboard's lane, first, as a `question`
+  that wakes `wait` (exit 5). Answer with `$ORCH send <run> <task-id> "<answer>"` (or the dashboard's box); it clears
+  as soon as a message is sent after it.
+
 A task whose final message starts with `NEEDS DECISION:`, or whose `orch-result` block lists
 `decisions`, shows as `needs-decision` in `wait`, `status`, and the dashboard, and `result` lists
-its questions. It is waiting on you, not done, so handle it as soon as `wait` returns, before
-reviewing other results:
+its questions. It is waiting on you, not done. For it, and for a question:
 
-1. Decide it yourself when the user's request, the repository's rules, or decisions already made
-   settle it. That includes a reviewer's request: make it when it is within the pull request's
-   scope; otherwise it is a follow-up, listed in the pull request description.
-2. Resume the same session at once with the answer as a short delta brief (step 6, "Rework"). If
-   you handled it without the agent (you made the change yourself, or nothing needs doing), run
+1. Decide it yourself when the user's request (or your brief), the repository's rules, or decisions
+   already made settle it. That includes a reviewer's request: make it when it is within the pull
+   request's scope; otherwise it is a follow-up, listed in the pull request description.
+2. Answer a question with `send`; resume a task that ended with the answer as a short delta brief
+   (step 6, "Rework"). If you handled it without the agent, run
    `$ORCH resolve <run> <task-id> --note "<how it was handled>"` instead: the task stops waiting on
    a decision, moves to awaiting review, and can be accepted.
-3. Ask the user only about a decision that changes the scope of the request, the security posture,
-   or the cost. Ask it as one question with your recommendation, keep every other task going, and
-   resume the agent as soon as the user answers.
+3. Pass up only a decision that changes the scope, the security posture, or the cost: at once with
+   `$ORCH ask` from a delegated agent, or as one question with your recommendation to the user.
+   Keep every other task going, and pass the answer down as soon as it comes.
 
-Never end your turn, or report the work as done, while a task waits on a decision you could make,
-and never let an agent's question sit unanswered on GitHub in a reply that says "pending". Agents
+Review a finished task and record `accept` or `verdict` right away. Never leave an agent waiting
+on your review or decision, never end your turn or report the work as done while one does, and
+never let an agent's question sit unanswered on GitHub in a reply that says "pending". Agents
 started with your host's own tool are marked the same way when they end with `NEEDS DECISION:`.
 
 **Steer a running agent** instead of stopping it, for example to pass on a constraint that
@@ -497,8 +535,8 @@ whose tab was opened another way.
   reports that session (`stateSource` on the row), and from its transcript otherwise; Codex's app
   server is read only with `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see
   threads another Codex process runs.
-- Its **attention lane** lists what needs someone: decisions, failures, results awaiting review,
-  and silent tasks. A babysitter never awaits review. A review left waiting longer than
+- Its **attention lane** lists what needs someone: questions from running agents, decisions,
+  failures, results awaiting review, and silent tasks. A babysitter never awaits review. A review left waiting longer than
   `AGENT_ORCH_REVIEW_STALE` (default 24h) leaves the lane; `recover` still lists it.
 - A running task is **stuck** when one shell command failed its last 3 runs
   (`AGENT_ORCH_STUCK_REPEATS`) with only read-only inspection, such as `cat`, `grep` or `git diff`,
@@ -509,7 +547,9 @@ whose tab was opened another way.
   outline marks attention, and "+N" counts tasks delegated to a nested run, drawn as its own graph.
   Clicking a task chooses it as its row does. `/api/state` carries each run's `graph`.
 - **Escalation.** An item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
-  (default 10m; checked every tenth of that, from 1 to 10 seconds) goes to the user once, while
+  (default 10m), or a decision or question for `AGENT_ORCH_DECISION_ESCALATE_AFTER` (default 2m,
+  or the first when that is shorter; checked every tenth of the shorter, from 1 to 10 seconds),
+  goes to the user once, while
   the dashboard runs, even with no tab open: a macOS
   notification (`AGENT_ORCH_NOTIFY=off` turns it off), a browser notification, and the command in
   `notify.json` under the state root (`~/.local/state/agent-orchestrator`, or `AGENT_ORCH_HOME`),

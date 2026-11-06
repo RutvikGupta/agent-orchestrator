@@ -16,7 +16,7 @@ function brief(run, id, config = {}) {
 function entry(run, id, extra = {}, config = {}) {
   return {
     id, goal: `Build ${id}`, type: 'implement', owns: [`src/${id}/`], uses: [], produces: [], resources: [],
-    dependsOn: [], agent: 'claude', tier: null, why: 'Fixture assessment', readOnly: false,
+    dependsOn: [], agent: 'claude', tier: 'complex', why: 'Fixture assessment', readOnly: false,
     brief: brief(run, id, config), ...extra,
   };
 }
@@ -51,8 +51,12 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
       entry(run, 'self', { dependsOn: ['self'] }),
       entry(run, 'codex-task', { agent: 'codex', tier: null }),
       entry(run, 'claude-tier', { tier: 'imaginary' }),
+      entry(run, 'claude-null', { tier: null }),
+      entry(run, 'claude-absent', { tier: undefined }),
       entry(run, 'claude-light', { tier: 'light' }),
+      entry(run, 'codex-absent', { agent: 'codex', tier: undefined }),
       entry(run, 'babysit-light', { type: 'babysit', owns: [], tier: 'light' }),
+      entry(run, 'babysit-implied', { type: 'babysit', owns: [], tier: null }),
       entry(run, 'robot', { agent: 'robot' }),
       entry(run, 'no-why', { why: '  ' }),
       entry(run, 'no-brief', { brief: '' }),
@@ -65,13 +69,16 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
   for (const pattern of [
     /goal is empty: one line/, /task Bad_ID: id must be a lowercase slug/, /task dup: duplicate id/,
     /task ghost: dependsOn names "missing", which is not in the plan/, /task self: depends on itself/,
-    /task codex-task: a Codex task needs a tier \(standard or complex\)/, /task claude-tier: a Claude task's tier is one of light, standard, complex, or null for complex/,
+    /task codex-task: a Codex task needs a tier \(standard or complex\)/, /task claude-tier: tier "imaginary" is not a Claude tier \(light, standard or complex\)/,
+    /task claude-null: a Claude task needs a tier \(light, standard or complex\): the lightest that does the task as well as the top one/,
+    /task claude-absent: a Claude task needs a tier \(light, standard or complex\)/, /task codex-absent: a Codex task needs a tier \(standard or complex\)/,
     /task babysit-light: a babysit task runs the complex tier/,
     /task robot: agent must be claude or codex/, /task no-why: why is empty/,
     /task no-brief: brief is empty: the path of its brief file/, /task no-goal: goal is empty/,
     /task reader: is read-only, so it owns nothing/,
   ]) assert.match(out.stderr, pattern);
-  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:/);
+  // A babysitter always runs complex, so its plan entry may leave the tier out.
+  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:|task babysit-implied:/);
   assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
 
   const cycle = { goal: 'Cycle', tasks: [entry(run, 'a', { dependsOn: ['c'] }), entry(run, 'b', { dependsOn: ['a'] }), entry(run, 'c', { dependsOn: ['b'] })] };
@@ -111,7 +118,7 @@ test('plan names parallel conflicts on owned paths and resources, and records a 
   assert.match(checked.stdout, /checked only \(--check\): nothing recorded/);
   assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
   const recorded = await f.command(['plan', run.id, file]);
-  assert.match(recorded.stdout, /parser\s+claude\s+write\s+core/);
+  assert.match(recorded.stdout, /parser\s+claude complex\s+write\s+core/);
   assert.match(recorded.stdout, /next: .* dispatch /);
   assert.deepEqual(readJson(path.join(run.dir, 'plan.json')), readJson(file));
 });
@@ -133,7 +140,7 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
   await f.command(['plan', run.id, planFile(f, 'plan', plan)]);
 
   const dry = await f.command(['dispatch', run.id, '--dry-run']);
-  assert.match(dry.stdout, new RegExp(`would start api → claude, in a new worktree from the run's base commit ${run.baseCommit.slice(0, 12)}`));
+  assert.match(dry.stdout, new RegExp(`would start api → claude \\(complex tier\\), in a new worktree from the run's base commit ${run.baseCommit.slice(0, 12)}`));
   assert.match(dry.stdout, new RegExp(`would start scan → codex \\(standard tier\\), read-only, in ${f.repo}`));
   assert.match(dry.stdout, /blocked ui: waits on api \(not started\)/);
   assert.match(dry.stdout, /blocked notes: waits on scan \(not started\)/);
@@ -453,6 +460,35 @@ test('plan records briefs that are not written yet, and dispatch starts a task o
   assert.match(second.stdout, /started drafted → claude/);
   assert.match(second.stdout, /could not start unwritten: brief is missing or empty: .*unwritten-later\.md; write it/);
   await f.finished(run, 'drafted');
+});
+
+test('a plan task without a tier is refused by plan, and by dispatch for that task only', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = (id, extra = {}) => entry(run, id, { type: 'research', readOnly: true, owns: [], ...extra });
+  const plan = { goal: 'Mixed tiers', tasks: [task('no-tier', { tier: null }), task('codex-no-tier', { agent: 'codex', tier: null }), task('light-one', { tier: 'light' }), task('codex-one', { agent: 'codex', tier: 'standard' })] };
+  // `plan` and `plan --check` name each task and its tiers, and record nothing.
+  for (const flags of [[], ['--check']]) {
+    const refused = await f.command(['plan', run.id, planFile(f, 'mixed', plan), ...flags], { code: 1 });
+    assert.match(refused.stderr, /task no-tier: a Claude task needs a tier \(light, standard or complex\)/);
+    assert.match(refused.stderr, /task codex-no-tier: a Codex task needs a tier \(standard or complex\)/);
+    assert.doesNotMatch(refused.stderr, /light-one|codex-one/);
+  }
+  assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
+  // A plan recorded before tiers were required still dispatches its other tasks. Dry run and real run alike.
+  fs.writeFileSync(path.join(run.dir, 'plan.json'), JSON.stringify(plan));
+  const dry = await f.command(['dispatch', run.id, '--dry-run'], { code: 1 });
+  assert.match(dry.stdout, /could not start no-tier: a Claude task needs a tier \(light, standard or complex\).*; set its tier in the plan and record it again/);
+  assert.match(dry.stdout, /could not start codex-no-tier: a Codex task needs a tier \(standard or complex\)/);
+  assert.match(dry.stdout, /would start light-one → claude \(light tier\)/);
+  assert.match(dry.stdout, /would start codex-one → codex \(standard tier\)/);
+  const out = await f.json(['dispatch', run.id], { code: 1 });
+  assert.deepEqual(out.started.map((s) => s.id), ['light-one', 'codex-one']);
+  assert.deepEqual(out.failed.map((x) => x.id), ['no-tier', 'codex-no-tier']);
+  assert.equal(fs.existsSync(f.taskFile(run, 'no-tier')), false);
+  assert.equal(readJson(f.taskFile(run, 'light-one')).tier, 'light');
+  await f.finished(run, 'light-one');
+  await f.finished(run, 'codex-one');
 });
 
 test('a refused task uses no slot: dispatch starts the next ready task instead', async (t) => {

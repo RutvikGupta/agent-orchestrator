@@ -6,7 +6,7 @@ import { acceptedNow, lifecycleHints } from "../lifecycle.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
-import { RUNS_DIR } from "../config.mjs";
+import { CLI_PATH, RUNS_DIR } from "../config.mjs";
 import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
 import { die, emit, parseDuration, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
@@ -66,12 +66,16 @@ export async function cmdWait(args) {
     previous = new Set(needing.map(key));
     const running = tasks.filter((t) => t.state === "running");
     const done = running.length === 0 || (!args.all && finishedNow.length > 0);
-    const message = wake.check();
+    // A finish notice about a task this wait watches is no reason to wake: the finished result
+    // wakes it (exit 0) and names the task. The notice stays unread for the hook or `inbox`.
+    const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id && tasks.some((t) => t.id === m.about.task));
     if (newAttention || done || message || Date.now() >= deadline) {
       const asking = tasks.filter((t) => t.state === "needs-decision").map((t) => t.id);
+      const questions = needing.filter((item) => item.kind === "question").map((item) => item.task);
       const limited = tasks.filter((t) => t.limitHit).map((t) => `${t.id} (${t.agent})`);
       const hint =
         needing.map((item) => `\n${item.task}: ${item.label} — ${item.reason}`).join("") +
+        (questions.length ? `\n${questions.join(", ")} asked a question and ${questions.length > 1 ? "keep" : "keeps"} working: answer what the user's request covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\`, and ask the user the rest (SKILL.md, "Decisions agents hand back")` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
         (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +
         [...lifecycleHints(run, tasks), ...reportHints(run, tasks)].map((line) => `\n${line}`).join("");

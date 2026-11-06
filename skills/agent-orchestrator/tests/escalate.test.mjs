@@ -348,6 +348,7 @@ test('wait help documents exit 5 and every appended brief tells blocked agents t
   assert.match(text, /a gate cannot run here, a credential or service is missing, or the same failure has survived two fix attempts/);
   assert.match(text, /stop and report it right away in your final message, with the exact command and error/);
   assert.match(text, /Do not keep retrying or work around it silently/);
-  assert.match(text, /Nobody reads your messages until your session ends/);
+  assert.match(text, /never stop to wait for an answer/);
   assert.match(text, /Hand back only a decision beyond this brief/);
+  assert.match(text, /Ask it at once, and keep working: `node \S+orch\.mjs ask "<question>"/);
 });

@@ -1,6 +1,6 @@
 // Attention first wakes the orchestrator's wait. If it stays unhandled, the dashboard tells
-// the user once per task, attempt and kind (and, for a stuck task, episode). Pending timers and
-// sent notices survive restarts.
+// the user once per task, attempt and kind (and, for a stuck task, episode; for a question, each
+// question). Pending timers and sent notices survive restarts.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -53,12 +53,23 @@ function deliver(command, input, done) {
   }
 }
 
-// How often the dashboard checks for items to escalate: a tenth of the escalation delay, between
-// 1 and 10 seconds. Each check builds the whole board, so checking every second for a 10-minute
+// How long an item waits before it goes to the user. A decision or a question stalls an agent that
+// waits on someone, so it goes after AGENT_ORCH_DECISION_ESCALATE_AFTER (default 2 minutes, or the
+// general delay when that is shorter); every other kind after AGENT_ORCH_ESCALATE_AFTER (10 minutes).
+const DECISION_KINDS = new Set(["needs-decision", "question"]);
+export function escalationDelays() {
+  const after = parseDuration(process.env.AGENT_ORCH_ESCALATE_AFTER ?? "10m");
+  const set = process.env.AGENT_ORCH_DECISION_ESCALATE_AFTER;
+  return { after, decisionAfter: set ? parseDuration(set) : Math.min(after, 2 * 60_000) };
+}
+export const escalationDelay = (kind, delays = escalationDelays()) => (DECISION_KINDS.has(kind) ? delays.decisionAfter : delays.after);
+
+// How often the dashboard checks for items to escalate: a tenth of the shorter delay, between 1
+// and 10 seconds. Each check builds the whole board, so checking every second for a 10-minute
 // delay costs a steady share of a CPU core for nothing.
 export function escalationCheckMs() {
-  const after = parseDuration(process.env.AGENT_ORCH_ESCALATE_AFTER ?? "10m");
-  return Math.min(10_000, Math.max(1000, Math.round(after / 10)));
+  const { after, decisionAfter } = escalationDelays();
+  return Math.min(10_000, Math.max(1000, Math.round(Math.min(after, decisionAfter) / 10)));
 }
 
 export function createEscalator({ url, broadcast }) {
@@ -70,7 +81,7 @@ export function createEscalator({ url, broadcast }) {
     records = JSON.parse(fs.readFileSync(file, "utf8"));
     if (!records || typeof records !== "object" || Array.isArray(records)) throw new Error("invalid escalation ledger");
   }
-  const after = parseDuration(process.env.AGENT_ORCH_ESCALATE_AFTER ?? "10m");
+  const delays = escalationDelays();
   const save = () => writeJson(file, records);
   const failure = (key, channel, error) => {
     records[key].deliveries[channel] = { at: Date.now(), error };
@@ -112,8 +123,8 @@ export function createEscalator({ url, broadcast }) {
       if (!item) continue;
       const run = task.run || section.id;
       // A stuck task can get stuck again in the same attempt; each episode, named by its first
-      // failure's place in the event stream, notifies once.
-      const episode = item.kind === "stuck" ? [task.stuck?.firstIndex ?? null] : [];
+      // failure's place in the event stream, notifies once. So does each question an agent asks.
+      const episode = item.kind === "stuck" ? [task.stuck?.firstIndex ?? null] : item.kind === "question" ? [task.question?.id ?? null] : [];
       const key = JSON.stringify([run, task.id, task.attempt || 0, item.kind, ...episode]);
       active.add(key);
       if (!records[key]) {
@@ -121,7 +132,7 @@ export function createEscalator({ url, broadcast }) {
         changed = true;
       }
       const record = records[key];
-      if (record.escalatedAt != null || now - record.since < after) continue;
+      if (record.escalatedAt != null || now - record.since < escalationDelay(item.kind, delays)) continue;
       Object.assign(record, { reason: item.reason, waited: now - record.since, escalatedAt: now, deliveries: {} });
       changed = true;
       const title = section.runs?.find((r) => r.id === run)?.goal || section.goal || run;

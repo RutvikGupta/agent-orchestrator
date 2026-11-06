@@ -15,6 +15,7 @@ import { die, parseArgs } from "./lib/util.mjs";
 import { cmdHeavy } from "./lib/commands/heavy.mjs";
 import { cmdReclaim } from "./lib/commands/reclaim.mjs";
 import { cmdAgents } from "./lib/commands/agents.mjs";
+import { cmdAsk } from "./lib/commands/ask.mjs";
 import { cmdBrief } from "./lib/commands/brief.mjs";
 import { cmdInbox, cmdNap, cmdReply, cmdSend, cmdSteer } from "./lib/commands/inbox.mjs";
 import { cmdLesson } from "./lib/commands/lessons.mjs";
@@ -50,8 +51,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   unless the plan says otherwise. Writes the plan's brief path
                                   (default <run-dir>/briefs/TASK.md) or --out, and refuses to
                                   overwrite it without --force
-  start RUN TASK --agent claude|codex --why TEXT --brief FILE [--tier TIER] [--cd DIR]
-        [--read-only] [--sandbox] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
+  start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--cd DIR]
+        [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
         [--max-parallel N] [--force] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
                                   Tasks run outside the agents' sandboxes by default, with full
@@ -65,10 +66,13 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reply on GitHub; its timeout defaults to 24h.
                                   --why records the assessment behind the choice of agent and tier;
                                   it is required unless this attempt keeps the previous attempt's
-                                  agent and tier. --tier picks the model from policy.json: Claude
-                                  light|standard|complex (default complex, or the previous
-                                  attempt's tier; a babysitter always runs complex); Codex
-                                  standard|complex, required. "agents" lists each tier's model
+                                  agent and tier. --tier picks the model from policy.json and is
+                                  required for a new task: Claude light|standard|complex, Codex
+                                  standard|complex. A Claude follow-up keeps its earlier tier (a
+                                  task recorded before tiers resumes at complex), and --babysit
+                                  implies complex, so it needs none. "agents" lists each tier's model.
+                                  Run by a delegated agent, its own task gets an inbox message
+                                  when this attempt ends: ready for review, needs decision, or failed
   status RUN                      Every task: state, steps, current activity, tokens; also
                                   the sub-agents that the launching session started with its
                                   host's own tool (Claude Code's Agent tool, Codex's spawn_agent)
@@ -87,7 +91,7 @@ Usage: node orch.mjs <command> [args] [--json]
   wait RUN [TASK...] [--all] [--timeout DUR]
                                   Block until any running task finishes (exit 0), the timeout
                                   passes (exit 3), or a task newly needs attention (exit 5):
-                                  decision, failure, dead or silent. Exit 6 = a new unread message
+                                  decision, question, failure, dead or silent. Exit 6 = a new unread message
                                   for this agent; read it, then run the same command again.
                                   Existing attention is listed
                                   but does not wake wait. --all waits until every task finishes
@@ -146,6 +150,12 @@ Usage: node orch.mjs <command> [args] [--json]
   reply RUN TASK (TEXT | --file FILE) [--to ID]
                                   The agent answers the user's message (default: the latest it read);
                                   the dashboard shows the answer under it and in the agent's log
+  ask QUESTION [--options "a|b|c"] [--recommend a]
+                                  A delegated agent asks whoever started it, and keeps working: into
+                                  the parent task's inbox, or, when the parent is the user's own
+                                  session or will not read it, as a "question" on the dashboard that
+                                  also wakes the user's session's wait (exit 5). The answer arrives in the asker's inbox
+                                  (the parent runs send); wait for it with nap
   lesson (RUN | --repo DIR) [TEXT] [--evidence TEXT] [--list]
                                   Record a verified lesson for the repository, which every later
                                   brief includes; --list prints them
@@ -177,7 +187,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep"] },
-  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "babysit", "github", "force", "allow-nested", "no-publish"] },
+  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
@@ -198,6 +208,7 @@ const specs = {
   steer: {},
   inbox: { bool: ["ack", "all"] },
   reply: { value: ["to", "file"] },
+  ask: { value: ["options", "recommend"] },
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check"] },
   dispatch: { value: ["max"], bool: ["dry-run"] },
@@ -229,6 +240,7 @@ const handlers = {
   send: cmdSend,
   inbox: cmdInbox,
   reply: cmdReply,
+  ask: cmdAsk,
   nap: cmdNap,
   heavy: cmdHeavy,
   reclaim: cmdReclaim,

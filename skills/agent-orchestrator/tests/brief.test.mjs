@@ -11,7 +11,7 @@ const markers = (text) => text.split('<fill in:').length - 1;
 
 function task(id, fields = {}) {
   return { id, goal: `Goal of ${id}.`, type: 'implement', owns: [], uses: [], produces: [], resources: [],
-    dependsOn: [], agent: 'claude', tier: null, why: 'fixture', readOnly: false, brief: `briefs/${id}.md`, ...fields };
+    dependsOn: [], agent: 'claude', tier: 'standard', why: 'fixture', readOnly: false, brief: `briefs/${id}.md`, ...fields };
 }
 function plan(run, tasks) {
   writeJson(path.join(run.dir, 'plan.json'), { goal: 'Make the parser strict', acceptance: ['rejects trailing commas'], tasks });
@@ -189,12 +189,33 @@ test('every template renders, and a generated brief dispatches through start', a
   }
   const brief = path.join(run.dir, 'briefs', 'adhoc-implement.md');
   // start refuses a brief with unfilled markers; the orchestrator fills them in first.
-  const unfilled = await f.command(['start', run.id, 'adhoc-implement', '--agent', 'claude', '--why', 'Dispatches a generated brief', '--brief', brief], { code: 2 });
+  const unfilled = await f.command(['start', run.id, 'adhoc-implement', '--agent', 'claude', '--tier', 'standard', '--why', 'Dispatches a generated brief', '--brief', brief], { code: 2 });
   assert.match(unfilled.stderr, /unfilled marker/);
   fs.writeFileSync(brief, fs.readFileSync(brief, 'utf8').replace(/<fill in:[^>]*>/g, 'filled in'));
-  const started = await f.json(['start', run.id, 'adhoc-implement', '--agent', 'claude', '--why', 'Dispatches a generated brief', '--brief', brief]);
+  const started = await f.json(['start', run.id, 'adhoc-implement', '--agent', 'claude', '--tier', 'standard', '--why', 'Dispatches a generated brief', '--brief', brief]);
   const sent = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
   assert.ok(sent.startsWith(`${WRITE_ROLE}\n`));
   assert.match(sent, /```orch-result[\s\S]*## Decisions/);
   assert.equal((await f.finished(run, 'adhoc-implement')).state, 'completed');
+});
+
+test('every template suggests a tier in the command output, and the brief itself carries no tier line', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun('tiers');
+  const expected = {
+    implement: [/light or standard for a mechanical change or a well-specified one to 1 to 5 files/, /complex for several modules, an open approach, or costly or subtle mistakes/],
+    review: [/standard for a small diff, on the agent that did not write it/, /complex for a large or risky diff/],
+    research: [/Codex standard \(only Codex has live web search\)/, /a test or gate run that only reports: Claude light .* or Codex standard/],
+    debug: [/by the criteria: light or standard to reproduce a bug/, /complex when the cause is unknown across modules/],
+    babysit: [/complex, always: --babysit implies it, so no --tier is needed/],
+  };
+  for (const [type, patterns] of Object.entries(expected)) {
+    const out = await f.json(['brief', run.id, `suggest-${type}`, '--type', type]);
+    assert.equal(typeof out.suggestedTier, 'string', type);
+    for (const pattern of patterns) assert.match(out.suggestedTier, pattern, type);
+    const shown = await f.command(['brief', run.id, `suggest-${type}`, '--type', type, '--force']);
+    assert.match(shown.stdout, new RegExp(`^  suggested tier: ${out.suggestedTier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(a suggestion; SKILL\\.md, "Choose the agent and model"\\)$`, 'm'), type);
+    const text = fs.readFileSync(out.path, 'utf8');
+    assert.doesNotMatch(text, /<!--|suggested tier/, `${type}: the suggestion is for the orchestrator, not in the brief`);
+  }
 });
