@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { AGENTS, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
 import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { startedByCaller, watchForFinish } from "../finish-notice.mjs";
@@ -147,6 +148,23 @@ export function startTask(args, extra = {}) {
     refuse(`task ${writersHere[0].id} is already writing in ${cd}; give this task its own worktree, or pass --force`);
   }
 
+  // Read local settings before creating attempt artifacts. A broken optional file must
+  // not prevent work, and it cannot change the orchestrator's identity or execution setup.
+  const envFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "agent-orchestrator", "agent-env.json");
+  let agentEnv = {};
+  try {
+    const values = JSON.parse(fs.readFileSync(envFile, "utf8"));
+    if (!values || Array.isArray(values) || typeof values !== "object" || Object.entries(values).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !["string", "number", "boolean"].includes(typeof value) || String(value).includes("\0"))) throw new Error("expected a flat object of environment values");
+    const reserved = new Set(["XDG_STATE_HOME", "HOME", "PATH", "NODE_OPTIONS"]);
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith("AGENT_ORCH_") || reserved.has(key)) process.stderr.write(`orch: ignoring reserved agent environment key ${key}\n`);
+      else agentEnv[key] = String(value);
+    }
+  } catch (error) {
+    agentEnv = {};
+    if (error.code !== "ENOENT") process.stderr.write(`orch: ignoring agent environment ${envFile}: ${error instanceof SyntaxError ? "invalid JSON" : error.message}\n`);
+  }
+
   const attempt = (prev.attempt || 0) + 1;
   // Why this attempt starts: `retry` comes from retry.mjs; a `changes` verdict on the previous
   // attempt makes this one a rework.
@@ -184,7 +202,9 @@ export function startTask(args, extra = {}) {
     stdio: ["ignore", log, log],
     env: {
       ...process.env,
+      ...agentEnv,
       ...(net.httpsGit ? gitHttpsEnv(process.env) : {}),
+      AGENT_ORCH_HEAVY_ACTIVE: undefined, // A new agent needs its own heavy admissions.
       AGENT_ORCH_DEPTH: String(DEPTH + 1),
       AGENT_ORCH_RUN: run.id,
       AGENT_ORCH_TASK: id,

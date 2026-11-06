@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
 
 // Commands that publish or rewrite history are never stopped part-way: the message waits.
 const PROTECTED = /\b(git\s+(commit|push|rebase|merge|cherry-pick|am|tag|reset|checkout|switch|stash)|gt\s+(submit|sync|restack|modify|create|move|fold|split|squash)|gh\s+(pr\s+(create|merge|edit|ready|close|comment|review)|api\s+(-X|--method))|npm\s+publish|terraform\s+apply|alembic\s+upgrade)\b/;
@@ -90,7 +91,110 @@ function processTable() {
 const bare = (s) => s.replace(/['"\\]/g, "").replace(/\s+/g, " ").trim();
 const inner = (s) => bare(s).replace(/^\/bin\/(ba|z)?sh -l?c /, "");
 
-// The shell the agent's relay runs `command` in, and every process under it, deepest first.
+// `orch.mjs heavy` forwards each terminating signal it receives to its command's whole group
+// (heavy.mjs). A host that also signals the command directly would deliver that signal twice, and
+// three times through a nested heavy call; Docker Compose and Pants treat a second signal as
+// "force". So the wrapper is the only process of its branch that steering signals.
+const NODE = /^node(js)?\d*(\.\d+)*$/;
+// Node options that take their value as the next word. Any other word before the script is not
+// a Node option, so the line is not a script run.
+const NODE_VALUE_OPTIONS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title"]);
+// Options after which Node runs code from the line itself, so a later `orch.mjs` is only an argument.
+const NODE_CODE_OPTIONS = /^(-[a-zA-Z]*[epci][a-zA-Z]*|--(eval|print|check|interactive))(=|$)/;
+
+// The ways this skill's own CLI is named: the path this copy runs from, the skill roots' links to
+// it, and the path the steering process was started with. ps joins a process's arguments with
+// spaces, so these are matched as literal text, which keeps a path with spaces (a home folder or
+// `Application Support`) in one piece. Another copy of the CLI is found by `isHeavyWrapper`.
+function knownScripts() {
+  const paths = new Set([CLI_PATH, ...SKILL_ROOTS.map((root) => path.join(root, "agent-orchestrator", "scripts", "orch.mjs"))]);
+  if (path.basename(process.argv[1] || "") === "orch.mjs") paths.add(process.argv[1]);
+  return [...paths];
+}
+
+// Words that start `node [options]`: the executable, then only Node options. The executable is a
+// single word, or an absolute path with spaces in it: its later words do not start like a new path
+// or an option, so `sudo -u me /usr/bin/node` and `/usr/bin/time /usr/bin/node` are not Node.
+function nodeHead(words) {
+  for (let k = 0; k < words.length; k++) {
+    if (words.slice(1, k + 1).some((word) => /^[/.-]/.test(word))) break;
+    const exe = words.slice(0, k + 1).join(" ").replace(/^(["'])(.*)\1$/, "$2");
+    if (k > 0 && !exe.startsWith("/")) continue;
+    if (exe !== process.execPath && !NODE.test(path.basename(exe))) continue;
+    let ok = true;
+    for (let i = k + 1; ok && i < words.length; i++) {
+      if (NODE_CODE_OPTIONS.test(words[i]) || words[i] === "-") ok = false;
+      else if (NODE_VALUE_OPTIONS.has(words[i])) i++;
+      else ok = words[i].startsWith("-");
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+// The words after `heavy`: only `--json` and `--label TEXT` (the text may hold spaces) up to the
+// first `--`, which needs a command after it. The real command refuses anything else.
+function heavyArguments(words) {
+  let label = false;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (word === "--") return i + 1 < words.length;
+    if (word === "--json") label = false;
+    else if (word === "--label") {
+      if (i + 1 >= words.length || words[i + 1] === "--") return false;
+      label = true;
+      i++;
+    } else if (word.startsWith("--label=")) label = true;
+    else if (!label || word.startsWith("--")) return false;
+  }
+  return false;
+}
+
+const wordsOf = (text) => text.trim().split(/\s+/).filter(Boolean);
+const isFile = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+// The script path after Node and its options is searched this many words deep, and Node's own
+// options and executable are expected within the first words.
+const PATH_WORDS = 16, HEAD_WORDS = 24;
+
+// Whether a process's command line is a running `node .../orch.mjs heavy ... -- COMMAND`: Node and
+// its options, then the CLI script, then `heavy` and its arguments. A shell, `grep` or `echo` that
+// merely mentions these words does not start with Node, and neither does `node -e "..."` or
+// `node other.js orch.mjs heavy`, whose script is something else.
+//
+// ps joins the arguments with spaces, so where the script path ends is a guess unless it is checked
+// against something known. Three ways to tell, in order:
+//   1. `scripts` (this skill's own CLI paths by default), matched as literal text.
+//   2. A script path without spaces, which is one word.
+//   3. A script path with spaces: the words after Node and its options are joined one at a time
+//      until the text names an existing file (`exists`). That first file is the script, whatever
+//      its name: a real `other.js` ends the search, and what follows it is its arguments.
+// Anything else (a path with spaces to a file that is gone, say) does not match, which leaves its
+// process signaled directly, as before.
+export function isHeavyWrapper(commandLine, scripts = knownScripts(), exists = isFile) {
+  const text = String(commandLine).trim();
+  for (const needle of scripts.flatMap((script) => [script, `"${script}"`, `'${script}'`]).map((form) => ` ${form} heavy`)) {
+    for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+      const tail = text.slice(at + needle.length);
+      if ((tail === "" || /^\s/.test(tail)) && nodeHead(wordsOf(text.slice(0, at))) && heavyArguments(wordsOf(tail))) return true;
+    }
+  }
+  const spans = [...text.matchAll(/\S+/g)], words = spans.map((span) => span[0]);
+  if (words.some((word, i) => i > 0 && path.basename(word) === "orch.mjs" && words[i + 1] === "heavy" && nodeHead(words.slice(0, i)) && heavyArguments(words.slice(i + 2)))) return true;
+  for (let s = 1; s < words.length && s < HEAD_WORDS; s++) {
+    if (!words[s].startsWith("/") || !nodeHead(words.slice(0, s))) continue;
+    for (let e = s; e < words.length && e < s + PATH_WORDS; e++) {
+      const script = text.slice(spans[s].index, spans[e].index + words[e].length);
+      if (!exists(script)) continue;
+      if (path.basename(script) === "orch.mjs" && words[e + 1] === "heavy" && heavyArguments(words.slice(e + 2))) return true;
+      break; // the first existing file is the script
+    }
+  }
+  return false;
+}
+
+// The shell the agent's relay runs `command` in, and every process under it, deepest first. A
+// heavy wrapper's descendants (its command, and any nested wrapper with its own command) are left
+// out: the wrapper forwards the signal to them.
 export function commandTree(relayPid, command, rows = processTable()) {
   if (!rows) return null;
   const children = new Map();
@@ -100,7 +204,8 @@ export function commandTree(relayPid, command, rows = processTable()) {
   const shell = fragment && under(relayPid).find((row) => SHELL.test(row.command) && bare(row.command).includes(fragment));
   if (!shell) return null;
   const tree = [shell, ...under(shell.pid)];
-  return { shell, pids: tree.map((row) => row.pid).reverse() };
+  const forwarded = new Set(tree.filter((row) => isHeavyWrapper(row.command)).flatMap((row) => under(row.pid).map((d) => d.pid)));
+  return { shell, pids: tree.filter((row) => !forwarded.has(row.pid)).map((row) => row.pid).reverse() };
 }
 
 // What steering a task would do now: { stop: { command, pids, seconds } } or { wait: reason }.

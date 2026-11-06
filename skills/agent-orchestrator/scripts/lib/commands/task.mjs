@@ -1,5 +1,6 @@
 // `result`, `log`, `stop`, and `close`: read, stop, and close one run's tasks.
 
+import { reclaimTask } from "../reclaim.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { compact, formatElapsed, shortText } from "../format.mjs";
@@ -64,7 +65,10 @@ export function cmdResult(args) {
   // Collecting a finished task's result closes it; resuming the task opens it again. A task that
   // handed back a decision stays open until it is resumed, resolved or closed, but reading it
   // marks the decision seen, so `wait` stops waking for it.
-  if (!["running", "prepared", "needs-decision"].includes(d.state) && !task.closedAt) saveTask(run, { ...task, closedAt: new Date().toISOString() });
+  if (!["running", "prepared", "needs-decision"].includes(d.state) && !task.closedAt) {
+    saveTask(run, { ...task, closedAt: new Date().toISOString() });
+    reclaimTask(run, task);
+  }
   if (d.state === "needs-decision" && task.decisionSeenAttempt !== d.attempt) saveTask(run, { ...task, decisionSeenAttempt: d.attempt });
   const r = d.result;
   const session = d.session;
@@ -148,5 +152,6 @@ export function closeTask(run, task, extra = {}) {
     ? { decisionResolvedAt: now, decisionResolvedAttempt: row.attempt, decisionNote: "closed by the orchestrator without resuming the task" }
     : {};
   saveTask(run, { ...task, ...decision, ...extra, closedAt: now });
+  reclaimTask(run, task);
   return `${note}${row.state === "needs-decision" ? "; its decision is marked resolved" : ""}`;
 }
