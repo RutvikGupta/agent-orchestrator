@@ -217,7 +217,7 @@ export function inboxFields(run, task, row) {
 // Snapshot only unread ids at entry: an undelivered old message must not cause a busy loop.
 // `check(skip)` passes over the messages `skip` returns true for, such as finish notices about
 // tasks that `wait` reports itself.
-export function inboxWake() {
+export function inboxWake(snapshot = null) {
   const run = process.env.AGENT_ORCH_RUN, task = process.env.AGENT_ORCH_TASK;
   const name = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
   const dir = run && task && name.test(run) && name.test(task) ? path.join(RUNS_DIR, run, "tasks", task) : null;
@@ -226,8 +226,8 @@ export function inboxWake() {
   const pendingPath = dir ? path.join(dir, "wake-pending.json") : null;
   let pending;
   try { pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"))?.id; } catch {}
-  const previous = new Set(unread().filter((m) => m.id !== pending).map((m) => m.id));
-  return { pendingPath, check: (skip = () => false) => {
+  const previous = new Set(snapshot ?? unread().filter((m) => m.id !== pending).map((m) => m.id));
+  return { pendingPath, files: dir ? [path.join(dir, INBOX_FILE)] : [], get snapshot() { return [...previous]; }, check: (skip = () => false) => {
     const message = unread().find((m) => !previous.has(m.id) && !skip(m));
     if (!message) return null;
     const text = message.text.slice(0, 200);
