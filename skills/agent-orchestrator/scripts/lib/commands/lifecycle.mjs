@@ -2,6 +2,7 @@
 // their prerequisites land, mark reviewed results accepted, merge them, and rebuild the picture
 // after the orchestrator restarts.
 
+import { reclaimTask } from "../reclaim.mjs";
 import { spawnSync } from "node:child_process";
 import { computeEvidence } from "../report.mjs";
 import fs from "node:fs";
@@ -335,6 +336,7 @@ export function cmdAccept(args) {
   // A different commit or attempt is new work, which no earlier integration covers.
   if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt)) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
   saveTask(run, accepted);
+  reclaimTask(run, task);
   const empty = !task.readOnly && task.worktree && commit === git(cwd, ["rev-parse", `${task.worktree.from}^{commit}`], { allowFail: true });
   emit(
     args,
@@ -364,6 +366,7 @@ export function cmdIntegrate(args) {
   const dryRun = Boolean(args["dry-run"]);
   const row = describe(run, task);
   if (row.phase === "integrated") {
+    if (!dryRun) reclaimTask(run, task);
     const text = task.integratedAt
       ? `task ${id} is already integrated (${short(task.integratedCommit)})`
       : `task ${id} is read-only and its result was collected, so it already counts as integrated`;
@@ -375,7 +378,10 @@ export function cmdIntegrate(args) {
   const target = args.into || run.baseBranch || die("the run started on a detached HEAD, so it has no base branch; pass --into BRANCH", 2);
   const targetHead = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
   const record = (commit, text) => {
-    if (!dryRun) saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit });
+    if (!dryRun) {
+      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit });
+      reclaimTask(run, task);
+    }
     const ready = dryRun ? [] : readyAfter(run, id);
     emit(
       args,
