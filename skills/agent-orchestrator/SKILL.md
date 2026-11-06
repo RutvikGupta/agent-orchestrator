@@ -109,8 +109,12 @@ Host-specific rules, which matter for every later step:
 - Wrap Docker-based test suites, builds and container runs in `$ORCH heavy -- <command>`. Use
   `--label "focused tests"` before `--` to name the work. Only heavy commands wait; this lane
   never limits agents or sub-agents. Waiters enter in arrival order. A new message returns exit 6.
+  `heavy` runs a program, not a shell function or alias: run the script the function wraps, or
+  `$ORCH heavy -- bash -ic '<function> <args>'`.
 - Prefer the narrowest test target that proves the change. Leave a full suite to one agent.
   Reuse a running container instead of starting one per command when the project allows it.
+- Bound test workers: never `-n auto` or one worker per core; use at most 2 parallel workers
+  (for example `pytest -n 2`). Each worker holds its own copy of the imports and fixtures.
 - Stop containers and daemons you started when done. `$ORCH reclaim --dry-run` lists forgotten
   build daemons; `$ORCH reclaim` stops ones with no live workspace owner or running task.
   Task cleanup only covers its managed worktree under the run folder; it never reclaims a main
