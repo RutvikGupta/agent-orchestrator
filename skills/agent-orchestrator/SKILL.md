@@ -384,8 +384,13 @@ $ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" -
   choice too): it may commit, push without force, open pull requests, and write to GitHub, as a
   `--babysit` task does (step 8). Force pushes, admin merges, secrets and creating or deleting
   repositories stay denied. Pass `--no-publish` only when the user asks to review a task's work
-  before it lands; that denies commits, pushes and `gh` writes again. `--sandbox` keeps writes
-  inside the working directory, `--offline` also blocks the network, and `--read-only` maps to
+  before it lands; that denies commits, pushes and `gh` writes again. Claude file tools can read
+  and write the home directory and the agent's `$TMPDIR` by default; read-only tasks can read them
+  even with `--sandbox` or `--offline`. Read, Edit and Write deny credential stores, including
+  configured Claude/Codex directories and the resolved dashboard token. An unsandboxed shell can
+  still read those files. `--confine` keeps file tools in the
+  working directory. `--sandbox` and `--offline` retain write-task file confinement; the latter also blocks
+  the network. `--read-only` maps to
   Codex's `read-only` sandbox and Claude's `plan` mode ([references/agents.md](references/agents.md)).
 - Other flags after `--` go to the relay unchanged; `relay.mjs --help` lists them. Common ones:
   Codex `--network-access`, `--web-search live`; Claude `--max-turns 60`, `--max-budget-usd 10`.

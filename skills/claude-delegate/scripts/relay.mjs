@@ -14,8 +14,8 @@
  * at the terminal.
  *
  * The relay never commits. Its write-capable profiles use string rules to deny
- * common direct forms of `git commit`, `git push`, and nested `claude`, plus
- * any command containing `claude-delegate`. Aliases, scripts, and wrappers can
+ * common direct forms of `git commit`, `git push`, nested `claude`, and node
+ * commands invoking either delegate's `relay.mjs`. Aliases, scripts, and wrappers can
  * bypass those speed bumps; the brief's no-commit instruction and orchestrator
  * review remain the boundary. The orchestrator re-runs the project gates and
  * lands the work.
@@ -86,6 +86,7 @@
  *   --allow-publish                   Drop the git commit and git push deny rules,
  *                                     for a session that must land its own work.
  *                                     Add --deny rules for anything still off limits.
+ *   --confine                         Keep file tools inside the working directory.
  *   --no-sandbox                      Run shell commands outside Claude's shell
  *                                     sandbox, with full user access, and pre-approve
  *                                     the shell tool; deny rules still apply. Not
@@ -138,7 +139,7 @@ import {
 } from "node:fs";
 import {basename, delimiter, join, relative, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { constants as osConstants, tmpdir } from "node:os";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
 
@@ -301,6 +302,7 @@ function parseArgs(argv) {
     allowWrite: [],
     allowPublish: false,
     noSandbox: false,
+    confine: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -340,6 +342,7 @@ function parseArgs(argv) {
       case "--deny": opts.extraDeny.push(next()); break;
       case "--allow-write": opts.allowWrite.push(resolve(next())); break;
       case "--allow-publish": opts.allowPublish = true; break;
+      case "--confine": opts.confine = true; break;
       case "--no-sandbox": opts.noSandbox = true; break;
       default:
         fail(`unknown option: ${arg}`);
@@ -548,6 +551,20 @@ function toolSurface(opts) {
   return `Read,Glob,Grep,Edit,Write,${shellTool()}`;
 }
 
+const CREDENTIAL_PATHS = [
+  "~/.ssh/**", "~/.aws/**", "~/.config/gcloud/**", "~/.docker/config.json",
+  "~/.netrc", "~/.git-credentials", "~/.claude/.credentials*", "~/.codex/auth.json",
+  "~/.local/state/agent-orchestrator/dashboard-token",
+  "~/.config/gh/**", "~/.config/graphite/**", "~/.config/github-copilot/**",
+  "~/.boto", "~/.kube/**", "~/.fly/**", "~/.gnupg/**", "~/.npmrc", "~/.claude.json",
+];
+
+function fileDirectories(opts) {
+  if (opts.confine || (!opts.noSandbox && !opts.readOnly)) return [];
+  return [...new Set([homedir(), process.env.TMPDIR])]
+    .filter((dir) => dir && existsSync(dir));
+}
+
 function profileSettings(opts) {
   const shell = shellTool();
   const shellSandboxEnabled = !opts.readOnly && process.platform !== "win32" && !opts.noSandbox;
@@ -557,29 +574,18 @@ function profileSettings(opts) {
       ? { env: { CLAUDE_CODE_USE_POWERSHELL_TOOL: "1" } }
       : {}),
     permissions: {
-      deny: opts.readOnly
-        ? []
-        : [
-            // Two-wildcard git forms require text after the subcommand, so the
-            // single-wildcard forms also catch `git -C <dir> push`; they also
-            // deny reads like `git log --grep push`. Anchor `claude` at command
-            // position so reads mentioning it remain allowed. Keep
-            // `claude-delegate` as a substring rule to stop recursive relay
-            // invocation; any command containing it is denied.
-            ...(opts.allowPublish
-              ? []
-              : [
-                  `${shell}(git commit *)`,
-                  `${shell}(git * commit *)`,
-                  `${shell}(git * commit)`,
-                  `${shell}(git push *)`,
-                  `${shell}(git * push *)`,
-                  `${shell}(git * push)`,
-                ]),
-            `${shell}(claude *)`,
-            `${shell}(*claude-delegate*)`,
-            ...opts.extraDeny,
-          ],
+      deny: [
+        ...CREDENTIAL_PATHS.flatMap((p) => ["Read", "Edit", "Write"].map((tool) => `${tool}(${p})`)),
+        // Git wildcard forms cover `git -C <dir> push` too. Match relay execution,
+        // rather than a skill directory name, so shell reads remain allowed.
+        ...(opts.allowPublish ? [] : [
+          `${shell}(git commit *)`, `${shell}(git * commit *)`, `${shell}(git * commit)`,
+          `${shell}(git push *)`, `${shell}(git * push *)`, `${shell}(git * push)`,
+        ]),
+        `${shell}(claude *)`,
+        `${shell}(*node *relay.mjs*)`,
+        ...opts.extraDeny,
+      ],
     },
     ...(shellSandboxEnabled
       ? {
@@ -643,6 +649,9 @@ function buildArgv(opts, run) {
     "--disable-slash-commands",
     "--settings", run.settingsPath,
   ];
+
+  const directories = fileDirectories(opts);
+  if (directories.length) argv.push("--add-dir", ...directories);
 
   if (opts.readOnly) {
     argv.push("--permission-mode", "plan");

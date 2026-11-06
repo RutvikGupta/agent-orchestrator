@@ -49,7 +49,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   (default <run-dir>/briefs/TASK.md) or --out, and refuses to
                                   overwrite it without --force
   start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--cd DIR]
-        [--read-only] [--sandbox] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
+        [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
         [--max-parallel N] [--force] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
                                   Tasks run outside the agents' sandboxes by default, with full
@@ -173,7 +173,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep"] },
-  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "babysit", "github", "force", "allow-nested", "no-publish"] },
+  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
