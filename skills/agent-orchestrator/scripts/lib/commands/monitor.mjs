@@ -1,7 +1,9 @@
 // `status`, `wait`, and `watch`: follow a run's tasks while they run.
 
 import fs from "node:fs";
-import { inboxWake } from "../inbox.mjs";
+import os from "node:os";
+import path from "node:path";
+import { INBOX_FILE, QUESTIONS_FILE, inboxWake } from "../inbox.mjs";
 import { acceptedNow, lifecycleHints } from "../lifecycle.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
@@ -17,12 +19,78 @@ export function cmdStatus(args) {
   emit(args, { run: run.id, dir: run.dir, tasks }, statusText(run, tasks));
 }
 
-export async function cmdWait(args) {
-  const wake = inboxWake();
+// Replace the waiting Node process with a small shell, then resume the same command and PID.
+// Keep state in a private file rather than argv/environment (large inboxes can exceed ARG_MAX).
+// Older Node releases and Windows retain the ordinary timer loop.
+export function parkHelper(deadline, command, args, state, { pids = [], files = [], checkedAt = Date.now() } = {}) {
+  if (typeof process.execve !== "function" || process.platform === "win32") return false;
+  // Do not discard a retry notice still buffered behind a slow stdout/stderr consumer.
+  if (process.stdout.writableLength || process.stderr.writableLength) return false;
+  const max = parseDuration(process.env.AGENT_ORCH_PARK_MAX ?? "30s");
+  if (!(max > 0) || !Number.isFinite(max)) die("AGENT_ORCH_PARK_MAX must be a finite positive duration", 2);
+  let dir;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-park-"));
+    const file = path.join(dir, "state.json");
+    const marker = path.join(dir, "marker");
+    fs.writeFileSync(file, JSON.stringify({ args, state, execArgv: process.execArgv }), { mode: 0o600 });
+    fs.writeFileSync(marker, "", { mode: 0o600 });
+    // Bash 3.2's -nt compares whole seconds. Start before the Node snapshot so changes
+    // during that snapshot or in the marker's second cannot disappear in the handoff.
+    // Check only after sleeping: a recently read file causes at most one extra poll.
+    const stamp = Math.floor(checkedAt / 1000) - 1;
+    fs.utimesSync(marker, stamp, stamp);
+    const module = command === "cmdWait" ? import.meta.url : new URL("./inbox.mjs", import.meta.url).href;
+    const source = `import fs from 'node:fs'; const file=process.argv[1]; const {args,state,execArgv}=JSON.parse(fs.readFileSync(file,'utf8')); fs.rmSync(process.argv[2],{recursive:true}); process.execArgv=execArgv; const mod=await import(${JSON.stringify(module)}); await mod.${command}(args,state);`;
+    // Only sleep forks. PID checks, file tests and the bounded countdown are shell builtins.
+    // Function arguments retain each path literally, including whitespace and newlines.
+    const script = `file=$1; dir=$2; ticks=$3; tail=$4; marker=$dir/marker; shift 4
+pids=; n=$1; shift
+while [ "$n" -gt 0 ]; do pids="$pids $1"; shift; n=$((n-1)); done
+child=
+trap '[ -z "$child" ] || kill "$child" 2>/dev/null; rm -rf "$dir"; trap - TERM; kill -TERM "$$"' TERM
+trap '[ -z "$child" ] || kill "$child" 2>/dev/null; rm -rf "$dir"; trap - INT; kill -INT "$$"' INT
+changed() {
+  for pid in $pids; do kill -0 "$pid" 2>/dev/null || return 0; done
+  n=$1; shift
+  for f do
+    [ "$n" -gt 0 ] || break
+    [ "$f" -nt "$marker" ] && return 0
+    n=$((n-1))
+  done
+  return 1
+}
+woke=0
+while [ "$ticks" -gt 0 ]; do
+  sleep 1 & child=$!; wait "$child"; child=
+  ticks=$((ticks-1))
+  if changed "$@"; then woke=1; break; fi
+done
+if [ "$woke" -eq 0 ] && [ "$tail" != 0 ]; then sleep "$tail" & child=$!; wait "$child"; child=; fi
+n=$1; shift
+while [ "$n" -gt 0 ]; do shift; n=$((n-1)); done
+exec "$@" "$file" "$dir"`;
+    const ms = Math.min(max, Math.max(0, deadline - Date.now()));
+    const watchedPids = [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    const watchedFiles = [...new Set(files)];
+    process.execve("/bin/sh", ["sh", "-c", script, `${CLI_PATH} ${command === "cmdWait" ? "wait" : "nap"} ${args._.join(" ")}`,
+      file, dir, String(Math.floor(ms / 1000)), String((ms % 1000) / 1000),
+      String(watchedPids.length), ...watchedPids.map(String), String(watchedFiles.length), ...watchedFiles,
+      process.execPath, ...process.execArgv, "--input-type=module", "-e", source], process.env);
+  } catch {
+    // A missing execve facility or unwritable temporary folder must not break waiting.
+  } finally {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return false;
+}
+
+export async function cmdWait(args, resumed = null) {
+  const wake = inboxWake(resumed?.inbox);
   const run = loadRun(args._[0]);
   const ids = args._.slice(1);
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
-  const deadline = timeout === 0 ? Infinity : Date.now() + timeout;
+  const deadline = resumed ? (resumed.deadline ?? Infinity) : timeout === 0 ? Infinity : Date.now() + timeout;
   const snapshot = () => {
     const rows = listTasks(run);
     // The relay can write its result and exit between describe()'s result read and process
@@ -34,7 +102,8 @@ export async function cmdWait(args) {
     return item ? [{ task: t.id, attempt: t.attempt, ...item }] : [];
   });
   const key = (item) => JSON.stringify([item.task, item.attempt, item.kind]);
-  let previous = null;
+  let previous = resumed ? new Set(resumed.previous) : null;
+  let polled = Boolean(resumed);
   // By default wait returns as soon as any watched task has an unread result: it finished, and
   // nobody has collected it with `result`, closed it, accepted it, or resolved its decision. That
   // includes a task that finished while no wait was running, for example while the orchestrator
@@ -47,6 +116,7 @@ export async function cmdWait(args) {
     return t.state !== "needs-decision" || record.decisionSeenAttempt !== t.attempt;
   };
   for (;;) {
+    const checkedAt = Date.now();
     let tasks = snapshot().filter((t) => (ids.length ? ids.includes(t.id) : t.state !== "prepared"));
     if (!tasks.length) die(ids.length ? `no tasks named ${ids.join(", ")}` : "no started tasks in this run");
     // Snapshot before retries, so attention already present at entry never wakes a repeated wait.
@@ -86,6 +156,23 @@ export async function cmdWait(args) {
       }
       process.exit(newAttention ? 5 : done ? 0 : message ? 6 : 3);
     }
+    if (polled) {
+      const files = [...wake.files];
+      const pids = [];
+      for (const task of tasks) {
+        const dir = path.join(run.dir, "tasks", task.id);
+        files.push(path.join(dir, INBOX_FILE), path.join(dir, QUESTIONS_FILE), path.join(dir, "task.json"));
+        if (task.outDir) files.push(path.join(task.outDir, "result.json"));
+        // Parked babysitters remain running without a relay. A dead PID only asks Node
+        // for another snapshot; it never decides whether any task has finished.
+        if (task.state === "running" && task.phase !== "parked") pids.push(loadTask(run, task.id)?.pid);
+      }
+      parkHelper(deadline, "cmdWait", { ...args, _: [run.dir, ...ids] },
+        { deadline: Number.isFinite(deadline) ? deadline : null, previous: [...previous], inbox: wake.snapshot },
+        { pids, files, checkedAt });
+    }
+    // Short waits usually finish within the first interval; avoid a handoff for those.
+    polled = true;
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
 }

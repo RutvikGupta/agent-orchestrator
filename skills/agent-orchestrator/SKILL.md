@@ -456,6 +456,10 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
   newly needs **attention**: a decision, a question, a failure, a dead or silent task, or a transient error
   with no retries left. Handle it, then wait again; attention that was there when `wait` started is
   listed, but does not wake it. `wait` also names the tasks ready to dispatch or awaiting review.
+- On POSIX with a Node version that supports `process.execve`, `wait` and `nap` spend idle
+  time in a small shell. It checks watched PIDs and message/result files every second, then
+  returns to Node on a change, at the deadline, or after `AGENT_ORCH_PARK_MAX` (default `30s`).
+  Other attention, such as a task becoming silent, is checked at that maximum interval.
 - **Automatic retry.** When a task fails with a transient provider or network error, `wait` resumes
   it once in the same session (`AGENT_ORCH_MAX_RETRIES`, default 1) and prints `retried <task> …`.
   A deliberate stop, a timeout and a usage limit are never retried.
