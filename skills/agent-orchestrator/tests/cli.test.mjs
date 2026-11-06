@@ -82,12 +82,41 @@ for (const agent of ['claude', 'codex']) {
   });
 }
 
-test('start rejects missing rationale and Codex tier without launching a relay', async (t) => {
+test('a delegated write brief ends with the delegation note: split, lightest tier, pass it on, no commits', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const started = await f.start(run, 'writer');
+  const brief = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
+  const note = brief.slice(brief.indexOf('## Delegating further'), brief.indexOf('## Decisions'));
+  assert.ok(note.length > 0 && note.length < 2500, `the note stays short: ${note.length} characters`);
+  // Delegate through the skill, rather than doing parts one after another.
+  assert.match(note, /orch\.mjs`; read its SKILL\.md first, then `new` a run and `start` each agent\) rather than doing things one after another/);
+  assert.match(note, /two or more independent parts, split it and start one agent per part/);
+  assert.match(note, /slow side work \(test suites, gates, builds, deploys, long runs, reviews/);
+  // The lightest tier for each piece, with the deciding factor in --why.
+  assert.match(note, /Pick the lightest tier that does each piece as well as the top one/);
+  assert.match(note, /running tests or gates, reproducing a bug, lookups, mechanical edits, small well-specified changes, docs and reviews of small diffs usually fit `light` or `standard`/);
+  assert.match(note, /Name the deciding factor in `--why`/);
+  // Pass it on, one sentence on the automatic notice, and the safety lines that stay.
+  assert.match(note, /tell it in its brief to delegate them the same way/);
+  assert.match(note, /You are notified when an agent you started finishes, so do not poll\./);
+  assert.match(note, /the agents you start never commit, push or publish; you do/);
+  assert.match(note, /Run at most 6 at a time/);
+  assert.match(note, /close them before you finish/);
+  assert.match(note, /`NEEDS DECISION:`/);
+  assert.match(note, /1 level below the user's session; agents 4 levels down cannot delegate/);
+  // Gone: the old "by default, hand ... anything that would otherwise make you wait" wording.
+  assert.doesNotMatch(note, /Split the change itself across agents only/);
+});
+
+test('start rejects a missing rationale and a missing tier without launching a relay', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   const brief = f.brief('validation');
-  const why = await f.command(['start', run.id, 'no-why', '--agent', 'claude', '--brief', brief], { code: 2 });
+  const why = await f.command(['start', run.id, 'no-why', '--agent', 'claude', '--tier', 'standard', '--brief', brief], { code: 2 });
   assert.match(why.stderr, /--why is required/);
+  const claudeTier = await f.command(['start', run.id, 'no-tier', '--agent', 'claude', '--why', 'test', '--brief', brief], { code: 2 });
+  assert.match(claudeTier.stderr, /--tier is required for a new Claude task/);
   const tier = await f.command(['start', run.id, 'no-tier', '--agent', 'codex', '--why', 'test', '--brief', brief], { code: 2 });
   assert.match(tier.stderr, /--tier/);
   assert.deepEqual((await f.json(['status', run.id])).tasks, []);
@@ -103,7 +132,7 @@ test('parallel limit, timeout exit 3, stop, and closing a running task', async (
   const brief = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
   assert.match(brief, /## Decisions/);
   assert.doesNotMatch(brief, /## Delegating further/);
-  const rejected = await f.command(['start', run.id, 'second', '--agent', 'claude', '--why', 'test',
+  const rejected = await f.command(['start', run.id, 'second', '--agent', 'claude', '--tier', 'light', '--why', 'test',
     '--brief', f.brief('second'), '--read-only'], { code: 1, env });
   assert.match(rejected.stderr, /1 tasks already running \(limit 1\)/);
   assert.equal(fs.existsSync(f.taskFile(run, 'second')), false);
@@ -180,7 +209,7 @@ test('nested depth 1 defaults to six slots; depth 4 refuses to start', async (t)
     await f.ready(task);
     assert.equal(readJson(path.join(task.outDir, 'invocation.json')).depth, '2');
   }
-  const args = ['start', run.id, 'overflow', '--agent', 'claude', '--why', 'test', '--brief', f.brief('overflow'), '--read-only'];
+  const args = ['start', run.id, 'overflow', '--agent', 'claude', '--tier', 'light', '--why', 'test', '--brief', f.brief('overflow'), '--read-only'];
   const limit = await f.command(args, { code: 1, env });
   assert.match(limit.stderr, /6 tasks already running \(limit 6\)/);
   const depth = await f.command(args, { code: 1, env: { AGENT_ORCH_DEPTH: '4' } });

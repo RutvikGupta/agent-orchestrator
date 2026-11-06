@@ -1,21 +1,21 @@
 {
   "claude": {
-    "note": "Tiers are listed lightest first. Every Claude tier runs at xhigh effort, the same as Opus: the claude CLI accepts it for Haiku, Sonnet and Opus, and a lighter model should not also lose effort.",
+    "note": "Tiers are listed lightest first. Every Claude tier runs at xhigh effort, the same as Opus: the claude CLI accepts it for Haiku, Sonnet and Opus, and a lighter model should not also lose effort. Every new task names its tier with --tier; choose the lightest one that does the task as well as the top one.",
     "tiers": {
       "light": {
         "model": "claude-haiku-5-5",
         "effort": "xhigh",
-        "use": "mechanical and lookup work: renames, formatting, simple searches and summaries, gathering facts from given files"
+        "use": "mechanical and lookup work: running tests or gates and reporting, reproducing a bug, inventories and summaries, renames and other mechanical edits, gathering facts from given files"
       },
       "standard": {
         "model": "claude-sonnet-5-5",
         "effort": "xhigh",
-        "use": "well-specified, bounded work: small changes to 1 to 5 files with clear done criteria, tests for existing behavior, docs, reviews of small diffs"
+        "use": "well-specified, bounded work: small changes with clear done criteria, tests for existing behavior, docs, reviews of small diffs"
       },
       "complex": {
         "model": "claude-opus-5-5",
         "effort": "xhigh",
-        "use": "hard, ambiguous, cross-cutting or high-risk work, every pull-request babysitter, and the default when unsure or without --tier"
+        "use": "hard or high-risk work: several modules, an unsettled approach, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed lighter attempt; every pull-request babysitter"
       }
     }
   },
@@ -24,12 +24,12 @@
       "standard": {
         "model": "gpt-6.1-sol",
         "effort": "medium",
-        "use": "well-specified, bounded work; the default Codex tier"
+        "use": "well-specified, bounded work: small changes, test or gate runs, lookups and research, reviews of small diffs"
       },
       "complex": {
         "model": "gpt-6-astra",
         "effort": "high",
-        "use": "ambiguous, cross-cutting, or high-risk work, or a standard-tier attempt that failed"
+        "use": "hard or high-risk work: several modules, an unsettled approach, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed standard attempt"
       }
     }
   }
