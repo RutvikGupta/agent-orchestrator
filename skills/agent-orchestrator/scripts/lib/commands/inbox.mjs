@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
-import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, inboxWake, markRead, markSteered, readInbox, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { CHILD_FIRST, INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, fromAgent, inboxWake, markRead, markSteered, readInbox, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { describe, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration } from "../util.mjs";
@@ -37,6 +37,12 @@ function delivery(task) {
   return `${unhooked}, so Claude reads it the next time it runs \`inbox\`, at its next gate run`;
 }
 
+// How a message sent now would reach this attempt of the task, and whether it would be read.
+export function messageReach(task) {
+  const how = delivery(task);
+  return { delivery: how, reaches: !how.includes("will not read it") };
+}
+
 // A message the task cannot take now, with the HTTP status the dashboard answers with.
 export class SendError extends Error {
   constructor(message, status) {
@@ -59,8 +65,9 @@ export function imageKind(data) {
 // Attached images (Buffers that imageKind accepts) are saved in the task's folder, where only the
 // user can read them, and their paths are added to the text the agent receives.
 // `steer` stops the agent's pending command so the message reaches it now (see steer.mjs); the
-// answer's `steer` says what happened: { stopped, seconds } or { waiting }.
-export function deliverMessage(run, id, text, { from = null, images = [], steer = false } = {}) {
+// answer's `steer` says what happened: { stopped, seconds } or { waiting }. A message from an agent
+// the task started (finish-notice.mjs, `ask`) has `from` "agent:<run>/<task>", `kind` and `about`.
+export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   text = String(text ?? "").trim();
@@ -95,12 +102,12 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
     : text;
   // The plan is made before the message is written, so the agent learns its command was stopped.
   const plan = steer ? planSteer(task) : null;
-  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null });
-  const how = delivery(task);
+  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, kind, about });
+  const { delivery: how, reaches } = messageReach(task);
   let steered = null;
   if (plan?.stop) steered = stopCommand(plan).length ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" };
   else if (plan) steered = { waiting: plan.wait };
-  return { message, delivery: how, reaches: !how.includes("will not read it"), steer: steered };
+  return { message, delivery: how, reaches, steer: steered };
 }
 
 // "Send now" for messages already waiting: stop the agent's current command so it reads them.
@@ -226,6 +233,7 @@ export function cmdInbox(args) {
       for (const r of replies.filter((r) => r.to === m.id)) lines.push(`  replied ${r.time}: ${r.text}`);
       if (m.steered && !m.read) lines.push(steeredNote(m.steered));
       if (m.from === "user" && !m.read) lines.push(`${USER_FIRST} ${replyHint(run.id, id)}`);
+      else if (fromAgent(m) && !m.read) lines.push(CHILD_FIRST);
     }
     if (args.ack && unread.length && !ackError) lines.push("", `marked ${plural(unread.length, "message")} as read`);
   }

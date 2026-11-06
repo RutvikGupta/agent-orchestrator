@@ -96,8 +96,8 @@ Host-specific rules, which matter for every later step:
   "Delegating further" section of your brief says how. Split the change itself only where its parts
   are independent. If you delegate, keep every constraint of your own brief in your
   agents' briefs, review and integrate their results, close them before you finish, and cover their
-  work in your report. Decide what your agents hand back as in "Decisions agents hand back", but
-  pass a decision beyond your brief up as your own `NEEDS DECISION:` instead of asking the user.
+  work in your report. Handle what your agents send you first, as in "Decisions agents hand back",
+  and pass a decision beyond your brief up at once with `$ORCH ask` instead of asking the user.
   Runs at the second level allow 6 tasks at once, the third 4, and the fourth 2; agents below the
   fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
 
@@ -315,11 +315,11 @@ decisions already made, the agreed shape of each interface in `uses` and `produc
 `AGENTS.md`; the **gates**, the project's real test, lint, and build commands plus the applicable
 testing skill; and the **report contract**.
 
-`start` appends two sections to every brief. "Decisions" tells the agent that nobody answers it
-mid-run, so it never waits or leaves a point "pending a decision": it decides what the brief
-covers, reports a blocker at once (a gate that cannot run, a missing credential or service, or a
-failure that survived two fixes), and hands back anything beyond the brief by ending with
-`NEEDS DECISION:` (step 5). "Structured result" asks for an `orch-result` block, which `result`
+`start` appends two sections to every brief. "Decisions" tells the agent never to wait idle or
+leave a point "pending a decision": it decides what the brief covers, reports a blocker at once (a
+gate that cannot run, a missing credential or service, or a failure that survived two fixes), asks
+about anything beyond the brief with `ask` while it keeps working, and ends with `NEEDS DECISION:`
+only when nothing else is left (step 5). "Structured result" asks for an `orch-result` block, which `result`
 parses: outcome, changed files, checks (including the testing-skill check, or why none ran),
 decisions handed back, and what is unresolved. It also caps the final message at about 25 lines,
 with long evidence in a file; `wait` flags a longer report. Put the decisions you already made in
@@ -389,7 +389,7 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
   `resolve` its decision; a task that finished while no `wait` ran wakes the next `wait` at once.
   `result` on a task that handed back a decision marks the decision seen, and `close` on it marks
   the decision resolved. It exits 5 as soon as a task
-  newly needs **attention**: a decision, a failure, a dead or silent task, or a transient error
+  newly needs **attention**: a decision, a question, a failure, a dead or silent task, or a transient error
   with no retries left. Handle it, then wait again; attention that was there when `wait` started is
   listed, but does not wake it. `wait` also names the tasks ready to dispatch or awaiting review.
 - **Automatic retry.** When a task fails with a transient provider or network error, `wait` resumes
@@ -410,24 +410,36 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 
 #### Decisions agents hand back
 
+**The parent acts first**: it handles what its agents send before its next step on its own work.
+
+- **Finish notice.** When an orch task started a task, it gets one inbox message from
+  `agent:<run>/<task>` when each attempt ends: ready for review, needs a decision (with the
+  questions), or failed (with the error's first line), and the `result` command. `nap`, `wait` and
+  `pr-watch` wake on it (exit 6). The user's session gets none; its `wait` wakes on the result.
+- **Questions.** A running agent asks with `$ORCH ask "<question>" [--options "a|b|c"]
+  [--recommend a]` and keeps working. The question reaches the parent task's inbox, or, when the
+  parent is the user's session or will not read it, the dashboard's lane, first, as a `question`
+  that wakes `wait` (exit 5). Answer with `$ORCH send <run> <task-id> "<answer>"` (or the dashboard's box); it clears
+  once the agent has read a message sent after it.
+
 A task whose final message starts with `NEEDS DECISION:`, or whose `orch-result` block lists
 `decisions`, shows as `needs-decision` in `wait`, `status`, and the dashboard, and `result` lists
-its questions. It is waiting on you, not done, so handle it as soon as `wait` returns, before
-reviewing other results:
+its questions. It is waiting on you, not done. For it, and for a question:
 
-1. Decide it yourself when the user's request, the repository's rules, or decisions already made
-   settle it. That includes a reviewer's request: make it when it is within the pull request's
-   scope; otherwise it is a follow-up, listed in the pull request description.
-2. Resume the same session at once with the answer as a short delta brief (step 6, "Rework"). If
-   you handled it without the agent (you made the change yourself, or nothing needs doing), run
+1. Decide it yourself when the user's request (or your brief), the repository's rules, or decisions
+   already made settle it. That includes a reviewer's request: make it when it is within the pull
+   request's scope; otherwise it is a follow-up, listed in the pull request description.
+2. Answer a question with `send`; resume a task that ended with the answer as a short delta brief
+   (step 6, "Rework"). If you handled it without the agent, run
    `$ORCH resolve <run> <task-id> --note "<how it was handled>"` instead: the task stops waiting on
    a decision, moves to awaiting review, and can be accepted.
-3. Ask the user only about a decision that changes the scope of the request, the security posture,
-   or the cost. Ask it as one question with your recommendation, keep every other task going, and
-   resume the agent as soon as the user answers.
+3. Pass up only a decision that changes the scope, the security posture, or the cost: at once with
+   `$ORCH ask` from a delegated agent, or as one question with your recommendation to the user.
+   Keep every other task going, and pass the answer down as soon as it comes.
 
-Never end your turn, or report the work as done, while a task waits on a decision you could make,
-and never let an agent's question sit unanswered on GitHub in a reply that says "pending". Agents
+Review a finished task and record `accept` or `verdict` right away. Never leave an agent waiting
+on your review or decision, never end your turn or report the work as done while one does, and
+never let an agent's question sit unanswered on GitHub in a reply that says "pending". Agents
 started with your host's own tool are marked the same way when they end with `NEEDS DECISION:`.
 
 **Steer a running agent** instead of stopping it, for example to pass on a constraint that
@@ -463,8 +475,8 @@ whose tab was opened another way.
   reports that session (`stateSource` on the row), and from its transcript otherwise; Codex's app
   server is read only with `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see
   threads another Codex process runs.
-- Its **attention lane** lists what needs someone: decisions, failures, results awaiting review,
-  and silent tasks. A babysitter never awaits review. A review left waiting longer than
+- Its **attention lane** lists what needs someone: questions from running agents, decisions,
+  failures, results awaiting review, and silent tasks. A babysitter never awaits review. A review left waiting longer than
   `AGENT_ORCH_REVIEW_STALE` (default 24h) leaves the lane; `recover` still lists it.
 - A running task is **stuck** when one shell command failed its last 3 runs
   (`AGENT_ORCH_STUCK_REPEATS`) with only read-only inspection, such as `cat`, `grep` or `git diff`,
@@ -475,7 +487,9 @@ whose tab was opened another way.
   outline marks attention, and "+N" counts tasks delegated to a nested run, drawn as its own graph.
   Clicking a task chooses it as its row does. `/api/state` carries each run's `graph`.
 - **Escalation.** An item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
-  (default 10m; checked every tenth of that, from 1 to 10 seconds) goes to the user once, while
+  (default 10m), or a decision or question for `AGENT_ORCH_DECISION_ESCALATE_AFTER` (default 2m,
+  or the first when that is shorter; checked every tenth of the shorter, from 1 to 10 seconds),
+  goes to the user once, while
   the dashboard runs, even with no tab open: a macOS
   notification (`AGENT_ORCH_NOTIFY=off` turns it off), a browser notification, and the command in
   `notify.json` under the state root (`~/.local/state/agent-orchestrator`, or `AGENT_ORCH_HOME`),
