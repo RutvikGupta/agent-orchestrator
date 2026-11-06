@@ -215,7 +215,7 @@ test('start rejects reserved environment keys and applies ordinary values', asyn
   const preload = path.join(f.root, 'env.cjs'), seen = path.join(f.root, 'env.json');
   fs.writeFileSync(preload, `if(process.argv[1]?.endsWith('relay.mjs'))require('fs').writeFileSync(${JSON.stringify(seen)},JSON.stringify({value:process.env.MEMORY_FIXTURE,number:process.env.MEMORY_NUMBER,env:Object.fromEntries(${JSON.stringify(blocked)}.map(k=>[k,process.env[k]]))}));`);
   const options = `--require=${preload}`;
-  const result = await f.command(['start', run.id, 'worker', '--agent', 'claude', '--why', 'Fixture', '--brief', f.brief('worker')], { env: { XDG_CONFIG_HOME: config, NODE_OPTIONS: options, AGENT_ORCH_HEAVY_ACTIVE: '1' } });
+  const result = await f.command(['start', run.id, 'worker', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture', '--brief', f.brief('worker')], { env: { XDG_CONFIG_HOME: config, NODE_OPTIONS: options, AGENT_ORCH_HEAVY_ACTIVE: '1' } });
   await f.finished(run, 'worker');
   const actual = readJson(seen);
   assert.equal(actual.value, 'limited'); assert.equal(actual.number, '123');
@@ -231,12 +231,12 @@ test('start warns once for bad optional environment JSON before creating attempt
   writeJson(envFile, {}); fs.writeFileSync(envFile, '{invalid');
   const preload = path.join(f.root, 'env-order.cjs'), seen = path.join(f.root, 'env-seen.json');
   fs.writeFileSync(preload, `const fs=require('fs'),read=fs.readFileSync,mkdir=fs.mkdirSync;let checked=false;fs.readFileSync=function(file,...args){if(String(file)===${JSON.stringify(envFile)})checked=true;return read.call(this,file,...args)};fs.mkdirSync=function(dir,...args){if(process.argv[1]?.endsWith('orch.mjs')&&String(dir).includes('/attempt-')&&!checked)throw new Error('attempt created before environment file read');return mkdir.call(this,dir,...args)};if(process.argv[1]?.endsWith('relay.mjs'))fs.writeFileSync(${JSON.stringify(seen)},JSON.stringify({value:process.env.MEMORY_FIXTURE}));`);
-  const result = await f.command(['start', run.id, 'worker', '--agent', 'claude', '--why', 'Fixture', '--brief', f.brief('worker')], { env: { XDG_CONFIG_HOME: config, NODE_OPTIONS: `--require=${preload}` } });
+  const result = await f.command(['start', run.id, 'worker', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture', '--brief', f.brief('worker')], { env: { XDG_CONFIG_HOME: config, NODE_OPTIONS: `--require=${preload}` } });
   await f.finished(run, 'worker');
   assert.equal(result.stderr.split('\n').filter((line) => line.includes('ignoring agent environment')).length, 1);
   assert.match(result.stderr, /invalid JSON/); assert.deepEqual(readJson(seen), {});
   writeJson(envFile, { nested: {} });
-  const malformed = await f.command(['start', run.id, 'shape', '--agent', 'claude', '--why', 'Fixture', '--brief', f.brief('shape')], { env: { XDG_CONFIG_HOME: config } });
+  const malformed = await f.command(['start', run.id, 'shape', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture', '--brief', f.brief('shape')], { env: { XDG_CONFIG_HOME: config } });
   await f.finished(run, 'shape');
   assert.equal(malformed.stderr.split('\n').filter((line) => line.includes('ignoring agent environment')).length, 1);
 });
