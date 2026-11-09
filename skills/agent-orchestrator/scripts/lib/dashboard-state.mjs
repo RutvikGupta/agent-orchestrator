@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { mainSession, sessionGone, sessionLabel } from "./addressee.mjs";
-import { CLAUDE_PROJECTS, HOME } from "./config.mjs";
+import { CLAUDE_PROJECTS, HOME, RUNS_DIR } from "./config.mjs";
 import { externalAgents, externalRow } from "./external.mjs";
 import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
@@ -442,9 +442,17 @@ export function buildDashboardState() {
     if (!sections.has(id)) sections.set(id, { id, runs: [], main: null, rows: [], graphs: new Map() });
     return sections.get(id);
   };
+  // Runs with a live process (a relay, a park watcher, a wait) are always shown, however old: the
+  // cap of BOARD_RUNS applies only to the rest, so a long run is never pushed off by newer ones.
+  const live = new Set();
+  const runPath = new RegExp(`${RUNS_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/([^/\\s]+)/`);
+  for (const proc of (processSnapshot() || new Map()).values()) {
+    const m = runPath.exec(proc?.command || "");
+    if (m) live.add(m[1]);
+  }
   let counted = 0;
   for (const run of runs) {
-    if (counted >= BOARD_RUNS) break;
+    if (counted >= BOARD_RUNS && !live.has(run.id)) continue;
     const ownsMain = newestOfSession.get(run.orchestrator?.sessionId) === run.id;
     // An idle run is checked again at most every IDLE_RECHECK_MS: stamping it stats every task.
     const idle = idleRuns.get(run.id);
