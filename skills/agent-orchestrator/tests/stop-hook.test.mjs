@@ -13,6 +13,8 @@ const hook = fileURLToPath(new URL('../scripts/hooks/orch-stop.mjs', import.meta
 const cli = fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url));
 const SESSION = '0b6c2a4e-1f3d-4c6a-9d2e-5a7b8c9d0e1f';
 const input = (extra = {}) => ({ session_id: SESSION, stop_hook_active: false, transcript_path: '/dev/null', cwd: '/', ...extra });
+// The session's own shell: its runs' results, closes and acceptances are the owner's (ownership.mjs).
+const OWNER = { CLAUDE_CODE_SESSION_ID: SESSION, CODEX_THREAD_ID: SESSION };
 
 // Run the hook once. `env` is added to the fixture's environment, which has no AGENT_ORCH_TASK.
 function runHook(f, stdin, env = {}) {
@@ -79,7 +81,7 @@ test('blocks for an unread result, names the task and its command, and lets the 
   assert.doesNotMatch(reason, /Nothing will wake/, 'a finished task needs no wait');
   assert.ok(fs.existsSync(recordFile(f)), 'the block is recorded, so it is not repeated');
 
-  await f.command(['result', run.id, 'work']);
+  await f.command(['result', run.id, 'work'], { env: OWNER });
   assert.equal(await blocked(f), null);
   assert.ok(!fs.existsSync(recordFile(f)), 'an empty set clears the record');
 });
@@ -183,8 +185,8 @@ test('blocks once for each set of items, and never loops', async (t) => {
   assert.equal(await blocked(f), null);
 
   // Handling everything clears the record, so the same items would block again later.
-  await f.command(['result', run.id, 'first']);
-  await f.command(['result', run.id, 'second']);
+  await f.command(['result', run.id, 'first'], { env: OWNER });
+  await f.command(['result', run.id, 'second'], { env: OWNER });
   assert.equal(await blocked(f), null);
   assert.ok(!fs.existsSync(recordFile(f)));
   await f.start(run, 'third');
@@ -224,14 +226,14 @@ test('a decision that was read but not resolved blocks until it is resolved', as
   const run = await finishedRun(f, 'asks', { finalMessage: 'NEEDS DECISION:\n- Which parser should stay?' });
   const unread = await blocked(f);
   assert.ok(unread && unread.includes(`node ${cli} result ${run.id} asks`), unread);
-  await f.command(['result', run.id, 'asks']); // reading it marks the decision seen, and leaves the task open
+  await f.command(['result', run.id, 'asks'], { env: OWNER }); // reading it marks the decision seen, and leaves the task open
   const read = await blocked(f);
   assert.ok(read, 'a decision read but not resolved still blocks');
   assert.ok(read.includes('Which parser should stay?'), read);
   assert.ok(read.includes(`node ${cli} start ${run.id} asks --agent claude --brief <answer-file> -- --session fixture-claude`), read);
   assert.ok(read.includes(`node ${cli} resolve ${run.id} asks --note "<how>"`), read);
   assert.ok(read.includes(`node ${cli} close ${run.id} asks`), read);
-  await f.command(['resolve', run.id, 'asks', '--note', 'answered it in the chat']);
+  await f.command(['resolve', run.id, 'asks', '--note', 'answered it in the chat'], { env: OWNER });
   assert.equal(await blocked(f), null);
 });
 
@@ -256,8 +258,8 @@ test('a closed task never blocks, accepted or not, even a write task of the plan
   assert.ok(reason.includes(`${run.id}/work finished (completed) and nobody has read its result`), reason);
   assert.ok(reason.includes(`${run.id}/other finished (completed)`), reason);
   // Closed by hand, and closed by reading its result: neither is accepted, and neither blocks.
-  await f.command(['close', run.id, 'work']);
-  await f.command(['result', run.id, 'other']);
+  await f.command(['close', run.id, 'work'], { env: OWNER });
+  await f.command(['result', run.id, 'other'], { env: OWNER });
   assert.equal(await blocked(f), null);
   assert.equal(readJson(f.taskFile(run, 'work')).acceptedAt, undefined);
 });
@@ -271,10 +273,10 @@ test('an accepted task, a read-only task and a task outside the plan need nothin
   await f.finished(run, 'impl');
   await f.finished(run, 'reader');
   assert.ok(await blocked(f));
-  await f.command(['result', run.id, 'impl']);
-  await f.command(['result', run.id, 'reader']);
+  await f.command(['result', run.id, 'impl'], { env: OWNER });
+  await f.command(['result', run.id, 'reader'], { env: OWNER });
   assert.equal(await blocked(f), null, 'no plan lists them, so reading is the end of it');
-  await f.command(['accept', run.id, 'impl', '--note', 'checked']);
+  await f.command(['accept', run.id, 'impl', '--note', 'checked'], { env: OWNER });
   assert.equal(await blocked(f), null);
 });
 
@@ -321,6 +323,6 @@ test('a parked babysitter is not a finished result, and needs a wait like a runn
     assert.equal(await blocked(f), null);
   });
   // Closing it ends the park: nothing runs, and a babysitter's result is never a write task's.
-  await f.command(['close', run.id, 'watch']);
+  await f.command(['close', run.id, 'watch'], { env: OWNER });
   assert.equal(await blocked(f), null);
 });

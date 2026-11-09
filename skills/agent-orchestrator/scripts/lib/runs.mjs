@@ -98,6 +98,11 @@ function readTable() {
   return processTable.rows;
 }
 
+// The shared snapshot when it is fresh, without reading a new one; otherwise null.
+export function freshProcessTable() {
+  return Date.now() - processTable.at < PROCESS_TABLE_MS ? processTable.rows : null;
+}
+
 // Every process, as a map from PID to { ppid, command }, from the same shared snapshot.
 export function processSnapshot() {
   if (Date.now() - processTable.at < PROCESS_TABLE_MS) return processTable.rows;
@@ -211,6 +216,17 @@ export function processStarted(pid) {
   // A timed-out ps may have printed part of a start time; that is no start time.
   if (r.error) return null;
   return r.stdout?.replace(/\s+/g, " ").trim() || null;
+}
+
+// A process's start time (as processStarted() writes it) and command line: { started, command };
+// null when the PID is gone; undefined when `ps` cannot read a process that exists.
+export function processInfo(pid) {
+  if (!pid || !exists(pid)) return null;
+  const r = spawnSync("ps", ["-o", "lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV(), timeout: 5000 });
+  // A timed-out `ps` may have printed part of a line: that is no answer.
+  const m = r.error ? null : /^\s*(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
+  if (m) return { started: m[1].replace(/\s+/g, " "), command: m[2].trim() };
+  return exists(pid) ? undefined : null;
 }
 
 // Every process's start time and command line, from one `ps` call: a Map from PID to
@@ -578,24 +594,48 @@ export function listTasks(run) {
     .map((task) => describe(run, task));
 }
 
+// "claude" or "codex" when a command line runs that host (its program, or the script a `node`
+// launcher runs), else null.
+export function agentOfCommand(command) {
+  const argv0 = String(command || "").trim().split(/\s+/).slice(0, 2).map((a) => path.basename(a));
+  if (argv0.includes("codex") || argv0.includes("codex.js")) return "codex";
+  if (argv0.includes("claude")) return "claude";
+  return null;
+}
+
 // The nearest claude or codex ancestor process is the orchestrator. Environment variables alone
-// are ambiguous: a Codex session started from Claude Code inherits Claude's variables.
-export function detectOrchestrator() {
+// are ambiguous: a Codex session started from Claude Code inherits Claude's variables. Without such
+// an ancestor (or a readable process table), a session variable still names the session. `started`
+// adds the host process's start time, which tells it apart from a later process with the same PID;
+// `new` records it, so ownership.mjs can tell when the launcher has gone.
+export function detectOrchestrator({ started = false } = {}) {
   const env = process.env;
   if (env.AGENT_ORCH_DEPTH) {
     return { agent: "delegated-agent", sessionId: null, parentRun: env.AGENT_ORCH_RUN || null, parentTask: env.AGENT_ORCH_TASK || null, depth: DEPTH };
   }
+  const claudeId = env.CLAUDE_CODE_SESSION_ID || null;
+  const codexId = env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || null;
+  // Ancestors come from the shared snapshot when a fresh one holds them (as after `status` read its
+  // relays), else from one `ps` each, which also gives the host's start time. This never reads a new
+  // snapshot: one read before describe() would serve its relay checks up to a second stale.
+  const table = freshProcessTable();
   let pid = process.ppid;
   for (let hops = 0; pid > 1 && hops < 20; hops++) {
-    const r = spawnSync("ps", ["-o", "ppid=,command=", "-p", String(pid)], { encoding: "utf8" });
-    const m = /^(\d+)\s+(.*)$/.exec((r.stdout || "").trim());
-    if (!m) break;
-    const argv0 = m[2].split(/\s+/).slice(0, 2).map((a) => path.basename(a));
-    if (argv0.includes("codex") || argv0.includes("codex.js")) {
-      return { agent: "codex", sessionId: env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || null, pid };
+    let row = table?.get(pid);
+    if (!row) {
+      const r = spawnSync("ps", ["-o", "ppid=,lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV(), timeout: 5000 });
+      const m = r.error ? null : /^(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
+      if (!m) break;
+      row = { ppid: Number(m[1]), started: m[2].replace(/\s+/g, " "), command: m[3] };
     }
-    if (argv0.includes("claude")) return { agent: "claude", sessionId: env.CLAUDE_CODE_SESSION_ID || null, pid };
-    pid = Number(m[1]);
+    const agent = agentOfCommand(row.command);
+    if (agent) {
+      const when = row.started || (started ? processStarted(pid) : null);
+      return { agent, sessionId: agent === "codex" ? codexId : claudeId, pid, ...(when ? { started: when } : {}) };
+    }
+    pid = row.ppid;
   }
+  if (claudeId) return { agent: "claude", sessionId: claudeId, pid: null };
+  if (codexId) return { agent: "codex", sessionId: codexId, pid: null };
   return { agent: "terminal", sessionId: null };
 }

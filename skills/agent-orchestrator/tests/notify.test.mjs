@@ -223,12 +223,13 @@ test('ask reaches a running parent task as a labelled question, and the answer c
 test('ask from a top-level task is a question for the launching session, wakes its wait with exit 5, and clears as soon as a later message is sent', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('top');
-  f.launchingSession(run, 'toplevel-session');
+  const owner = f.launchingSession(run, 'toplevel-session');
   const asker = await f.start(run, 'asker', { config: { hold: true }, flags: ['--read-only'] });
   await f.ready(asker);
   await f.start(run, 'decides', { config: { finalMessage: 'NEEDS DECISION:\n- Keep the old flag? Recommendation: no.' }, flags: ['--read-only'] });
   await f.finished(run, 'decides');
-  await f.command(['result', run.id, 'decides']);
+  // The launching session reads the decision: only the run's owner marks it seen with `result`.
+  await f.command(['result', run.id, 'decides'], { env: owner });
   const me = as(run, 'asker');
   // A message sent before the question does not answer it.
   await f.command(['send', run.id, 'asker', 'An earlier note.']);

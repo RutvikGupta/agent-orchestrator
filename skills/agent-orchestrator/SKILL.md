@@ -86,6 +86,17 @@ Host-specific rules, which matter for every later step:
   start. (On macOS, `pkill` reads every later word as another pattern: `pkill -f "<pattern>" -n`
   once killed Docker Desktop and two running agents.) Otherwise kill one PID after confirming it
   with `ps -p <pid> -o command=`.
+- **Only your own runs.** Act only on runs you launched and their nested runs, never another
+  session's or the user's (a run launched from a terminal). Every command that changes a run
+  refuses another's (exit 4, nothing changed); reading (`status`, `wait`, `result`, `log`,
+  `recover`, `inbox`, `send` without `--steer`) stays open. Ask its owner instead: a Claude session
+  with `SendMessage` (`ListAgents` finds it), an orch task with `$ORCH send <run> <task> "<request>"`,
+  or the user. Pass `--adopt` only when the refusal says the run is orphaned: every owner gone and
+  the run unused for 30 minutes. If you find you stopped, closed or changed another session's task
+  by any route, tell that session at once the same way: name the tasks and what you did, and ask it
+  to resume what it still needs. Then tell the user in one line. When `status` or `wait` says
+  someone else changed one of your tasks, check it and resume it if it was still needed; leave what
+  the user closed.
 - **Codex as orchestrator.** Child agents need network access and write their own state under the
   home directory, so run every `$ORCH` command outside the sandbox (request escalated permissions,
   for example `sandbox_permissions: "require_escalated"`, with a one-line justification). Block in

@@ -11,6 +11,7 @@ import { inboxNote } from "../inbox.mjs";
 import { claimParked, keptEnd, reviveParked } from "../park.mjs";
 import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
+import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
 import { CLAUDE_DEFAULT_TIER, ModelRefused, modelFor, tierOrder } from "../policy.mjs";
 import { describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
@@ -52,9 +53,16 @@ function escalationNote(run, prev, key, prevTier, tier) {
   return `attempt ${prev.attempt} at the ${prevTier} tier failed its review or gates; redo it one tier up, with --tier ${order[at + 1]} and a new --why`;
 }
 
+// `start` from the command line, where only the run's owner may start or resume its tasks; the park
+// watcher and `wait`'s retries resume a task through startTask() itself.
 export function cmdStart(args) {
   try {
-    const { task, text } = startTask(args);
+    const run = loadRun(args._[0]);
+    const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
+    const resume = Boolean(prev?.attempt);
+    const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
+    const { task, text } = startTask(args, resume ? { resumedBy: g.actor } : {});
+    if (resume) recordChange(run, g, { task: task.id, attempt: task.attempt, action: "resumed" });
     emit(args, task, text);
   } catch (error) {
     if (error instanceof StartRefused) die(error.message, error.code);
@@ -248,6 +256,7 @@ export function startTask(args, extra = {}) {
     startedBy,
     // Each attempt reports to the task that started it, even after a later attempt starts.
     attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
+    resumedBy: null, // who resumed this attempt by hand (cmdStart passes it), not a park or retry resume
     ...extra,
   };
   // A close or stop that came while this resume was starting wins: start nothing.

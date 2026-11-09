@@ -7,6 +7,7 @@ import fs from "node:fs";
 import { CLI_PATH, TASK_ID } from "../config.mjs";
 import { formatElapsed, shortText } from "../format.mjs";
 import { reviewRoundsOf, reviewsPath, unlinkedVerifications, verificationsOf, verificationsPath } from "../lifecycle.mjs";
+import { guard, recordChange } from "../ownership.mjs";
 import { resumeCommand, treeState } from "../report.mjs";
 import { describe, loadRun, loadTask, validTask } from "../runs.mjs";
 import { die, emit, parseDuration } from "../util.mjs";
@@ -104,6 +105,7 @@ export async function cmdVerify(args) {
   const timeoutMs = parseDuration(args.timeout ?? "30m");
   // A refusal exits 2, so that exit 1 always means the command failed.
   const { run, id, task, row } = finishedTask(args, "verify it", 2);
+  const g = guard(run, `rerun a gate for task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   const cwd = row.cd || run.repo;
   if (!fs.existsSync(cwd)) die(`task ${id}'s working directory is gone: ${cwd}`, 2);
   // One argument is a shell command as written; several are quoted into one.
@@ -124,12 +126,14 @@ export async function cmdVerify(args) {
     startedAt: startedAt.toISOString(),
     durationMs: Date.now() - startedAt.getTime(),
     by: "coordinator",
+    actor: g.actor,
     outputTail: outcome.outputTail,
     attempt: task.attempt || 0,
     ...(outcome.signal ? { signal: outcome.signal } : {}),
     ...(outcome.timedOut ? { timedOut: true } : {}),
   };
   append(file, record);
+  recordChange(run, g, { task: id, attempt: record.attempt, action: "gate rerun" });
   const how = passed ? "passed" : outcome.timedOut ? `FAILED: timed out after ${formatElapsed(timeoutMs)}` : `FAILED: exit ${record.exitCode ?? outcome.signal ?? "unknown"}`;
   const at = tree.commit ? ` at ${short(tree.commit)}${tree.dirty ? " (dirty)" : ""}` : "";
   emit(args, { ...record, file },`${id} ${record.id} ${how} in ${formatElapsed(record.durationMs)}${at}: ${shortText(cmd, 80)}`);
@@ -142,6 +146,7 @@ export function cmdVerdict(args) {
   const note = args.note === undefined ? null : String(args.note).trim() || die("--note needs text", 2);
   const reviewer = args.reviewer ?? "coordinator";
   const { run, id, task, row } = finishedTask(args, "review it", 1);
+  const g = guard(run, `record a verdict on task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   if (row.state === "prepared") die(`task ${id} has not started, so there is nothing to review`);
   if (reviewer !== "coordinator" && (!TASK_ID.test(reviewer) || !loadTask(run, reviewer))) {
     die(`--reviewer must be "coordinator" or a task id of run ${run.id}, not "${reviewer}"`, 2);
@@ -155,10 +160,12 @@ export function cmdVerdict(args) {
     reviewer,
     at: new Date().toISOString(),
     verifications: unlinkedVerifications(verificationsOf(run, id), rounds),
+    by: g.actor,
   };
   append(reviewsPath(run, id), record);
   let closed = null;
-  if (verdict === "reject") closed = closeTask(run, task, { rejectedAt: record.at, rejectedAttempt: row.attempt, rejectNote: note });
+  if (verdict === "reject") closed = closeTask(run, task, { rejectedAt: record.at, rejectedAttempt: row.attempt, rejectNote: note, closedBy: g.actor });
+  recordChange(run, g, { task: id, attempt: row.attempt, action: verdict === "reject" ? "rejected" : `reviewed (${verdict})` });
   const next = {
     clean: `next: commit its work if needed, then ${CLI} accept ${run.id} ${id} --note "<why>"`,
     changes: `next: resume it with a delta brief naming the fixes; the next attempt counts as a rework: ${resumeCommand(run, row)}`,

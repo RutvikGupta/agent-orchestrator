@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
 import { compact, firstLine, slug, stamp, table } from "../format.mjs";
+import { guard, recordChange } from "../ownership.mjs";
 import { detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { totals } from "../views.mjs";
@@ -15,9 +16,23 @@ export function cmdNew(args) {
   if (!fs.existsSync(repo)) die(`--repo does not exist: ${repo}`);
   const top = git(repo, ["rev-parse", "--show-toplevel"], { allowFail: true });
   const root = top || repo;
-  const id = `${stamp()}-${slug(args.name || path.basename(root))}`;
+  // Two runs started in the same second with the same name would share an id: the folder is created
+  // exclusively, and a taken id gets a suffix, so `new` never writes into an existing run.
+  const base = `${stamp()}-${slug(args.name || path.basename(root))}`;
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  let id = base;
+  for (let n = 2; ; n++) {
+    try {
+      fs.mkdirSync(path.join(RUNS_DIR, id));
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST" || n > 1000) throw error;
+      id = `${base}-${n}`;
+    }
+  }
   const dir = path.join(RUNS_DIR, id);
-  fs.mkdirSync(path.join(dir, "tasks"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "tasks"));
+  const createdAt = new Date().toISOString();
   const run = {
     id,
     repo: root,
@@ -25,8 +40,9 @@ export function cmdNew(args) {
     baseBranch: top ? git(top, ["branch", "--show-current"], { allowFail: true }) || null : null,
     baseCommit: top ? git(top, ["rev-parse", "HEAD"], { allowFail: true }) : null,
     goal: args.goal || null,
-    orchestrator: detectOrchestrator(),
-    createdAt: new Date().toISOString(),
+    // lastSeenAt: when its owner last used the run (ownership.mjs, touchOwner).
+    orchestrator: { ...detectOrchestrator({ started: true }), lastSeenAt: createdAt },
+    createdAt,
   };
   writeJson(path.join(dir, "run.json"), run);
   emit(
@@ -68,15 +84,24 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
 
 export async function cmdWorktree(args) {
   const run = loadRun(args._[0]);
-  const task = await createWorktree(run, args._[1], { from: args.from, branch: args.branch, path: args.path, prep: !args["no-prep"] });
+  const g = guard(run, `create a worktree in run ${run.id}`, { adopt: args.adopt, refused: args._[1] ? [args._[1]] : [] });
+  let task = await createWorktree(run, args._[1], { from: args.from, branch: args.branch, path: args.path, prep: !args["no-prep"] });
+  task = { ...(loadTask(run, task.id) || task), worktreeBy: g.actor };
+  saveTask(run, task);
+  recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "worktree created" });
   const { path: wt, branch, from, prep } = task.worktree;
   emit(args, task.worktree, `worktree ${wt}\nbranch   ${branch} (from ${from.slice(0, 12)})${prep ? prepSummary(prep) : ""}`);
 }
 
 export async function cmdCleanup(args) {
   const run = loadRun(args._[0]);
+  const rows = listTasks(run);
+  const g = guard(run, `clean up run ${run.id}`, {
+    adopt: args.adopt,
+    refused: () => rows.filter((t) => loadTask(run, t.id)?.worktree).map((t) => `${t.id}'s worktree`),
+  });
   const report = [];
-  for (const t of listTasks(run)) {
+  for (const t of rows) {
     const task = loadTask(run, t.id);
     if (!task?.worktree) continue;
     const { path: wt, branch } = task.worktree;
@@ -99,6 +124,8 @@ export async function cmdCleanup(args) {
       // git refuses to remove a worktree with untracked files, caches included.
       git(run.repo, ["worktree", "remove", "--force", wt]);
       report.push(`removed worktree ${wt}`);
+      task.worktreeRemovedBy = g.actor;
+      recordChange(run, g, { task: t.id, attempt: task.attempt || null, action: "worktree removed" });
     }
     if (args["delete-branches"]) {
       const deleted = git(run.repo, ["branch", args.force ? "-D" : "-d", branch], { allowFail: true });

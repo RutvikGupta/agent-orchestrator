@@ -401,9 +401,10 @@ test('recover groups tasks by phase, flags dirty worktrees and dead processes, a
   assert.deepEqual(all.runs.map((r) => r.id).sort(), [run.id, other.id].sort());
   assert.deepEqual(snapshot(), before);
 
-  // Closing a task, or collecting its result, moves it out of the groups that need action.
-  await f.command(['close', run.id, 'busy']);
-  await f.command(['result', run.id, 'oops']);
+  // Closing a task, or collecting its result, moves it out of the groups that need action. The run's
+  // owner does both: `result` closes a task only for its owner.
+  await f.command(['close', run.id, 'busy'], { env: parent });
+  await f.command(['result', run.id, 'oops'], { env: parent });
   const after = (await f.command(['recover', run.id])).stdout;
   assert.match(after, /closed after failing \(2\): busy, oops/);
   assert.doesNotMatch(after, /running \(/);

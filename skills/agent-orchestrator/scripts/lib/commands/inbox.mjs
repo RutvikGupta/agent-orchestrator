@@ -6,6 +6,7 @@ import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
 import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { guard, recordChange } from "../ownership.mjs";
 import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration } from "../util.mjs";
@@ -76,7 +77,10 @@ function shownToUser(run, task, dir) {
 // `steer` stops the agent's pending command so the message reaches it now (see steer.mjs); the
 // answer's `steer` says what happened: { stopped, seconds } or { waiting }. A message from an agent
 // the task started (finish-notice.mjs, `ask`) has `from` "agent:<run>/<task>", `kind` and `about`.
-export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null } = {}) {
+// Steering is guarded (ownership.mjs): `caller` is who steers, this command's caller by default, or
+// the dashboard (DASHBOARD_CALLER) for the user's clicks. The message records who stopped the
+// command (`steeredBy`), and a steer by anyone but the owner leaves the owner a notice.
+export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null, caller = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   text = String(text ?? "").trim();
@@ -113,19 +117,22 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
     : text;
   // The plan is made before the message is written, so the agent learns its command was stopped.
   const plan = steer && !parked ? planSteer(task) : null;
+  const g = plan?.stop ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
-  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, kind, about, answers });
+  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
     : messageReach(task);
   let steered = null;
   if (plan?.stop) steered = stopCommand(plan).length ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" };
   else if (plan) steered = { waiting: plan.wait };
+  if (steered?.stopped) recordChange(run, g, { task: id, attempt: task.attempt || null, action: "steered" });
   return { message, delivery: how, reaches, steer: steered };
 }
 
 // "Send now" for messages already waiting: stop the agent's current command so it reads them.
-export function steerQueued(run, id) {
+// `caller` is who steers, as in deliverMessage().
+export function steerQueued(run, id, { caller = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   if (!relayAlive(task.pid, task.startedAt)) throw new SendError(`task ${id} is not running`, 409);
@@ -134,14 +141,17 @@ export function steerQueued(run, id) {
   if (!queued.length) throw new SendError(`task ${id} has no queued messages`, 409);
   const plan = planSteer(task);
   if (!plan.stop) return { queued: queued.length, steer: { waiting: plan.wait } };
-  markSteered(dir, queued, plan.stop.command);
+  const g = guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {});
+  markSteered(dir, queued, plan.stop.command, g.actor);
   const stopped = stopCommand(plan).length;
+  if (stopped) recordChange(run, g, { task: id, attempt: task.attempt || null, action: "steered" });
   return { queued: queued.length, steer: stopped ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" } };
 }
 
 export function cmdSteer(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
+  guard(run, `steer task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   let result;
   try {
     result = steerQueued(run, id);
@@ -170,6 +180,8 @@ export function cmdSend(args) {
     }
   }
   if (!text.trim()) die("missing MESSAGE (or --file FILE): the message is empty", 2);
+  // A message is open to anyone; stopping the agent's command to deliver it is the owner's call.
+  if (args.steer) guard(run, `steer task ${id} of run ${run.id} (send without --steer is open to anyone)`, { adopt: args.adopt, refused: [id] });
   let sent;
   try {
     sent = deliverMessage(run, id, text, { steer: Boolean(args.steer) });

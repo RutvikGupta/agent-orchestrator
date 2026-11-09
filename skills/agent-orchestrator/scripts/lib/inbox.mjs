@@ -64,9 +64,9 @@ export function readInbox(dir) {
     });
 }
 
-export function markSteered(dir, ids, command) {
+export function markSteered(dir, ids, command, by = null) {
   const time = new Date().toISOString();
-  fs.appendFileSync(path.join(dir, STEERED_FILE), ids.map((id) => `${JSON.stringify({ id, command, time })}\n`).join(""));
+  fs.appendFileSync(path.join(dir, STEERED_FILE), ids.map((id) => `${JSON.stringify({ id, command, time, ...(by ? { by } : {}) })}\n`).join(""));
 }
 
 // The size of an attempt's event stream: where a message sent or read now falls in its log.
@@ -81,14 +81,15 @@ export function logSize(dir, attempt) {
 // `text` is what the agent receives. `body` is what the sender typed, kept when `text` adds to it
 // (the paths of attached images); `images` lists those paths. `logOffset` places the message in
 // the attempt's event log.
-// `steered` is the command that was stopped so the message reaches the agent at once. `kind` and
-// `about` mark a message from an agent the task started (see the header).
+// `steered` is the command that was stopped so the message reaches the agent at once, and
+// `steeredBy` who stopped it (ownership.mjs). `kind` and `about` mark a message from an agent the
+// task started (see the header), or a notice to an owning task.
 // `answers` lists the questions a message from the user answers beyond its own (openQuestions).
-export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, kind = null, about = null, answers = [] } = {}) {
+export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, steeredBy = null, kind = null, about = null, answers = [] } = {}) {
   const message = {
     id: randomUUID().slice(0, 8), time: new Date().toISOString(), attempt, text,
     ...(from === "user" || fromAgent({ from }) ? { from } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
-    ...(steered ? { steered } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}), ...(answers.length ? { answers } : {}),
+    ...(steered ? { steered } : {}), ...(steered && steeredBy ? { steeredBy } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}), ...(answers.length ? { answers } : {}),
   };
   fs.appendFileSync(path.join(dir, INBOX_FILE), `${JSON.stringify(message)}\n`);
   return message;

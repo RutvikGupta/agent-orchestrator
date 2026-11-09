@@ -14,7 +14,7 @@ const ask = 'NEEDS DECISION:\n- Which parser should stay? Recommendation: the ne
 test('/api/state lists what needs attention, in order, from state, closed, and limitHit', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('lane');
-  f.launchingSession(run, 'session-lane');
+  const owner = f.launchingSession(run, 'session-lane');
   claudeTranscripts(f, 'session-lane'); // a main session and native sub-agents, one of them asking
   // Started one after another, so each finishes later than the one before it.
   const tasks = [
@@ -31,9 +31,10 @@ test('/api/state lists what needs attention, in order, from state, closed, and l
     await f.start(run, id, { config });
     await f.finished(run, id);
   }
-  await f.command(['result', run.id, 'collected']); // collecting a completed result closes it
-  await f.command(['result', run.id, 'asks']); // a decision stays open after `result`
-  await f.command(['close', run.id, 'retired', 'asks-closed']);
+  // The owner collects and closes: `result` closes a task only for the run's owner.
+  await f.command(['result', run.id, 'collected'], { env: owner }); // collecting a completed result closes it
+  await f.command(['result', run.id, 'asks'], { env: owner }); // a decision stays open after `result`
+  await f.command(['close', run.id, 'retired', 'asks-closed'], { env: owner });
   await f.json(['worktree', run.id, 'later']);
   await f.start(run, 'busy', { config: { delayMs: 30_000 } });
   await eventually(async () => (await f.json(['status', run.id])).tasks.find((x) => x.id === 'busy')?.state === 'running', 'busy did not start');

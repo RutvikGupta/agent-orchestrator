@@ -5,6 +5,7 @@ import path from "node:path";
 import { CLI_PATH } from "./config.mjs";
 import { compact, shortText, table } from "./format.mjs";
 import { listNative, mainRow } from "./native.mjs";
+import { noticeText, ownershipOf, readOnlyMark, unseenNotices } from "./ownership.mjs";
 import { reviveParked } from "./park.mjs";
 import { listRuns, listTasks } from "./runs.mjs";
 
@@ -57,15 +58,20 @@ function stuckMarker(t) {
   return t.stuck ? `stuck: \`${shortText(t.stuck.command, 30)}\` failed ${t.stuck.failures}× · ` : "";
 }
 
-export function statusText(run, tasks) {
+// `notices` are the owner's unseen notices (ownership.mjs) that `wait` already read; by default
+// they are read here.
+export function statusText(run, tasks, notices = unseenNotices(run)) {
   const native = listNative(run, tasks);
   const main = mainRow(run);
-  if (!tasks.length && !native.length) return `run ${run.id}: no tasks yet`;
+  const changed = notices.map((n) => `${n.task || "run"}: ${noticeText(n)}`);
+  const own = ownershipOf(run);
+  if (!tasks.length && !native.length) return [`run ${run.id}: no tasks yet${readOnlyMark(own)}`, ...changed].join("\n");
   // A parked task whose watcher is not running (after a reboot, say) gets a new one, and is reported.
-  const revived = reviveParked(run, tasks);
+  // Only for the owner: anyone else's `status` changes nothing.
+  const revived = own.mine ? reviveParked(run, tasks) : [];
   const cols = ["id", "agent", "model", "mode", "state", "elapsed", "steps", "tokens", "now"];
   return [
-    `run ${run.id}${orchestratorLabel(run)}`,
+    `run ${run.id}${orchestratorLabel(run)}${readOnlyMark(own)}`,
     ...(main ? [`main session (whole session, not in the totals): ${main.modelLabel} · ${main.state} · tokens ${main.tokensExact ? "" : "~"}${compact(main.tokensIn)}/${compact(main.tokensOut)} · ${shortText(main.now, 70)}`] : []),
     tasks.length ? table(statusRows(tasks), cols) : "(no orch.mjs tasks)",
     ...(native.length ? ["native sub-agents (started with the host's own tool, not orch.mjs):", table(statusRows(native), cols)] : []),
@@ -75,6 +81,7 @@ export function statusText(run, tasks) {
       : `${r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run),
     ...whyLines(tasks),
+    ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }
 
@@ -179,7 +186,7 @@ export function renderTree(runs, tty) {
     const tasks = treeOrder([...(main ? [main] : []), ...described, ...listNative(run, described)]);
     const counted = tasks.filter((t) => !t.main);
     const repo = path.basename(run.repo || "");
-    out.push(`run ${run.id}${orchestratorLabel(run)} · ${repo}${run.baseBranch ? ` @ ${run.baseBranch}` : ""}`);
+    out.push(`run ${run.id}${orchestratorLabel(run)}${readOnlyMark(ownershipOf(run))} · ${repo}${run.baseBranch ? ` @ ${run.baseBranch}` : ""}`);
     if (run.goal) out.push(`   goal: ${shortText(run.goal, 90)}`);
     const rows = statusRows(tasks).map((row, i) => ({
       ...row,

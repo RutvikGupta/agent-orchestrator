@@ -13,6 +13,7 @@ import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { CLI_PATH, RUNS_DIR } from "../config.mjs";
+import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
 import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
@@ -20,7 +21,10 @@ import { renderTree, statusText } from "../views.mjs";
 export function cmdStatus(args) {
   const run = loadRun(args._[0]);
   const tasks = listTasks(run);
-  emit(args, { run: run.id, dir: run.dir, tasks }, statusText(run, tasks));
+  const own = ownershipOf(run);
+  const notices = unseenNotices(run);
+  const ownership = { owner: launcherLabel(own.direct), mine: own.mine, readOnly: !mayAct(own), orphaned: own.orphaned };
+  emit(args, { run: run.id, dir: run.dir, tasks, ownership, ...(notices.length ? { changedByOthers: notices.map((n) => ({ ...n, text: noticeText(n) })) } : {}) }, statusText(run, tasks, notices));
 }
 
 // Replace the waiting Node process with a small shell, then resume the same command and PID.
@@ -124,17 +128,25 @@ function remindText(run, t) {
 export async function cmdWait(args, resumed = null) {
   const wake = inboxWake(resumed?.inbox);
   const run = loadRun(args._[0]);
+  // Reviving a parked watcher and retrying a task change the run: only the owner's `wait` does them.
+  // Another agent session's `wait` changes nothing at all (ownership.mjs): it records no live main
+  // wait, reads no notes and shows no reminders, which stay for the run's own session.
+  const own = ownershipOf(run);
+  const mine = own.mine;
+  const may = mayAct(own);
   // A wait that no orch task runs is the launching session's (or a terminal's): it records that it
   // is live (addressee.mjs) and prints the notes that the run's tasks sent with `tell`.
-  const main = !callerTask();
+  const main = !callerTask() && may;
   const ids = args._.slice(1);
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
   const deadline = resumed ? (resumed.deadline ?? Infinity) : timeout === 0 ? Infinity : Date.now() + timeout;
+  // A long wait hands itself to a shell and back, without exiting: record the owner's use now.
+  if (mine && !resumed) touchOwner(run);
   const snapshot = () => {
     let rows = listTasks(run);
     // A parked babysitter whose watcher died (after a reboot, say) gets a new one; an adopted
     // relay changes the rows, so read them again.
-    if (reviveParked(run, rows).length) rows = listTasks(run);
+    if (mine && reviveParked(run, rows).length) rows = listTasks(run);
     // The relay can write its result and exit between describe()'s result read and process
     // check. Health then sees that file; reread this inconsistent snapshot before waking wait.
     return rows.some((t) => t.state === "aborted" && !t.result && t.health === "ok") ? listTasks(run) : rows;
@@ -165,7 +177,7 @@ export async function cmdWait(args, resumed = null) {
     // Snapshot before retries, so attention already present at entry never wakes a repeated wait.
     previous ??= new Set(attention(tasks).map(key));
     let retried = false;
-    for (const task of tasks) {
+    for (const task of mine ? tasks : []) {
       const message = retryTask(run, task);
       if (message) {
         (args.json ? process.stderr : process.stdout).write(`${message}\n`);
@@ -174,8 +186,12 @@ export async function cmdWait(args, resumed = null) {
     }
     if (retried) tasks = snapshot().filter((t) => tasks.some((previous) => previous.id === t.id));
     const finishedNow = tasks.filter(unread);
-    const needing = attention(tasks);
-    const newAttention = needing.some((item) => !previous.has(key(item)));
+    // A change someone else made to the caller's tasks wakes it once, even when it came before this
+    // wait started: the owner learns of it without asking (ownership.mjs).
+    const notices = unseenNotices(run);
+    const changed = notices.map((n) => ({ task: n.task, attempt: n.attempt, kind: "changed-by-other", label: `${n.action} by ${n.user ? "the user" : "someone else"}`, reason: noticeText(n), notice: n.id }));
+    const needing = [...attention(tasks), ...changed];
+    const newAttention = needing.some((item) => item.kind === "changed-by-other" || !previous.has(key(item)));
     previous = new Set(needing.map(key));
     const running = tasks.filter((t) => t.state === "running");
     const done = running.length === 0 || (!args.all && finishedNow.length > 0);
@@ -183,7 +199,7 @@ export async function cmdWait(args, resumed = null) {
     // wakes it (exit 0) and names the task. The notice stays unread for the hook or `inbox`.
     const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id && tasks.some((t) => t.id === m.about.task));
     const notes = main ? unreadNotes(run) : [];
-    const due = reviewsDue(run, tasks);
+    const due = may ? reviewsDue(run, tasks) : [];
     // An open question for the session wakes its wait every time, until it is answered with
     // `send`, even one asked before this wait began.
     const asked = main ? tasks.filter((t) => t.state === "running" && t.sessionQuestion) : [];
@@ -194,7 +210,8 @@ export async function cmdWait(args, resumed = null) {
       const questions = needing.filter((item) => item.kind === "question" && !asked.some((t) => t.id === item.task)).map((item) => item.task);
       const limited = tasks.filter((t) => t.limitHit).map((t) => `${t.id} (${t.agent})`);
       const hint =
-        needing.map((item) => `\n${item.task}: ${item.label} — ${item.reason}`).join("") +
+        // A change someone else made shows in statusText(), once.
+        needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${item.task}: ${item.label} — ${item.reason}`).join("") +
         (questions.length ? `\n${questions.join(", ")} asked ${main ? "the user" : "a question"} and ${questions.length > 1 ? "keep" : "keeps"} working: ${main ? "it waits on the dashboard for the user's answer" : `answer what your brief covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\``} (SKILL.md, "Decisions agents hand back")` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
         (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +
@@ -210,7 +227,7 @@ export async function cmdWait(args, resumed = null) {
         ...(due.length ? { reminders: due.map((t) => ({ task: t.id, attempt: t.attempt, waitedMs: t.awaitingReviewMs })) } : {}),
         ...(notes.length ? { notes } : {}),
         ...(asked.length ? { questions: asked.map((t) => ({ task: t.id, ...t.sessionQuestion })) } : {}),
-      }, `${statusText(run, tasks)}${hint}${open}${tail}${message ? `\n${message.hint}` : ""}${noted}`);
+      }, `${statusText(run, tasks, notices)}${hint}${open}${tail}${message ? `\n${message.hint}` : ""}${noted}`);
       if (message) {
         if (wakes || done) writeJson(wake.pendingPath, { id: message.id });
         else fs.rmSync(wake.pendingPath, { force: true });
@@ -222,6 +239,7 @@ export async function cmdWait(args, resumed = null) {
           writeJson(file, { ...readJson(file), ...Object.fromEntries(due.map((t) => [t.id, { attempt: t.attempt, at }])) });
         }
         markNotesRead(run, notes.map((n) => n.id));
+        markNoticesSeen(run, notices); // each owner acknowledges a change for itself (ownership.mjs)
       } catch (error) {
         process.stderr.write(`orch: could not record the reminders or notes as shown (${error.message}); they will show again\n`);
       }
@@ -234,6 +252,9 @@ export async function cmdWait(args, resumed = null) {
         const dir = path.join(run.dir, "tasks", task.id);
         files.push(path.join(dir, INBOX_FILE), path.join(dir, QUESTIONS_FILE), path.join(dir, "task.json"));
         if (task.outDir) files.push(path.join(task.outDir, "result.json"));
+      }
+      files.push(noticesFile(run));
+      for (const task of tasks) {
         // Parked babysitters remain running without a relay. A dead PID only asks Node
         // for another snapshot; it never decides whether any task has finished.
         if (task.state === "running" && task.phase !== "parked") pids.push(loadTask(run, task.id)?.pid);
