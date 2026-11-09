@@ -499,5 +499,4 @@ test('the dashboard page marks a stuck row and colors its attention tag', () => 
   assert.equal(context.nowText({ stuck: { ...stuck, command: 'y'.repeat(50) } }), `stuck: \`${'y'.repeat(29)}…\` failed 3× · `);
   assert.match(app, /class:"nowrow"\},\$\("td",\{\.\.\.indent\(32\),colspan:"10"\},nowText\(t\)\)/);
   assert.match(css, /\.a-stuck \.tag\{color:var\(--run\)\}/);
-  assert.match(css, /\.gattn\.a-stuck\{stroke:var\(--run\)\}/);
 });

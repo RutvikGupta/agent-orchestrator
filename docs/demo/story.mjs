@@ -63,7 +63,7 @@ export function story(ids) {
           { t: "write", file: `~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json` },
           { at: 57, t: "bash", cmd: `${ORCH} plan ${checkout} ~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json`, out: "plan recorded: 6 tasks (1 depends on others); briefs to write: 6" },
           { at: 56, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started schema-review → codex gpt-6.1-sol (effort medium, standard tier, read-only)\nwaiting on a brief: address-form, e2e-checkout, tax-rounding, cart-totals\nblocked promo-codes: waits on schema-review (running)" },
-          { at: 50, t: "bash", cmd: `${ORCH} start ${checkout} babysit-pr-212 --agent claude --babysit --pr 212 --why "babysits PR #212; Claude costs less than Codex" --brief briefs/babysit-pr-212.md`, out: "started babysit-pr-212 → claude claude-opus-5-5 (effort xhigh, write, babysitter: may commit and push, no sandbox)" },
+          { at: 50, t: "bash", cmd: `${ORCH} start ${checkout} babysit-pr-212 --agent claude --tier complex --babysit --pr 212 --why "babysits PR #212; Claude costs less than Codex" --brief briefs/babysit-pr-212.md`, out: "started babysit-pr-212 → claude claude-opus-5-5 (effort xhigh, write, babysitter: may commit and push, no sandbox)" },
           { at: 49, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started address-form → claude claude-opus-5-5 (effort xhigh, write, may commit and push, no sandbox)" },
           { at: 47, t: "bash", cmd: `${ORCH} result ${checkout} schema-review`, out: "task schema-review → codex (read-only), attempt 1: completed (exit 0)\n…\nOne breaking change: Cart.total changed from Float! to Money!." },
           { t: "bash", cmd: `${ORCH} dashboard --detach --open`, out: "dashboard: http://127.0.0.1:4777/  (background pid 48213, opened in the browser)" },
@@ -121,7 +121,7 @@ export function story(ids) {
             { t: "bash", cmd: `${ORCH} agents`, out: "AGENT  VERSION  LOGIN  RELAY  READY\nclaude 2.3.4    yes    yes    yes\ncodex  0.98.0   yes    yes    yes" },
             { t: "bash", cmd: `${ORCH} new --repo ~/src/example-shop --name search-ranking --goal "Rank multi-word product searches by how many query words match, then by phrase proximity"`, out: `run ${search}\n  repo: ~/src/example-shop\n  base: main @ 4c1e9b07d2aa` },
             { t: "bash", cmd: `${ORCH} start ${search} synonyms-research --agent codex --tier standard --read-only --why "needs live web search, which only Codex has" --brief briefs/synonyms-research.md -- --web-search live`, out: "started synonyms-research → codex gpt-6.1-sol (effort medium, standard tier, read-only)" },
-            { t: "bash", cmd: `${ORCH} start ${search} ranking-fix --agent claude --why "ranking change where tokenizer and scoring interact; Claude at xhigh is strongest for it" --brief briefs/ranking-fix.md`, out: "started ranking-fix → claude claude-opus-5-5 (effort xhigh, write, may commit and push, no sandbox)" },
+            { t: "bash", cmd: `${ORCH} start ${search} ranking-fix --agent claude --tier complex --why "ranking change where tokenizer and scoring interact; Claude at xhigh is strongest for it" --brief briefs/ranking-fix.md`, out: "started ranking-fix → claude claude-opus-5-5 (effort xhigh, write, may commit and push, no sandbox)" },
             { at: 22, t: "bash", cmd: `${ORCH} wait ${search} --timeout 9m`, out: "finished: ranking-fix (completed)" },
             { t: "bash", cmd: `git -C ~/.local/state/agent-orchestrator/runs/${search}/worktrees/ranking-fix diff main --stat`, out: " src/search/rank.ts           | 48 ++++++++++++++++++++++------\n src/search/rank.test.ts      | 61 ++++++++++++++++++++++++++++++++\n src/search/tokenize.ts       | 14 ++++++--\n 3 files changed, 109 insertions(+), 14 deletions(-)" },
             { t: "bash", cmd: "npm test -- src/search", out: " ✓ src/search/rank.test.ts (17 tests) 22ms\n ✓ src/search/tokenize.test.ts (8 tests) 4ms\n\n Test Files  2 passed (2)\n      Tests  25 passed (25)" },
@@ -178,7 +178,7 @@ export function story(ids) {
         goal: "Ship the one-page checkout: live cart totals, promo codes and saved addresses",
         // The plan as revised after e2e-checkout failed, recorded with `orch.mjs plan`: the tasks
         // below with their `type`, `owns` and `dependsOn` (the babysitter is started by hand, outside
-        // it), then the tasks not started yet, which the graph draws dashed.
+        // it), then the tasks not started yet.
         plan: {
           acceptance: [
             "The cart shows subtotal, discounts, tax and shipping in integer cents, and updates as lines change",
@@ -194,7 +194,7 @@ export function story(ids) {
               goal: "Round tax in refunds by the rule tax-rounding settles on, so a refund matches its receipt to the cent.",
             },
             {
-              id: "release-notes", agent: "claude", owns: ["CHANGELOG.md", "docs/releases/"], dependsOn: ["e2e-checkout"],
+              id: "release-notes", agent: "claude", tier: "standard", owns: ["CHANGELOG.md", "docs/releases/"], dependsOn: ["e2e-checkout"],
               why: "short prose for customers and the mobile team; Claude writes it well",
               goal: "Write the one-page checkout's release notes, and the mobile team's note on the new Cart.totalMoney field.",
             },
@@ -217,7 +217,7 @@ export function story(ids) {
             end: { status: "completed", finishedMin: 47, finalMessage: "One breaking change and one risk:\n\n1. `Cart.total` changed from `Float!` to `Money!`. The mobile app queries `total` in `cart.graphql` and `checkout.graphql`, so released app versions would break. Keep `total: Float!` (deprecated) and add `totalMoney: Money!`.\n2. `Cart.totals` resolves tax with the old `roundTax`, so its numbers can differ from the receipt by a cent once tax rounding changes.\n\n```orch-result\n{\"outcome\":\"done\",\"changed\":[],\"checks\":[{\"cmd\":\"npx graphql-inspector diff origin/main:src/api/schema.graphql src/api/schema.graphql\",\"result\":\"fail\",\"note\":\"1 breaking change\"}],\"decisions\":[],\"unresolved\":[]}\n```" },
           },
           {
-            id: "babysit-pr-212", agent: "claude", babysit: true, pr: 212, branch: "checkout/saved-address-api", startedMin: 50, quietMin: 4,
+            id: "babysit-pr-212", agent: "claude", tier: "complex", babysit: true, pr: 212, branch: "checkout/saved-address-api", startedMin: 50, quietMin: 4,
             why: "babysits PR #212; Claude costs less than Codex",
             goal: "Babysit pull request #212 (saved-address API) until it merges: fix failing checks, answer review threads, keep it mergeable.",
             usage: { base: 26000, growLo: 700, growHi: 2600, outLo: 60, outHi: 700 },
@@ -240,7 +240,7 @@ export function story(ids) {
             end: { status: "running" },
           },
           {
-            id: "address-form", agent: "claude", worktree: true, startedMin: 49, owns: ["src/checkout/", "e2e/checkout-address.spec.ts"],
+            id: "address-form", agent: "claude", tier: "complex", worktree: true, startedMin: 49, owns: ["src/checkout/", "e2e/checkout-address.spec.ts"],
             why: "UI and hook work across five files with design choices left open; Claude at xhigh is strongest for it",
             goal: "Add a saved-address picker and form to the checkout page, with postcode validation per country.",
             usage: { base: 24000, growLo: 1400, growHi: 4800 },
@@ -314,7 +314,7 @@ export function story(ids) {
               { t: "bash", cmd: "npm test -- src/promo", out: " ✓ src/promo/apply.test.ts (14 tests) 29ms\n ✓ src/promo/stacking.test.ts (6 tests) 7ms\n\n Test Files  2 passed (2)\n      Tests  20 passed (20)" },
               { t: "todo", items: ["Make stacking rules explicit", "Expiry and per-customer limits", "Server-side apply endpoint", "Tests and a cross-model review"], done: 2 },
               { t: "bash", cmd: `${ORCH} new --repo . --name promo-codes-checks --goal "Edge-case tests and a cross-model review for promo stacking"`, out: `run ${nested}\n  repo: ~/.local/state/agent-orchestrator/runs/${checkout}/worktrees/promo-codes\n  base: orch/${checkout}/promo-codes @ 4c1e9b07d2aa` },
-              { t: "bash", cmd: `${ORCH} start ${nested} stacking-review --agent claude --read-only --why "reviews Codex's stacking rules, so a different model looks at them" --brief briefs/stacking-review.md`, out: "started stacking-review → claude claude-opus-5-5 (effort xhigh, read-only)" },
+              { t: "bash", cmd: `${ORCH} start ${nested} stacking-review --agent claude --tier complex --read-only --why "reviews Codex's stacking rules, so a different model looks at them" --brief briefs/stacking-review.md`, out: "started stacking-review → claude claude-opus-5-5 (effort xhigh, read-only)" },
               { t: "bash", cmd: `${ORCH} start ${nested} promo-edge-tests --agent codex --tier standard --why "writes and runs edge-case tests, no source edits; the standard tier fits" --brief briefs/promo-edge-tests.md`, out: "started promo-edge-tests → codex gpt-6.1-sol (effort medium, standard tier, write)" },
               { t: "write", file: "src/api/promo.ts" },
               { t: "edit", files: ["src/promo/apply.ts", "src/promo/limits.ts"] },
@@ -341,7 +341,7 @@ export function story(ids) {
               finalMessage: "NEEDS DECISION: Should tax round per line item or once on the order total?\n- Per line item matches the receipts the stores print today; 37 of 1,204 October orders would change by €0.01 at checkout.\n- On the order total matches what refunds compute, so refunds reconcile exactly.\n- Recommendation: per line item, and change refunds to sum the rounded lines.\n\nI stopped before changing src/tax/round.ts, because receipts and refunds call it. src/tax/round.cases.test.ts pins both rules; I'll keep the cases for the rule you choose.\n\n```orch-result\n{\"outcome\":\"blocked\",\"changed\":[\"src/tax/round.cases.test.ts\"],\"checks\":[{\"cmd\":\"npm test -- src/tax\",\"result\":\"fail\",\"note\":\"2 cases fail until a rounding rule is chosen\"},{\"cmd\":\"node scripts/tax-diff.mjs --orders fixtures/orders-2026-10.json\",\"result\":\"pass\",\"note\":\"37 of 1,204 orders differ by a cent\"}],\"decisions\":[{\"question\":\"Should tax round per line item or once on the order total?\",\"options\":[\"per line item\",\"on the order total\"],\"recommendation\":\"per line item, and change refunds to sum the rounded lines\"}],\"unresolved\":[]}\n```" },
           },
           {
-            id: "cart-totals", agent: "claude", worktree: true, startedMin: 27, rateLimits: true, owns: ["src/cart/"],
+            id: "cart-totals", agent: "claude", tier: "complex", worktree: true, startedMin: 27, rateLimits: true, owns: ["src/cart/"],
             why: "core money logic with subtle rounding; Claude at xhigh is strongest for hard implementation work",
             goal: "Live cart totals: recompute subtotal, discounts, tax and shipping in integer cents as the cart changes.",
             usage: { base: 25000, growLo: 1400, growHi: 4600 },
@@ -382,7 +382,7 @@ export function story(ids) {
         goal: "Edge-case tests and a cross-model review for promo stacking",
         tasks: [
           {
-            id: "stacking-review", agent: "claude", readOnly: true, startedMin: 20, after: "result",
+            id: "stacking-review", agent: "claude", tier: "complex", readOnly: true, startedMin: 20, after: "result",
             why: "reviews Codex's stacking rules, so a different model looks at them",
             goal: "Review the promo stacking rules in src/promo for loopholes; report concrete defects only.",
             usage: { base: 21000, growLo: 1100, growHi: 3400 },
@@ -431,7 +431,7 @@ export function story(ids) {
             end: { status: "completed", finishedMin: 36, finalMessage: "Recommendation: score by query-word coverage first (share of the query's words found), then a phrase-proximity boost, then field weights (title 3, tags 2, description 1). Coverage alone fixes \"red running shoes\": socks match one word of three and drop below shoes that match all three. 412 of our 1,000 logged queries have more than one word.\n\n```orch-result\n{\"outcome\":\"done\",\"changed\":[],\"checks\":[],\"decisions\":[],\"unresolved\":[]}\n```" },
           },
           {
-            id: "ranking-fix", agent: "claude", worktree: true, startedMin: 43, after: "accept",
+            id: "ranking-fix", agent: "claude", tier: "complex", worktree: true, startedMin: 43, after: "accept",
             why: "ranking change where tokenizer and scoring interact; Claude at xhigh is strongest for it",
             goal: "Rank search results by query-word coverage, then phrase proximity, then field weights; keep single-word queries unchanged.",
             usage: { base: 23000, growLo: 1300, growHi: 4400 },

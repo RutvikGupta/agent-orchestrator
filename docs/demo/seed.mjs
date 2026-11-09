@@ -416,7 +416,7 @@ function relayScript(t, sessionId) {
 function planOf(r) {
   const entry = (t) => ({
     id: t.id, goal: t.goal, type: t.type || "implement", owns: t.owns || [], dependsOn: t.dependsOn || [],
-    agent: t.agent, tier: t.agent === "codex" ? t.tier : null, why: t.why, readOnly: Boolean(t.readOnly), brief: `briefs/${t.id}.md`,
+    agent: t.agent, tier: t.tier || null, why: t.why, readOnly: Boolean(t.readOnly), brief: `briefs/${t.id}.md`,
   });
   return { goal: r.goal, acceptance: r.plan.acceptance, tasks: [...r.tasks.filter((t) => !t.babysit), ...r.plan.planned].map(entry) };
 }

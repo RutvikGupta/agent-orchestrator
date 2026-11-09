@@ -251,8 +251,8 @@ function page(extra = {}, options = {}) {
     document: doc, CSS: { escape: (v) => String(v).replace(/["\\]/g, '\\$&') }, sel: null, state: [], lastDetail: '',
     fetch: async () => ({ ok: true, json: async () => ({ events: [] }) }), ...extra,
   });
-  for (const [from, until] of [['const fmt=', 'const outcome='], ['const cls=', 'let sel=null'], ['const FOCUS_KEYS=', "// A section's own toggles"],
-    ["// The agent's structured report", '// Lays out a plan graph'], ['const atBottom=', 'async function limits()'], ['function dur(ms)', 'function tick()']]) {
+  for (const [from, until] of [['const fmt=', 'const outcome='], ['const cls=', 'let sel=null'], ['const FOCUS_KEYS=', "// A section's own toggle"],
+    ["// The agent's structured report", '// Where the details panel scrolls'], ['const atBottom=', 'async function limits()'], ['function dur(ms)', 'function tick()']]) {
     vm.runInContext(snippet(from, until), context);
   }
   vm.runInContext('var taskAt=key=>{const[r,k]=key.split("/");return state.find(x=>x.id===r)?.tasks.find(x=>x.key===k)||null}', context);
@@ -592,4 +592,140 @@ test('main sessions and native sub-agents get no receipts sections, and keep the
   context.lastDetail = '';
   context.paint('s/k', { key: 'k', id: 'later', run: 'r', agent: '-', state: 'prepared', attempt: 0, attempts: [], cd: '/w' }, false, []);
   assert.doesNotMatch(textOf(panel.children), /Context|Attempts|Brief/);
+});
+
+// The headless agents that a task's own shell started (its `inner` list on the board) show in its
+// details, one block each after the task's own events: the figures of the agent and its events from
+// its own transcript, in the task's format. Their tokens are not the task's.
+const innerAgent = (extra = {}) => ({ key: 'claude:one', agent: 'claude', kind: 'claude -p', model: 'claude-opus-5-5', state: 'running', now: 'Read a.txt', elapsed: '4m02s', steps: 2,
+  tokensIn: 1200, tokensCached: 800, tokensOut: 300, tokensExact: true, launcher: 'bash /home/user/.agents/code-review/standards_review.sh', session: 'one', cd: '/work/repo',
+  file: '/home/user/.claude/projects/p/one.jsonl', lastActiveMs: 1000, ...extra });
+const transcriptUrl = (file) => `api/transcript?file=${encodeURIComponent(file)}`;
+
+test('the panel shows each agent a task\'s shell started as its own block, with its events and tokens, after the task\'s events', async () => {
+  const logs = {
+    'api/events?run=r&task=work&attempt=3': [{ kind: 'tool', text: '$ bash standards_review.sh' }],
+    [transcriptUrl('/home/user/.claude/projects/p/one.jsonl')]: [{ kind: 'user', text: 'Review the change.' }, { kind: 'tool', text: 'Read a.txt' }, { kind: 'output', text: '  ' }, { kind: 'says', text: 'Looking.' }],
+    [transcriptUrl('/home/user/.codex/sessions/rollout-two.jsonl')]: [{ kind: 'tool', text: '$ git diff' }],
+  };
+  const fetched = [];
+  const { context, panel } = page({ fetch: async (url) => { fetched.push(url); return { ok: true, json: async () => ({ events: logs[url] || [] }) }; } });
+  const two = innerAgent({ key: 'codex:two', agent: 'codex', kind: 'codex exec', model: 'gpt-6.1-sol', state: 'completed', file: '/home/user/.codex/sessions/rollout-two.jsonl', lastActiveMs: 500, session: 'two', tokensIn: 40, tokensCached: 0, tokensOut: 10, now: '$ git diff' });
+  context.state = [{ id: 's', tasks: [task({ state: 'running', tokensIn: 7, tokensCached: 0, tokensOut: 4, tokensExact: true, inner: [innerAgent(), two] })] }];
+  context.sel = 's/k';
+  // Painted before its events arrive, a block says so.
+  context.paint('s/k', context.state[0].tasks[0], false, []);
+  assert.deepEqual(headings(panel.children).filter((h) => h.startsWith('Events')), ['Events (0, newest last)', 'Events (loading…)', 'Events (loading…)']);
+  context.lastDetail = '';
+  await context.detail();
+
+  const blocks = classed(panel.children, 'inner');
+  assert.deepEqual(blocks.map((b) => textOf(b.kids[0])), ['Inside this task: claude -p · claude-opus-5-5 · running', 'Inside this task: codex exec · gpt-6.1-sol · completed']);
+  assert.deepEqual(blocks.map((b) => b.attrs['data-inner']), ['claude:one', 'codex:two']);
+  assert.deepEqual(blocks.map((b) => headings(b).slice(1)), [['Events (3, newest last), from its transcript'], ['Events (1, newest last), from its transcript']]);
+  // Each block's events: the transcript's, in the same format as the task's, without an empty output.
+  assert.deepEqual(classed(blocks[0], 'ev').map((e) => [e.attrs.class, textOf(e)]), [['ev user', 'userReview the change.'], ['ev tool', 'toolRead a.txt'], ['ev says', 'saysLooking.']]);
+  assert.deepEqual(classed(blocks[1], 'ev').map((e) => e.attrs.class), ['ev tool']);
+  const first = textOf(blocks[0]);
+  assert.match(first, /tokens~?1\.2k in \(800 cached\) \/ 300 out; not in the task's totals/);
+  assert.match(first, /started bybash \/home\/user\/\.agents\/code-review\/standards_review\.sh/);
+  assert.match(first, /activityRead a\.txt/, 'a running agent shows its activity');
+  assert.doesNotMatch(textOf(blocks[1]), /activity/, 'a finished one does not');
+  // The task's own events and tokens stay as they were, and its block comes first.
+  assert.match(textOf(panel.children), /tokens7 in \(0 cached\) \/ 4 out/);
+  const order = panel.kids.filter((n) => n?.tag === 'h3' || n?.attrs?.class === 'inner').map((n) => (n.tag === 'h3' ? textOf(n) : 'block')).filter((h) => h.startsWith('Events (1') || h === 'block');
+  assert.deepEqual(order, ['Events (1, newest last)', 'block', 'block']);
+
+  // A later refresh reads the running agent's transcript again, and the finished one's not at all.
+  fetched.length = 0;
+  context.lastDetail = '';
+  await context.detail();
+  assert.ok(fetched.includes(transcriptUrl('/home/user/.claude/projects/p/one.jsonl')));
+  assert.ok(!fetched.includes(transcriptUrl('/home/user/.codex/sessions/rollout-two.jsonl')), 'a finished agent whose transcript is unchanged is not fetched again');
+  // Unless the board says it was active since.
+  fetched.length = 0;
+  context.state[0].tasks[0].inner[1] = { ...two, lastActiveMs: 900 };
+  await context.detail();
+  assert.ok(fetched.includes(transcriptUrl('/home/user/.codex/sessions/rollout-two.jsonl')));
+});
+
+test('an agent whose transcript is not found says so and fetches nothing; agents left out of the list are counted', async () => {
+  const fetched = [];
+  const { context, panel } = page({ fetch: async (url) => { fetched.push(url); return { ok: true, json: async () => ({ events: [] }) }; } });
+  context.state = [{ id: 's', tasks: [task({ state: 'running', inner: [innerAgent({ file: null, state: 'completed' })], innerOmitted: 2 })] }];
+  context.sel = 's/k';
+  await context.detail();
+  assert.deepEqual(fetched.filter((u) => u.startsWith('api/transcript')), []);
+  assert.deepEqual(headings(panel.children).filter((h) => h.startsWith('Inside') || h.startsWith('Events:')), ['Inside this task: claude -p · claude-opus-5-5 · completed', 'Events: its transcript was not found']);
+  assert.match(textOf(panel.children), /2 earlier agents that this task started are not shown\./);
+  // A task whose shell started nothing has no such block.
+  context.state = [{ id: 's', tasks: [task()] }];
+  context.lastDetail = '';
+  await context.detail();
+  assert.equal(classed(panel.children, 'inner').length, 0);
+  assert.doesNotMatch(textOf(panel.children), /Inside this task/);
+});
+
+// Defect: a transcript read that failed was cached as an empty log, and for a finished agent whose
+// transcript had not changed it was never read again. Only a successful read is kept; a failed one
+// is tried at the next refresh, whatever way it failed.
+test('a failed transcript read is not cached: it is tried again at the next refresh, and the panel says so', async () => {
+  const file = '/home/user/.claude/projects/p/one.jsonl';
+  const answers = [
+    () => { throw new TypeError('Failed to fetch'); },
+    () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }),
+    () => ({ ok: false, status: 404, json: async () => ({ error: 'no such transcript' }) }),
+    () => ({ ok: true, json: async () => ({ events: [{ kind: 'says', text: 'Recovered log' }] }) }),
+  ];
+  const reads = [];
+  const { context, panel } = page({
+    fetch: async (url) => {
+      if (!url.startsWith('api/transcript')) return { ok: true, json: async () => ({ events: [] }) };
+      reads.push(url);
+      return answers[Math.min(reads.length - 1, answers.length - 1)]();
+    },
+  });
+  const finished = innerAgent({ state: 'completed', file });
+  context.state = [{ id: 's', tasks: [task({ inner: [finished] })] }];
+  context.sel = 's/k';
+  const refresh = async () => { context.lastDetail = ''; await context.detail(); };
+  const eventsHeading = () => headings(panel.children).filter((h) => h.startsWith('Events')).at(-1);
+  for (let i = 1; i <= 3; i++) {
+    await refresh();
+    assert.equal(reads.length, i, `refresh ${i} reads the transcript again`);
+    assert.equal(eventsHeading(), 'Events: could not be read, trying again');
+    assert.equal(classed(classed(panel.children, 'inner')[0], 'ev').length, 0);
+  }
+  await refresh();
+  assert.equal(reads.length, 4);
+  assert.equal(eventsHeading(), 'Events (1, newest last), from its transcript');
+  assert.deepEqual(classed(classed(panel.children, 'inner')[0], 'ev').map(textOf), ['saysRecovered log']);
+  // Now it is cached: a finished agent whose transcript is unchanged is not read again.
+  await refresh();
+  assert.equal(reads.length, 4);
+
+  // A running agent whose later read fails keeps the log it had, and says the read failed.
+  reads.length = 0;
+  answers.splice(0, answers.length, () => ({ ok: true, json: async () => ({ events: [{ kind: 'tool', text: 'Read a.txt' }] }) }), () => { throw new TypeError('Failed to fetch'); });
+  context.state = [{ id: 's', tasks: [task({ inner: [innerAgent({ key: 'claude:two', file: '/home/user/.claude/projects/p/two.jsonl' })] })] }];
+  await refresh();
+  assert.equal(eventsHeading(), 'Events (1, newest last), from its transcript');
+  await refresh();
+  assert.equal(eventsHeading(), 'Events (1, newest last), from its transcript; the latest read failed, trying again');
+  assert.deepEqual(classed(classed(panel.children, 'inner')[0], 'ev').map(textOf), ['toolRead a.txt']);
+});
+
+test('after a resume, each agent a task\'s shell started is labelled with the attempt it started in', async () => {
+  const { context, panel } = page();
+  const inner = [innerAgent({ key: 'claude:early', attempt: 1, state: 'completed', session: 'early' }), innerAgent({ key: 'claude:late', attempt: 2, session: 'late' })];
+  context.state = [{ id: 's', tasks: [task({ attempt: 2, state: 'running', inner })] }];
+  context.sel = 's/k';
+  await context.detail();
+  assert.deepEqual(headings(panel.children).filter((h) => h.startsWith('Inside')),
+    ['Inside this task: claude -p · claude-opus-5-5 · completed · attempt 1', 'Inside this task: claude -p · claude-opus-5-5 · running · attempt 2']);
+  // A task on its first attempt has nothing to tell apart.
+  context.state = [{ id: 's', tasks: [task({ attempt: 1, state: 'running', inner: [innerAgent({ attempt: 1 })] })] }];
+  context.lastDetail = '';
+  await context.detail();
+  assert.deepEqual(headings(panel.children).filter((h) => h.startsWith('Inside')), ['Inside this task: claude -p · claude-opus-5-5 · running']);
 });

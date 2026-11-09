@@ -102,8 +102,9 @@ no `orch.mjs` command started (`scripts/lib/external.mjs`), every 2 seconds whil
   rollout under `CODEX_HOME` that the process holds open. Interactive sessions are skipped.
 - **The board lists** only Codex and Claude Opus agents that a script under `~/.agents/`,
   `~/.claude/` or a skills folder started from a session, without their own sub-agents (a Codex
-  agent's sub-threads count in its tokens). One started from a task's shell is not listed: the
-  task's row stands for it.
+  agent's sub-threads count in its tokens). One started from a task's shell is not a row: the
+  task's row stands for it, and the task's details show the agent with its own events and tokens
+  (the row's `inner` list). It stays there while the task shows, past the board's idle window too.
 - Each agent is recorded in `external.jsonl` under the state root, so it stays listed after it
   exits. One that starts and ends while no dashboard runs is not seen.
 

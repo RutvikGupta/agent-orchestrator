@@ -48,36 +48,6 @@ body.resizing{cursor:col-resize;user-select:none}
 /* A section's "show N older" / "hide older" control, after its summary. */
 .run h2 .older{margin-left:8px;padding:0 6px;border:1px solid var(--line);border-radius:10px;background:none;color:var(--muted);font:inherit;font-size:11.5px;font-weight:400;line-height:18px;cursor:pointer;vertical-align:1px}
 .run h2 .older:hover,.run h2 .older:focus-visible{background:var(--sel);color:var(--fg);outline:none}
-/* A section's "Tree · Graph" toggle, at the end of its header. */
-.run h2 .views{margin-left:8px;font-size:11.5px;font-weight:400;color:var(--muted);white-space:nowrap}
-.run h2 .view{border:0;background:none;color:var(--muted);font:inherit;padding:0 4px;border-radius:4px;cursor:pointer}
-.run h2 .view.on{color:var(--fg);font-weight:600}.run h2 .view:hover,.run h2 .view:focus-visible{background:var(--sel);color:var(--fg);outline:none}
-/* The graph view: one framed panel per run graph, a nested run's indented under an accent line, each
-   scrolling sideways when wide. Inside, one band per lane of linked tasks, every other one shaded. */
-.run.graph-mode{width:auto}.graphs{display:flex;flex-direction:column;gap:14px;padding:2px 12px 12px}.gempty{margin:0;padding:6px 12px 12px;font-size:12.5px}
-.gpanel{min-width:0;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--fg) 6%,var(--bg));padding:8px 10px 10px}
-.gpanel.nested{margin-left:calc(var(--depth,1)*24px);border-left:3px solid var(--ask)}
-.ghead{display:flex;align-items:baseline;gap:10px;min-width:0;margin:0 2px 8px;font-size:12.5px;font-weight:600}
-.ghead .ggoal{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ghead .grun,.ghead .gfrom,.ghead .gcount{flex:none;font-size:11.5px;font-weight:400;color:var(--muted);white-space:nowrap}.ghead .gcount{margin-left:auto}
-.gwrap{overflow-x:auto;overflow-y:hidden;border-radius:6px}svg.graph{display:block;min-width:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.glane{fill:none}.glane.alt{fill:color-mix(in srgb,var(--fg) 5%,transparent)}.gdivide{stroke:var(--guide);stroke-width:1}.glabel{fill:var(--muted);font-size:10.5px}
-/* Edges stand out from the page by 3:1 or more in both themes: dashed until the dependency is met
-   (its task integrated), then solid green; those of the chosen task are drawn in the text color. */
-.gedge{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:5 4}.garrow{fill:var(--muted)}
-.gedge.met{stroke:var(--ok);stroke-dasharray:none}.garrow.met{fill:var(--ok)}
-.gedge.hot{stroke:var(--fg);stroke-width:2}.garrow.hot{fill:var(--fg)}
-.gnode{cursor:pointer;outline:none}.gnode[aria-disabled]{cursor:default}
-.gnode .box{fill:var(--bg);stroke:var(--idle);stroke-width:1.2}.gnode.planned .box{stroke-dasharray:5 4;fill:var(--card)}
-.gnode.d-run .box{stroke:var(--run);fill:color-mix(in srgb,var(--run) 8%,var(--bg))}.gnode.d-ok .box{stroke:var(--ok);fill:color-mix(in srgb,var(--ok) 8%,var(--bg))}.gnode.d-review .box{stroke:var(--review);fill:color-mix(in srgb,var(--review) 8%,var(--bg))}
-.gnode.d-ask .box{stroke:var(--ask);fill:color-mix(in srgb,var(--ask) 8%,var(--bg))}.gnode.d-bad .box{stroke:var(--bad);fill:color-mix(in srgb,var(--bad) 8%,var(--bg))}
-.gnode:hover .box,.gnode.sel .box{fill:var(--sel)}.gnode.sel .box{stroke-width:2.2}.gnode:focus-visible .box{stroke:var(--fg);stroke-width:2.2}
-.gnode .gdot{fill:var(--idle)}.gnode.d-run .gdot{fill:var(--run);animation:pulse 1600ms ease-in-out infinite}
-.gnode.d-ok .gdot{fill:var(--ok)}.gnode.d-review .gdot{fill:var(--review)}.gnode.d-ask .gdot{fill:var(--ask)}.gnode.d-bad .gdot{fill:var(--bad)}
-.gnode text{fill:var(--fg);font-size:11.5px}.gnode .gid{font-weight:600;font-size:12.5px}.gnode .gsub{fill:var(--muted)}
-.gnode .gword{font-weight:600}.gword.s-running{fill:var(--run)}.gword.s-completed{fill:var(--ok)}.gword.s-review{fill:var(--review)}.gword.s-ask{fill:var(--ask)}.gword.s-bad{fill:var(--bad)}.gword.s-idle{fill:var(--idle)}
-.gattn{fill:none;stroke-width:2}.gattn.a-needs-decision{stroke:var(--ask)}.gattn.a-failed{stroke:var(--bad)}.gattn.a-stuck{stroke:var(--run)}.gattn.a-awaiting-review{stroke:var(--review)}.gattn.a-silent{stroke:var(--run)}
-.gbadge rect{fill:var(--ask)}.gbadge text{fill:var(--bg);font-size:10.5px;font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;font-weight:500;color:var(--muted);font-size:12px}
 th,td{padding:4px 6px;border-top:1px solid var(--line);white-space:nowrap}
 tr.nowrow td{border-top:0;padding-top:0;color:var(--muted);font-size:12px;white-space:normal;overflow-wrap:anywhere}
@@ -106,6 +76,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);margi
 .ev.error .k,.ev.error pre{color:var(--bad)}.ev.output pre{color:var(--muted)}
 .ev.thinking pre{color:var(--muted);font-style:italic}
 .empty{padding:40px;text-align:center}
+/* Agents that a task's own shell started: one block each, after the task's events. */
+section.inner{margin-top:18px;padding-left:10px;border-left:3px solid var(--ask)}section.inner>h3:first-child{margin-top:0}
 /* The attention lane, above the run sections, and its count in the header. */
 #need{font-size:12px;font-weight:600;color:var(--ask);cursor:pointer}#need[hidden]{display:none}
 .lane{border:1px solid var(--line);border-radius:8px;background:var(--card);margin-bottom:16px;overflow:hidden}

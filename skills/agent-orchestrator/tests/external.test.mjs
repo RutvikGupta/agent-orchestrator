@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { eventually, fixture, jsonl, writeJson } from './helpers.mjs';
 import { claudeTranscripts } from './fixtures/transcripts.mjs';
@@ -548,4 +549,291 @@ test('a Claude Code session with Agent-tool sub-agents still gets its section an
   const only = state.find((s) => s.id === 'claude-agents-only-session');
   assert.deepEqual(only.tasks.map((r) => [r.id, r.native, r.main ?? false, r.parentKey]), [['solo', true, false, null]]);
   assert.ok(!boardRows(state).some((r) => r.external));
+});
+
+// Agents that a task's own shell started (a wrapper that runs `claude -p` or `codex exec`) show in
+// the task's details, not as rows: the task's row stays one row, and the agent's tokens stay out of
+// the task's own. While the task's own latest event is a shell command that is still waiting, and
+// one of its agents runs, the row's activity is that agent's, after "inner: ".
+const WRAPPER = 'bash ~/.agents/code-review/standards_review.sh --base main';
+const oldTime = new Date(Date.now() - 20 * 60_000);
+const makeQuiet = (task) => fs.utimesSync(path.join(task.outDir, 'events.jsonl'), oldTime, oldTime);
+// The task's own events: its usage so far, then the wrapper command, which has no result yet.
+const claudeWrapperEvents = [{ type: 'assistant', message: {
+  id: 'wrapper-call', model: 'claude-opus-5-5', stop_reason: 'tool_use', usage: { input_tokens: 3, output_tokens: 2 },
+  content: [{ type: 'tool_use', id: 'wrapper-bash', name: 'Bash', input: { command: WRAPPER } }],
+} }];
+const codexWrapperEvents = [
+  { type: 'turn.completed', usage: { input_tokens: 7, cached_input_tokens: 0, output_tokens: 4 } },
+  { type: 'item.started', item: { id: 'wrapper-cmd', type: 'command_execution', command: WRAPPER } },
+];
+const innerEnv = (run, task) => ({ AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: task });
+const rowOf = (state, run, id) => boardRows(state).find((r) => r.run === run.id && r.id === id && !r.native);
+// The board's task row, once it lists `count` agents of its own shell.
+async function withInner(board, run, id, count = 1, check = () => true) {
+  return eventually(async () => {
+    const state = await board.json('/api/state');
+    const row = rowOf(state, run, id);
+    return row?.inner?.length === count && check(row) ? { state, row } : null;
+  }, `${id} did not list ${count} agents of its own shell`, 20_000);
+}
+const transcriptEvents = async (board, inner) => (await board.json(`/api/transcript?file=${encodeURIComponent(inner.file)}`)).events;
+
+test('a running task lists the Claude session its shell runs in its details, keeps one row and its own tokens, and shows the agent\'s activity', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  const wrapper = await f.start(run, 'standards-r4', { config: { hold: true, extraEvents: claudeWrapperEvents }, flags: ['--read-only'] });
+  const plain = await f.start(run, 'plain', { config: { hold: true }, flags: ['--read-only'] });
+  await Promise.all([f.ready(wrapper), f.ready(plain)]);
+  makeQuiet(wrapper);
+  makeQuiet(plain);
+  transcript(f, 'inner-claude', false);
+  transcript(f, 'inner-plain', false);
+  fakes.start(fakes.session('task-agent', 'claude', [
+    fakes.script(`${SKILL}/standards_review.sh`, fakes.claude('inner', 'inner-claude', { env: innerEnv(run, 'standards-r4') })),
+    fakes.script(`${SKILL}/other_review.sh`, fakes.claude('inner-other', 'inner-plain', { env: innerEnv(run, 'plain') })),
+  ]));
+  await fakes.ready('inner', 'inner-other');
+  const board = await f.dashboard();
+
+  const { state, row } = await withInner(board, run, 'standards-r4', 1, (r) => String(r.now).startsWith('inner: '));
+  const rows = boardRows(state);
+  assert.deepEqual(rows.filter((r) => r.run === run.id && !r.native).map((r) => r.id).sort(), ['plain', 'standards-r4'], 'the task keeps one row; the inner agent gets none');
+  assert.ok(!rows.some((r) => r.session === 'inner-claude' || r.external), 'no row for the agent');
+  const [inner] = row.inner;
+  assert.deepEqual({ kind: inner.kind, model: inner.model, state: inner.state, session: inner.session, in: inner.tokensIn, out: inner.tokensOut },
+    { kind: 'claude -p', model: 'claude-opus-5-5', state: 'running', session: 'inner-claude', in: 10, out: 5 });
+  assert.match(inner.launcher, /standards_review\.sh$/);
+  assert.equal(row.now, 'inner: Read README.md', 'while its own latest event is a command that has no result, the row shows the agent\'s activity');
+  // The agent's tokens are in its own entry only.
+  assert.deepEqual({ in: row.tokensIn, out: row.tokensOut }, { in: 3, out: 2 });
+  const section = state.find((s) => s.tasks.some((r) => r.run === run.id));
+  assert.equal(section.totals.tokensIn, 3 + 0);
+  assert.equal(section.totals.tokensOut, 2 + 0);
+  // Its events come from its own transcript, in the task's log format, newest last.
+  assert.deepEqual((await transcriptEvents(board, inner)).map((e) => [e.kind, e.text]), [['user', 'Review the change.'], ['tool', 'Read README.md']]);
+
+  // A task whose own latest event is not a waiting command keeps its own activity, with the agent listed.
+  const other = (await withInner(board, run, 'plain')).row;
+  assert.match(other.now, /^quiet \d+m\d+s · starting$/, `its own activity stays: ${other.now}`);
+  assert.equal(other.inner[0].session, 'inner-plain');
+  f.release(wrapper);
+  f.release(plain);
+  await f.finished(run, 'standards-r4');
+  await f.finished(run, 'plain');
+});
+
+test('a running Codex task lists the codex exec its shell runs, with its commands and tokens, and shows its activity', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  const wrapper = await f.start(run, 'standards-r4', { agent: 'codex', config: { hold: true, extraEvents: codexWrapperEvents }, flags: ['--read-only'] });
+  await f.ready(wrapper);
+  makeQuiet(wrapper);
+  const id = codexId();
+  const file = rollout(f, id, {}, { events: [tokenCount(100, 20, 50), commandRun('git diff origin/main')] });
+  fakes.start(fakes.session('task-agent', 'codex', [
+    fakes.script(`${SKILL}/standards_review.sh`, fakes.codex('review', file, { sub: 'exec', env: innerEnv(run, 'standards-r4') })),
+  ]));
+  await fakes.ready('review');
+  const board = await f.dashboard();
+
+  const { state, row } = await withInner(board, run, 'standards-r4', 1, (r) => String(r.now).startsWith('inner: '));
+  const [inner] = row.inner;
+  assert.deepEqual({ kind: inner.kind, model: inner.model, state: inner.state, session: inner.session, in: inner.tokensIn, cached: inner.tokensCached, out: inner.tokensOut, steps: inner.steps },
+    { kind: 'codex exec', model: 'gpt-6.1-sol', state: 'running', session: id, in: 100, cached: 20, out: 50, steps: 1 });
+  assert.equal(inner.file, file);
+  assert.equal(row.now, 'inner: $ git diff origin/main');
+  assert.deepEqual({ in: row.tokensIn, out: row.tokensOut }, { in: 7, out: 4 }, 'the task\'s own tokens only');
+  assert.ok(!boardRows(state).some((r) => r.external || r.session === id), 'no row for the agent');
+  assert.deepEqual((await transcriptEvents(board, inner)).map((e) => e.kind), ['user', 'tool']);
+  f.release(wrapper);
+  await f.finished(run, 'standards-r4');
+});
+
+test('a finished task still lists the agents its shell ran, finished, with their events', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'claude-wrapper', { config: { hold: true, extraEvents: claudeWrapperEvents }, flags: ['--read-only'] });
+  const second = await f.start(run, 'codex-wrapper', { agent: 'codex', config: { hold: true, extraEvents: codexWrapperEvents }, flags: ['--read-only'] });
+  await Promise.all([f.ready(first), f.ready(second)]);
+  transcript(f, 'inner-done', true);
+  const id = codexId();
+  const file = rollout(f, id, {}, { events: [tokenCount(40, 0, 10), commandRun('git log -1'), rolloutEvent({ type: 'item_completed', item: { type: 'AgentMessage', content: [{ type: 'output_text', text: 'No findings.' }] } })] });
+  fakes.start(fakes.session('task-agent', 'claude', [
+    fakes.script(`${SKILL}/standards_review.sh`, fakes.claude('inner-claude', 'inner-done', { env: innerEnv(run, 'claude-wrapper') })),
+    fakes.script(`${SKILL}/codex_review.sh`, fakes.codex('inner-codex', file, { sub: 'exec', env: innerEnv(run, 'codex-wrapper') })),
+  ]));
+  await fakes.ready('inner-claude', 'inner-codex');
+  const board = await f.dashboard();
+  await withInner(board, run, 'claude-wrapper');
+  await withInner(board, run, 'codex-wrapper');
+
+  // The agents end, then their tasks do; the finished tasks go on listing them.
+  await fakes.stop('inner-claude', 'inner-codex');
+  f.release(first);
+  f.release(second);
+  await f.finished(run, 'claude-wrapper');
+  await f.finished(run, 'codex-wrapper');
+  const done = await eventually(async () => {
+    const state = await board.json('/api/state');
+    const rows = ['claude-wrapper', 'codex-wrapper'].map((id) => rowOf(state, run, id));
+    return rows.every((r) => r?.state === 'completed' && r.inner?.length === 1 && r.inner[0].state !== 'running') ? rows : null;
+  }, 'the finished tasks did not list their finished agents', 20_000);
+  const [claudeRow, codexRow] = done;
+  assert.equal(claudeRow.inner[0].kind, 'claude -p');
+  assert.equal(claudeRow.inner[0].state, 'completed');
+  assert.equal(codexRow.inner[0].kind, 'codex exec');
+  assert.equal(codexRow.inner[0].state, 'completed');
+  assert.deepEqual({ in: codexRow.inner[0].tokensIn, out: codexRow.inner[0].tokensOut }, { in: 40, out: 10 });
+  assert.notEqual(claudeRow.now, undefined);
+  assert.ok(!String(claudeRow.now).startsWith('inner: ') && !String(codexRow.now).startsWith('inner: '), 'a finished task shows its own last words');
+  assert.deepEqual((await transcriptEvents(board, claudeRow.inner[0])).map((e) => [e.kind, e.text]), [['user', 'Review the change.'], ['says', 'inner-done reply']]);
+  assert.deepEqual((await transcriptEvents(board, codexRow.inner[0])).map((e) => [e.kind, e.text]),
+    [['user', 'Review the change.'], ['tool', '$ git log -1'], ['says', 'No findings.']]);
+});
+
+test('a shown task keeps its finished agents after the board\'s idle window, and an unlisted task\'s agents go on showing only in it', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'old-wrapper', { config: { finalMessage: 'Reviewed.' }, flags: ['--read-only'] });
+  await f.finished(run, 'old-wrapper');
+  const long = await f.start(run, 'long', { config: { hold: true }, flags: ['--read-only'] });
+  await f.ready(long);
+  // The agent ended three hours ago: past AGENT_ORCH_BOARD_IDLE (2h), when a finished one leaves the board.
+  const ago = new Date(Date.now() - 3 * 3600_000);
+  const file = transcript(f, 'old-inner', true);
+  fs.utimesSync(file, ago, ago);
+  const base = { agent: 'claude', cwd: f.repo, pid: 2_147_000_000, command: 'claude -p fixture', startedMs: ago.getTime() - 60_000, seenMs: ago.getTime(), name: 'standards-review',
+    launcher: 'bash /home/user/.agents/code-review/standards_review.sh' };
+  const parent = (task) => ({ run: run.id, task, claude: null, codex: null, nearest: 'claude' });
+  const records = [
+    { ...base, key: 'claude:old-inner', sessionId: 'old-inner', parent: parent('old-wrapper') },
+    // Another run's task is not on the board, and a record with no task is the board's own business.
+    { ...base, key: 'claude:elsewhere', sessionId: 'elsewhere', parent: { ...parent('old-wrapper'), run: 'no-such-run' } },
+  ];
+  fs.writeFileSync(path.join(f.state, 'external.jsonl'), records.map((r) => JSON.stringify(r) + '\n').join(''));
+  const board = await f.dashboard();
+
+  const { state, row } = await withInner(board, run, 'old-wrapper');
+  assert.equal(row.inner[0].session, 'old-inner');
+  assert.equal(row.inner[0].state, 'completed');
+  assert.deepEqual(boardRows(state).filter((r) => r.run === run.id && !r.native).map((r) => r.id).sort(), ['long', 'old-wrapper']);
+  assert.equal(rowOf(state, run, 'long').inner, undefined, 'a task whose shell started nothing has no list');
+  assert.ok(!boardRows(state).some((r) => r.session === 'elsewhere' || r.session === 'old-inner'), 'neither gets a row of its own');
+  f.release(long);
+  await f.finished(run, 'long');
+});
+
+test('an agent\'s row is read incrementally: an unchanged transcript is not read again, and a finished one is built once', async (t) => {
+  const { innerAgent } = await import('../scripts/lib/external.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-inner-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'inner-unit.jsonl');
+  const timestamp = new Date().toISOString();
+  const line = (entry) => JSON.stringify(entry) + '\n';
+  const reply = (id, content, stop, usage) => ({ type: 'assistant', timestamp, message: { id, model: 'claude-opus-5-5', stop_reason: stop, content, usage } });
+  fs.writeFileSync(file, line({ type: 'user', timestamp, cwd: dir, message: { role: 'user', content: 'Review.' } })
+    + line(reply('m1', [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a.txt' } }], 'tool_use', { input_tokens: 10, output_tokens: 5 })));
+  // Every read of the transcript: [position, bytes].
+  const files = new Map();
+  const reads = [];
+  const { openSync, readSync } = fs;
+  fs.openSync = (p, ...rest) => { const fd = openSync(p, ...rest); if (p === file) files.set(fd, p); return fd; };
+  fs.readSync = (fd, ...rest) => { const n = readSync(fd, ...rest); if (files.has(fd)) reads.push([rest[3], n]); return n; };
+  t.after(() => { fs.openSync = openSync; fs.readSync = readSync; });
+  const x = { key: 'claude:inner-unit', agent: 'claude', sessionId: 'inner-unit', file, cwd: dir, startedMs: Date.now() - 5000, lastMs: Date.now(), alive: true,
+    name: 'standards-review', launcher: 'bash standards_review.sh', parent: {} };
+
+  const first = innerAgent(x);
+  assert.deepEqual({ state: first.state, now: first.now, steps: first.steps, in: first.tokensIn, out: first.tokensOut }, { state: 'running', now: 'Read a.txt', steps: 1, in: 10, out: 5 });
+  const size = fs.statSync(file).size;
+  assert.deepEqual(reads, [[0, size]]);
+  innerAgent(x);
+  assert.equal(reads.length, 1, 'an unchanged transcript is not read again');
+  // It finishes: only the appended lines are read.
+  fs.appendFileSync(file, line(reply('m2', [{ type: 'text', text: 'No findings.' }], 'end_turn', { input_tokens: 4, output_tokens: 2 })));
+  const done = innerAgent({ ...x, alive: false, lastMs: Date.now() });
+  assert.equal(reads.length, 2);
+  assert.equal(reads[1][0], size, 'the read starts where the last one ended');
+  assert.deepEqual({ state: done.state, in: done.tokensIn, out: done.tokensOut }, { state: 'completed', in: 14, out: 7 });
+  // A finished agent's row is kept as built until its transcript or state changes.
+  assert.equal(innerAgent({ ...x, alive: false, lastMs: done.lastActiveMs }), done);
+  assert.equal(reads.length, 2);
+});
+
+// A Claude transcript that stops at a tool call, so its agent's activity is that call.
+const toolTranscript = (f, session, name, input) => {
+  const timestamp = new Date().toISOString();
+  return jsonl(path.join(projectDir(f), `${session}.jsonl`), [
+    { type: 'user', timestamp, cwd: f.repo, message: { role: 'user', content: 'Review the change.' } },
+    { type: 'assistant', timestamp, message: { id: `${session}-reply`, model: 'claude-opus-5-5', stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: `${session}-call`, name, input }], usage: { input_tokens: 10, output_tokens: 5 } } },
+  ]);
+};
+
+// Defect: agents were grouped by run and task only, so a resumed task's new attempt took the agents of
+// its earlier attempts as its own, and one of them could set the row's activity.
+test('an agent belongs to the attempt it started in: only the current attempt\'s agents set the row\'s activity', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  await f.start(run, 'wrapper', { config: { finalMessage: 'First attempt.' }, flags: ['--read-only'] });
+  const first = await f.finished(run, 'wrapper');
+  const wrapper = await f.start(run, 'wrapper', { config: { hold: true, extraEvents: claudeWrapperEvents }, flags: ['--read-only'] });
+  await f.ready(wrapper);
+  makeQuiet(wrapper);
+  // One agent started in the first attempt and still runs; it was active more recently than the one
+  // the second attempt started, so it would win if the attempts were not told apart.
+  const early = toolTranscript(f, 'inner-early', 'Grep', { pattern: 'TODO' });
+  toolTranscript(f, 'inner-late', 'Read', { file_path: 'late.txt' });
+  const future = new Date(Date.now() + 120_000);
+  fs.utimesSync(early, future, future);
+  fakes.start(fakes.session('task-agent', 'claude', [
+    fakes.script(`${SKILL}/early_review.sh`, fakes.claude('early', 'inner-early', { env: innerEnv(run, 'wrapper'), startedAt: Date.parse(first.startedAt) + 1 })),
+    fakes.script(`${SKILL}/late_review.sh`, fakes.claude('late', 'inner-late', { env: innerEnv(run, 'wrapper'), startedAt: Date.now() })),
+  ]));
+  await fakes.ready('early', 'late');
+  const board = await f.dashboard();
+
+  const { row } = await withInner(board, run, 'wrapper', 2, (r) => String(r.now).startsWith('inner: '));
+  assert.equal(row.attempt, 2);
+  assert.deepEqual(row.inner.map((x) => [x.session, x.attempt, x.state]), [['inner-early', 1, 'running'], ['inner-late', 2, 'running']]);
+  assert.equal(row.now, 'inner: Read late.txt', 'the current attempt\'s agent, not the first attempt\'s');
+  f.release(wrapper);
+  await f.finished(run, 'wrapper');
+});
+
+// Defect: the row showed an agent's activity whenever the task had a command still waiting for a
+// result, even after the task wrote newer events of its own.
+test('"inner:" shows only while the task\'s own latest event is the call that waits; newer events of its own show instead', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  const message = { type: 'assistant', message: { id: 'wrapper-note', model: 'claude-opus-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Own latest activity after the review started' }], usage: { input_tokens: 1, output_tokens: 1 } } };
+  const finishedCommand = [codexWrapperEvents[1], { type: 'item.completed', item: { id: 'wrapper-cmd', type: 'command_execution', command: WRAPPER, exit_code: 0, status: 'completed', aggregated_output: 'ok' } }];
+  const tasks = {
+    waiting: await f.start(run, 'waiting', { config: { hold: true, extraEvents: claudeWrapperEvents }, flags: ['--read-only'] }),
+    later: await f.start(run, 'later', { config: { hold: true, extraEvents: [...claudeWrapperEvents, message] }, flags: ['--read-only'] }),
+    answered: await f.start(run, 'answered', { agent: 'codex', config: { hold: true, extraEvents: finishedCommand }, flags: ['--read-only'] }),
+  };
+  for (const task of Object.values(tasks)) {
+    await f.ready(task);
+    makeQuiet(task);
+  }
+  const agents = Object.keys(tasks);
+  for (const id of agents) transcript(f, `inner-${id}`, false);
+  fakes.start(fakes.session('task-agent', 'claude', agents.map((id) => (
+    fakes.script(`${SKILL}/${id}_review.sh`, fakes.claude(id, `inner-${id}`, { env: innerEnv(run, id) }))))));
+  await fakes.ready(...agents);
+  const board = await f.dashboard();
+
+  const rows = {};
+  for (const id of agents) rows[id] = (await withInner(board, run, id)).row;
+  // Again once every task has been built with its agent: the rows are stable.
+  const state = await board.json('/api/state');
+  for (const id of agents) rows[id] = rowOf(state, run, id);
+  assert.equal(rows.waiting.now, 'inner: Read README.md', 'its latest event is the call that waits');
+  assert.match(rows.later.now, /^quiet \d+m\d+s · says: Own latest activity/, 'a newer message of its own shows');
+  assert.match(rows.answered.now, /^quiet \d+m\d+s · \$ bash /, 'a call that has its result is not a waiting call');
+  for (const id of agents) assert.equal(rows[id].inner.length, 1, `${id} still lists its agent`);
+  for (const task of Object.values(tasks)) f.release(task);
+  for (const id of agents) await f.finished(run, id);
 });
