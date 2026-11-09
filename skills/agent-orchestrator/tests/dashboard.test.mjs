@@ -30,6 +30,8 @@ test('dashboard HTTP API and native transcript states', async (t) => {
     assert.ok(a && b);
     assert.deepEqual(a.runs.map((r) => r.id).sort(), [first.id, second.id].sort());
     assert.deepEqual(b.runs.map((r) => r.id), [other.id]);
+    // The plan graph view is gone: a run entry has its goal, start and parent task, and no graph.
+    for (const run of [...a.runs, ...b.runs]) assert.deepEqual(Object.keys(run).sort(), ['createdAt', 'goal', 'id', 'parent']);
     assert.equal(a.tasks.filter((row) => row.main).length, 1);
     assert.equal(a.tasks.filter((row) => row.native).length, 4);
     for (const agent of ['claude', 'codex']) {
@@ -136,6 +138,9 @@ test('dashboard HTTP API and native transcript states', async (t) => {
     }
     assert.ok(scripts.some((script) => script.trim()), 'dashboard must load its application script');
     for (const script of scripts) await board.checkScript(script);
+    // No graph view on the page: no layout code, no toggle, no styles.
+    const css = await (await board.get('/app.css')).text();
+    for (const text of [...scripts, css]) assert.doesNotMatch(text, /graphLayout|graphShown|gnode|gpanel|orchGraphView|class:"view"/);
     const logo = await board.get('/logo.svg');
     assert.equal(logo.status, 200);
     assert.match(logo.headers.get('content-type'), /image\/svg\+xml/);
@@ -150,4 +155,38 @@ test('dashboard HTTP API and native transcript states', async (t) => {
     assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false);
     // Fixture teardown also waits for the exact child and binds its former port.
   });
+});
+
+// Defect: the board took the 25 newest active runs, so a long run created early dropped off the board
+// while its relay still ran. A run counts toward the cap while it is active: not older than the idle
+// window, whether or not it has tasks. Runs with a live process show however old they are.
+test('a run whose relay is alive stays on the board when 25 newer runs fill its cap', async (t) => {
+  const f = await fixture(t);
+  const long = await f.newRun('long-run');
+  const worker = await f.start(long, 'worker', { config: { hold: true } });
+  await f.ready(worker);
+  // 26 runs created after it, each active (created now, so within the idle window); they take the
+  // cap's 25 places in newest-first order. Written directly: each is a run record with no tasks.
+  const template = JSON.parse(fs.readFileSync(path.join(long.dir, 'run.json'), 'utf8'));
+  const start = Date.parse(template.createdAt) + 1000;
+  const newer = Array.from({ length: 26 }, (_, i) => {
+    const createdAt = new Date(start + i * 1000).toISOString();
+    const id = `${createdAt.slice(0, 19).replaceAll(/[-:]/g, '').replace('T', '-')}-filler-${String(i).padStart(2, '0')}`;
+    const dir = path.join(f.state, 'runs', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'run.json'), JSON.stringify({ ...template, id, createdAt, goal: `Filler ${i}`, dir: undefined }));
+    return id;
+  });
+  const board = await f.dashboard();
+
+  const state = await board.json('/api/state');
+  const shown = new Set(state.flatMap((s) => s.runs.map((r) => r.id)));
+  assert.ok(shown.has(long.id), 'the run with a live relay is on the board');
+  const row = state.flatMap((s) => s.tasks).find((r) => r.run === long.id && r.id === 'worker');
+  assert.equal(row?.state, 'running');
+  // The cap still holds for the rest: the 25 newest fillers show, the oldest one does not.
+  assert.deepEqual(newer.filter((id) => shown.has(id)), newer.slice(1), 'the 25 newest of the other runs are listed');
+  assert.ok(!shown.has(newer[0]), 'a run that is not live and over the cap stays off the board');
+  f.release(worker);
+  await f.finished(long, 'worker');
 });

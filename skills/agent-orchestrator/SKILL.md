@@ -583,10 +583,14 @@ whose tab was opened another way.
   (`AGENT_ORCH_STUCK_REPEATS`) with only read-only inspection, such as `cat`, `grep` or `git diff`,
   in between. Any edit, other command or success ends it. It shows in the lane, `status` and `watch`,
   and wakes `wait`; nothing acts on the agent. Read its log, then `send` a hint, `steer` or stop it.
-- A section's **Tree · Graph** toggle draws each run's plan as a graph: tasks colored by state,
-  `dependsOn` as arrows. A dashed task is planned but not started, "×N" counts attempts, an
-  outline marks attention, and "+N" counts tasks delegated to a nested run, drawn as its own graph.
-  Clicking a task chooses it as its row does. `/api/state` carries each run's `graph`.
+- A task whose own shell starts headless agents (a wrapper script that runs `claude -p` or `codex
+  exec`, such as a review script) shows them in its details panel, each as a block "Inside this
+  task: <kind> · <model> · <state>" with its own events (read from its transcript, newest last) and
+  tokens. The task keeps one row, and those tokens stay out of its totals. After a resume, each
+  block says which attempt its agent started in. While the task's own latest event is a tool call
+  that has waited 30 seconds for its result, and an agent of its current attempt runs, the row's
+  activity shows that agent's latest, after "inner:"; a newer event of the task's own shows instead.
+  A finished agent stays listed while the row shows. `/api/state` carries them as the row's `inner`.
 - **Escalation.** A user's item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
   (default 10m), or a decision or question for `AGENT_ORCH_DECISION_ESCALATE_AFTER` (default 2m,
   or the first when that is shorter; checked every tenth of the shorter, from 1 to 10 seconds),
@@ -607,7 +611,7 @@ whose tab was opened another way.
   -p`) that a skill's script started from a session, outside the orchestrator, such as a review
   script's `codex exec review`. Each goes under the session that ran the script, named after the
   script (`codex-review`), and stays listed after it exits. One started from a task's shell is not
-  listed: the task's row stands for it. Such an agent takes no
+  a row: the task's row stands for it, and its details show the agent (above). Such an agent takes no
   messages and skips the model policy, so start agents through `$ORCH start` when they can take a
   brief; a script that must run its own `codex exec` or `claude -p` needs no runner task to be seen.
 - A run or session leaves the dashboard once nothing in it has run for `AGENT_ORCH_BOARD_IDLE`

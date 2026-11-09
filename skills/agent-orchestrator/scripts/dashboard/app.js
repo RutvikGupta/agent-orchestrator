@@ -12,10 +12,6 @@ const isOpen=k=>{const a=!!live.get(k),m=manual.get(k);if(m&&m.auto===a)return m
 // Sections whose older rows (finished and quiet a while; the server flags them) are shown, until
 // "hide older" is clicked or the page reloads.
 const olderShown=new Set();
-// Sections shown as a plan graph instead of the session tree, kept in this tab's session storage so
-// a reload keeps them, as keepState keeps the chosen row.
-const graphShown=new Set((()=>{try{return JSON.parse(sessionStorage.getItem("orchGraphView")||"[]")}catch{return[]}})());
-const keepViews=()=>{try{sessionStorage.setItem("orchGraphView",JSON.stringify([...graphShown].slice(-50)))}catch{}};
 // Rows are rebuilt when data changes; starting every pulse at the page timeline's origin keeps
 // rebuilt dots in step instead of restarting their beat.
 // Rows that changed place glide from their old position to the new one (rising or dropping), and
@@ -24,15 +20,15 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
   for(const b of root.querySelectorAll("tbody.session")){const old=before.get(b.dataset.key),dy=old==null?null:old-b.getBoundingClientRect().top;
     if(dy==null)b.animate([{opacity:0},{opacity:1}],{duration:350,easing:"ease-out"});
     else if(Math.abs(dy)>1)b.animate([{transform:"translateY("+dy+"px)"},{transform:"none"}],{duration:550,easing:"cubic-bezier(.2,.8,.2,1)"})}};
-const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run,.gnode.d-run .gdot"))for(const a of d.getAnimations())a.startTime=0};
+const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run"))for(const a of d.getAnimations())a.startTime=0};
 const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="parked"?"":"d-bad"};
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A session's activity line, after a short marker while it is stuck on one failing command.
 const nowText=t=>(t.stuck?"stuck: `"+(t.stuck.command.length>30?t.stuck.command.slice(0,29)+"…":t.stuck.command)+"` failed "+t.stuck.failures+"× · ":"")+(t.now||"");
-// Choosing a row, or its node in the graph view, marks it and paints its details at once from the
-// board already loaded; the table and the row's log refresh behind it.
+// Choosing a row marks it and paints its details at once from the board already loaded; the table and
+// the row's log refresh behind it.
 function choose(el){if(!el)return;sel=el.dataset.key;
-  for(const b of document.querySelectorAll("tbody.session.sel,.gnode.sel"))b.classList.remove("sel");el.classList.add("sel");
+  for(const b of document.querySelectorAll("tbody.session.sel"))b.classList.remove("sel");el.classList.add("sel");
   compose();document.querySelector("main").classList.remove("no-detail");detail();lastState="";refresh()}
 // Choose a session from the attention lane as its row would be chosen, opening the rows above it
 // (an open stays until the running state under that row changes) and scrolling its row into view.
@@ -40,7 +36,7 @@ function reveal(key){const[runId,taskKey]=key.split("/"),run=state.find(r=>r.id=
   for(let p=byKey.get(taskKey)?.parentKey;p;p=byKey.get(p)?.parentKey){const k=runId+"/"+p;if(!isOpen(k))manual.set(k,{open:true,auto:!!live.get(k)})}
   sel=key;compose();lastState="";document.querySelector("main").classList.remove("no-detail");
   const at='[data-key="'+CSS.escape(key)+'"]';
-  refresh().then(()=>{document.querySelector("tbody.session"+at+",.gnode"+at)?.scrollIntoView({block:"nearest",inline:"nearest"});return detail()})}
+  refresh().then(()=>{document.querySelector("tbody.session"+at)?.scrollIntoView({block:"nearest",inline:"nearest"});return detail()})}
 // Close the details panel: the table takes the full width until a session is chosen again.
 function closeDetail(){sel=null;lastDetail="";lastState="";document.querySelector("main").classList.add("no-detail");refresh()}
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sel&&!e.target?.closest?.("#compose"))closeDetail()});
@@ -51,12 +47,11 @@ const pick=row=>{toggleRow(row);choose(row)};
 document.getElementById("runs").addEventListener("click",e=>{const cr=e.target.closest(".caret[data-key]");
   if(cr){const k=cr.dataset.key;manual.set(k,{open:!isOpen(k),auto:!!live.get(k)});lastState="";refresh();return}
   const ob=e.target.closest(".older[data-run]");if(ob){const r=ob.dataset.run;if(!olderShown.delete(r))olderShown.add(r);redrawSection(r);return}
-  const vb=e.target.closest(".view[data-run]");if(vb){if(vb.dataset.view==="graph")graphShown.add(vb.dataset.run);else graphShown.delete(vb.dataset.run);keepViews();redrawSection(vb.dataset.run);return}
-  if(!getSelection().isCollapsed)return;const a=e.target.closest(".attn[data-key]");if(a)reveal(a.dataset.key);else{const g=e.target.closest(".gnode[data-key]");if(g)choose(g);else pick(e.target.closest("tbody.session"))}});
-document.getElementById("runs").addEventListener("pointerover",e=>{const row=e.target.closest("tbody.session,.gnode[data-key]");if(row&&row.dataset.key!==sel)preload(row.dataset.key)});
-document.getElementById("runs").addEventListener("focusin",e=>{if(refocusing)return;const row=e.target.closest("tbody.session,.gnode[data-key]");if(row&&row.dataset.key!==sel)preload(row.dataset.key)});
+  if(!getSelection().isCollapsed)return;const a=e.target.closest(".attn[data-key]");if(a)reveal(a.dataset.key);else pick(e.target.closest("tbody.session"))});
+document.getElementById("runs").addEventListener("pointerover",e=>{const row=e.target.closest("tbody.session");if(row&&row.dataset.key!==sel)preload(row.dataset.key)});
+document.getElementById("runs").addEventListener("focusin",e=>{if(refocusing)return;const row=e.target.closest("tbody.session");if(row&&row.dataset.key!==sel)preload(row.dataset.key)});
 document.getElementById("runs").addEventListener("keydown",e=>{if(e.key!=="Enter")return;const a=e.target.closest(".attn[data-key]");if(a)return reveal(a.dataset.key);
-  const g=e.target.closest(".gnode[data-key]");if(g)choose(g);else pick(e.target.closest("tbody.session"))});
+  pick(e.target.closest("tbody.session"))});
 // Ask once, only after a deliberate click on the attention count. Remember a dismissed prompt
 // too, so polling, reconnecting and reloading the dashboard never ask again.
 let notificationAsked=false;
@@ -100,8 +95,8 @@ async function refresh(){
   let tin=0,tout=0,running=0;
   const root=document.getElementById("runs");
   const before=new Map([...root.querySelectorAll("tbody.session")].map(b=>[b.dataset.key,b.getBoundingClientRect().top]));
-  // Each wide graph keeps its horizontal scroll across the redraw, and the board keeps its focus.
-  const scrolled=new Map([...root.querySelectorAll(".gwrap[data-run]")].map(w=>[w.dataset.run,w.scrollLeft])),focus=focusedOn(root);
+  // The board keeps its focus across the redraw.
+  const focus=focusedOn(root);
   root.replaceChildren();
   if(!state.length)root.append($("p",{class:"muted empty"},"No runs active recently."));
   // The attention lane: what needs someone now across every section, in the server's order (most
@@ -121,7 +116,6 @@ async function refresh(){
     ...(theirs.length?[$("h2",{class:"muted",title:"Agents are told about these; none needs you"},"For agents"),...theirs.map(attn)]:[])));
   tick();
   for(const run of state){tin+=run.totals.tokensIn;tout+=run.totals.tokensOut;running+=run.totals.running;root.append(sectionView(run))}
-  for(const w of root.querySelectorAll(".gwrap[data-run]"))if(scrolled.get(w.dataset.run))w.scrollLeft=scrolled.get(w.dataset.run);
   refocus(root,focus);
   syncPulses(root);
   slide(root,before);
@@ -136,7 +130,7 @@ function staleNote(r,body){const age=r.headers.get("x-orch-stale"),head=r.header
   if(!why.trim()&&refused){try{why=String(JSON.parse(body)?.error||"")}catch{why=String(body||"")}}
   why=why.split("\n")[0].trim()||(refused?"HTTP "+r.status:"cached board");
   const n=age==null||age===""?NaN:Number(age);return{why,age:Number.isFinite(n)?n:null,failed:refused}}
-// One section of the board: its header, with the view toggle, and its session tree or plan graphs.
+// One section of the board: its header and its session tree.
 function sectionView(run){
   const by=run.orchestrator?.agent?("launched by "+run.orchestrator.agent+(run.orchestrator.sessionId?" session "+run.orchestrator.sessionId.slice(0,8):"")):"";
   // One <tbody> per session, so its row and its activity line hover and select as one item.
@@ -169,26 +163,23 @@ function sectionView(run){
   const tt=run.totals,ap=tt.exact?"":"~",started=clock(Date.parse(run.createdAt)),awaiting=(run.attention||[]).filter(a=>a.kind==="awaiting-review").length;
   const summary=[tt.running?tt.running+" running":null,tt.finished?tt.finished+" finished":null,awaiting?awaiting+" awaiting review":null,ap+fmt(tt.tokensIn)+" in / "+ap+fmt(tt.tokensOut)+" out","started "+started,!run.running&&run.activeMs?"last active "+clock(run.activeMs):null].filter(Boolean).join(" · ");
   const tip=[[run.id,by,[(run.repo||"").split("/").pop(),run.baseBranch].filter(Boolean).join(" @ ")].filter(Boolean).join(" · "),...((run.runs||[]).length>1?["runs:",...run.runs.map(r=>"  "+(r.goal||r.id))]:[]),"token counts leave out the main session"].join("\n");
-  const graph=graphShown.has(run.id);
-  const toggle=!graph&&older.size?$("button",{class:"older","data-run":run.id,title:showOlder?"fold away the finished rows that have been quiet a while":"list the finished rows that have been quiet a while"},showOlder?"hide older":"show "+older.size+" older"):null;
-  const view=(v,label,on)=>$("button",{class:"view"+(on?" on":""),"data-run":run.id,"data-view":v,"aria-pressed":String(on),title:v==="graph"?"Show the plan as a graph of tasks and their dependencies":"Show the sessions as a tree"},label);
-  const views=$("span",{class:"views",role:"group","aria-label":"View"},view("tree","Tree",!graph),$("span",{class:"vsep"},"·"),view("graph","Graph",graph));
-  return $("div",{class:"run"+(graph?" graph-mode":""),"data-run":run.id},$("h2",{title:tip},sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle,views),
-    graph?graphView(run):$("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
+  const toggle=older.size?$("button",{class:"older","data-run":run.id,title:showOlder?"fold away the finished rows that have been quiet a while":"list the finished rows that have been quiet a while"},showOlder?"hide older":"show "+older.size+" older"):null;
+  return $("div",{class:"run","data-run":run.id},$("h2",{title:tip},sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
+    $("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
       $("th",{class:"num"},"steps"),$("th",{class:"num"},"tokens in"),$("th",{class:"num"},"out"),$("th",{},"session"))),...(rows.length?rows:[$("tbody",{},$("tr",{},$("td",{colspan:"10",class:"muted"},older.size?"every row is older; show them from the header":"no tasks yet")))])),
   )}
 // A redraw replaces every element of the board. The one that had focus (a tree row by its task key,
-// a graph node by its run and task, an attention item, or a section's toggle) is found again and
-// focused without scrolling, so Tab and Enter keep working. Focus outside the board, such as in the
-// message box, is never taken. The details panel passes its own `keys` (PANEL_FOCUS).
-const FOCUS_KEYS=[["tbody.session",["key"]],[".gnode",["node"]],[".attn",["key"]],[".view",["run","view"]],[".older",["run"]]];
+// an attention item, or a section's "older" toggle) is found again and focused without scrolling, so
+// Tab and Enter keep working. Focus outside the board, such as in the message box, is never taken.
+// The details panel passes its own `keys` (PANEL_FOCUS).
+const FOCUS_KEYS=[["tbody.session",["key"]],[".attn",["key"]],[".older",["run"]]];
 function focusedOn(root,keys=FOCUS_KEYS){const a=document.activeElement;if(!a||a===root||!root.contains(a))return null;
   const hit=keys.find(([s])=>a.matches(s));
   return hit?hit[0]+hit[1].map(k=>"[data-"+k+'="'+CSS.escape(a.dataset[k]??"")+'"]').join(""):null}
 let refocusing=false; // the focusin handler leaves a refocused row's log alone
 function refocus(root,selector){const el=selector&&root.querySelector(selector);if(!el||document.activeElement===el)return;
   refocusing=true;try{el.focus({preventScroll:true})}finally{refocusing=false}}
-// A section's own toggles redraw just that section from the board already loaded, even while text
+// A section's own toggle redraws just that section from the board already loaded, even while text
 // is selected elsewhere on the board, which holds every other redraw back.
 function redrawSection(id){const root=document.getElementById("runs"),run=state.find(r=>r.id===id),old=root.querySelector('.run[data-run="'+CSS.escape(id)+'"]');
   if(!run||!old){lastState="";refresh();return}
@@ -213,147 +204,6 @@ function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.le
     ["unresolved",r.unresolved?.length?list(r.unresolved):null]]:[];
   rows.push(["outside its files",out.length?list(out):null]);
   return[$("h3",{},r?"Structured report":"Scope"),$("dl",{class:"report"},...rows.filter(([,v])=>v!=null).flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)]))]}
-// Lays out a plan graph: `nodes` ([{id, state, attention}], in plan order) and `edges` ([{from, to}],
-// from a task to one that depends on it). Tasks linked by edges, directly or through others, share a
-// lane: a horizontal band, one per chain. Tasks linked to no other share an "independent" lane per
-// status group. Lanes with a running task come first, then those with a task that needs someone (a
-// decision, a failure, a review), then the rest, each group in plan order of the lanes' first tasks;
-// a group's independent lane leads it, except the finished or planned one, which closes the drawing.
-// Bands are padded so lanes stand further apart than rows. Within a chain's lane, each task goes one
-// column right of the longest chain of tasks before it, and tasks stack from the top in plan order;
-// an independent lane is a grid, filled left to right and then top to bottom, as many columns wide
-// as fit `fit` pixels (at least 1, at most 4 or the widest chain's column count, whichever is more).
-// A task moves only when its lane changes group, never within it, and not when a task is added to
-// another lane. Columns line up across lanes. An edge that skips columns runs through a thin slot
-// below the tasks of each column it crosses. Edges are smooth cubic curves from a task's right side
-// to its dependent's left side. The plan validator forbids cycles; one found here is cut at its
-// first task in plan order, so the layout always ends, and each edge that then points back (to a
-// column at or left of its source) runs below its lane's tasks, on a channel of its own, through the
-// gaps beside the columns. `order` lists the tasks as the eye reads them: lane by lane, a chain's
-// column by column and top to bottom, a grid row by row.
-// Returns {width, height, order, nodes: [{id, lane, layer, row, x, y, w, h}], edges: [{from, to, d, x1, y1, x2, y2}],
-// lanes: [{index, y, h, independent, group (0 running, 1 needs someone, 2 the rest), label, ids, labelY}]}.
-function graphLayout(nodes,edges,{w=184,h=58,gx=64,gy=16,pad=12,slot=6,turn=20,band=18,label=16,fit=Infinity}={}){
-  const index=new Map();for(const n of nodes||[])if(n&&!index.has(n.id))index.set(n.id,index.size);
-  const ids=[...index.keys()];if(!ids.length)return{width:0,height:0,order:[],nodes:[],edges:[],lanes:[]};
-  const preds=new Map(ids.map(id=>[id,[]])),succs=new Map(ids.map(id=>[id,[]])),links=[],seen=new Set();
-  for(const e of edges||[]){const k=JSON.stringify([e?.from,e?.to]);if(!e||e.from===e.to||!index.has(e.from)||!index.has(e.to)||seen.has(k))continue;
-    seen.add(k);links.push(e);preds.get(e.to).push(e.from);succs.get(e.from).push(e.to)}
-  links.sort((a,b)=>index.get(a.from)-index.get(b.from)||index.get(a.to)-index.get(b.to));
-  // Longest-path layers, placing each task once every task before it is placed.
-  const layer=new Map(),waiting=new Map(ids.map(id=>[id,preds.get(id).length]));
-  let ready=ids.filter(id=>!waiting.get(id));
-  while(layer.size<ids.length){
-    if(!ready.length)ready=[ids.find(id=>!layer.has(id))]; // only cycles are left: cut one
-    const next=[];
-    for(const id of ready){if(layer.has(id))continue;
-      layer.set(id,Math.max(0,...preds.get(id).filter(p=>layer.has(p)).map(p=>layer.get(p)+1)));
-      for(const s of succs.get(id)){waiting.set(s,waiting.get(s)-1);if(!waiting.get(s)&&!layer.has(s))next.push(s)}}
-    ready=next}
-  // Lanes: the connected groups of linked tasks, and the tasks linked to no other by status group,
-  // each collected in plan order. A lane goes in the group of its most pressing task.
-  const info=new Map();for(const n of nodes||[])if(n&&!info.has(n.id))info.set(n.id,n);
-  const urgency=id=>{const n=info.get(id);return n.state==="running"?0:["needs-decision","failed","awaiting-review"].includes(n.attention)?1:2};
-  const group=new Map(ids.map(id=>[id,id])),root=id=>{while(group.get(id)!==id)id=group.get(id);return id};
-  for(const e of links){const a=root(e.from),b=root(e.to);if(a!==b)group.set(index.get(a)<index.get(b)?b:a,index.get(a)<index.get(b)?a:b)}
-  const linked=new Set(links.flatMap(e=>[e.from,e.to])),byKey=new Map(),lanes=[],laneOf=new Map();
-  for(const id of ids){const key=linked.has(id)?"chain "+root(id):"alone "+urgency(id);
-    if(!byKey.has(key)){byKey.set(key,{ids:[],independent:!linked.has(id)});lanes.push(byKey.get(key))}byKey.get(key).ids.push(id)}
-  const names=["independent · running","independent · needs attention","independent"],lead=l=>l.independent?(l.group<2?-1:1):0;
-  for(const lane of lanes){lane.group=Math.min(...lane.ids.map(urgency));lane.label=lane.independent?names[lane.group]:null}
-  lanes.sort((a,b)=>a.group-b.group||lead(a)-lead(b));
-  lanes.forEach((lane,i)=>{lane.index=i;for(const id of lane.ids)laneOf.set(id,i)});
-  // Back edges need room for their turns beside the outer columns, and a channel each below their lane's tasks.
-  const back=links.filter(e=>layer.get(e.to)<=layer.get(e.from)),side=back.length?turn:0,colX=l=>pad+side+l*(w+gx);
-  const depthOf=lane=>Math.max(...lane.ids.map(id=>layer.get(id)))+1;
-  const widest=Math.max(4,...lanes.filter(l=>!l.independent).map(depthOf)),fits=Math.floor((fit-2*(pad+side)+gx)/(w+gx));
-  const across=Math.max(1,Math.min(widest,Number.isFinite(fits)?fits:widest));
-  const at=new Map(),via=new Map(),slotY=new Map(),channel=new Map(),order=[];let y=0,width=0;
-  for(const lane of lanes){
-    // A chain's columns follow its layers; an independent lane wraps into a grid.
-    const depth=lane.independent?Math.min(across,lane.ids.length):depthOf(lane),cols=Array.from({length:depth},()=>[]);
-    lane.ids.forEach((id,i)=>cols[lane.independent?i%depth:layer.get(id)].push(id));
-    // Slots go under each column's tasks, one per column an edge skips. A back edge takes none.
-    const mine=links.filter(e=>laneOf.get(e.from)===lane.index),turns=mine.filter(e=>back.includes(e));
-    for(const e of mine){via.set(e,[]);if(!turns.includes(e))for(let l=layer.get(e.from)+1;l<layer.get(e.to);l++){const v=" slot "+via.size+" "+l;cols[l].push(v);via.get(e).push([l,v])}}
-    const first=y+band+(lane.independent?label:0),top=new Map();let tall=0;
-    for(const c of cols){let cy=first;for(const id of c){top.set(id,cy);cy+=(index.has(id)?h:slot)+gy}tall=Math.max(tall,cy-gy-first)}
-    for(const[v,t]of top)if(!index.has(v))slotY.set(v,t+slot/2);
-    turns.forEach((e,k)=>channel.set(e,first+tall+gy+k*10));
-    cols.forEach((c,l)=>c.filter(id=>index.has(id)).forEach((id,i)=>at.set(id,{id,lane:lane.index,layer:l,row:i,x:colX(l),y:top.get(id),w,h})));
-    order.push(...(lane.independent?lane.ids:cols.flatMap(c=>c.filter(id=>index.has(id)))));
-    const bottom=first+tall+(turns.length?gy+(turns.length-1)*10:0)+band;
-    Object.assign(lane,{y,h:bottom-y,labelY:lane.independent?y+band+4:null});y=bottom;
-    width=Math.max(width,2*(pad+side)+depth*w+(depth-1)*gx)}
-  const curve=(x1,y1,x2,y2)=>{const dx=Math.max(24,Math.abs(x2-x1)/2);return"C"+(x1+dx)+" "+y1+" "+(x2-dx)+" "+y2+" "+x2+" "+y2};
-  const path=e=>{const a=at.get(e.from),b=at.get(e.to),x1=a.x+w,y1=a.y+h/2,x2=b.x,y2=b.y+h/2;let d="M"+x1+" "+y1,x=x1,cy=y1;
-    // Down beside the source's column, left along the channel, then up beside the target's column.
-    if(channel.has(e)){const yb=channel.get(e);
-      d+="C"+(x1+turn)+" "+y1+" "+(x1+turn)+" "+yb+" "+x1+" "+yb+"L"+x2+" "+yb+"C"+(x2-turn)+" "+yb+" "+(x2-turn)+" "+y2+" "+x2+" "+y2;
-      return{from:e.from,to:e.to,x1,y1,x2,y2,d}}
-    for(const[l,v]of via.get(e)){const vx=colX(l),vy=slotY.get(v);d+=curve(x,cy,vx,vy)+"L"+(vx+w)+" "+vy;x=vx+w;cy=vy}
-    return{from:e.from,to:e.to,x1,y1,x2,y2,d:d+curve(x,cy,x2,y2)}};
-  return{width,height:y,order,nodes:ids.map(id=>at.get(id)),edges:links.map(path),
-    lanes:lanes.map(({index,y,h,independent,group,label,ids,labelY})=>({index,y,h,independent,group,label,ids,labelY}))}}
-// The graph view of a section: one framed panel per run, each nested run right after the run whose
-// task started it, indented under an accent line. A run with nothing planned or started is left out.
-function graphView(sec){const byId=new Map(sec.runs.map(r=>[r.id,r])),kids=new Map(),order=[],seen=new Set();
-  for(const r of sec.runs)if(r.parent&&byId.has(r.parent.run)){if(!kids.has(r.parent.run))kids.set(r.parent.run,[]);kids.get(r.parent.run).push(r)}
-  const walk=(r,depth)=>{if(seen.has(r.id))return;seen.add(r.id);order.push([r,depth]);for(const k of kids.get(r.id)||[])walk(k,depth+1)};
-  for(const r of sec.runs)if(!r.parent||!byId.has(r.parent.run))walk(r,0);for(const r of sec.runs)walk(r,0);
-  const shown=order.filter(([r])=>r.graph?.nodes?.length);
-  if(!shown.length)return $("p",{class:"muted gempty"},"Nothing planned or started with orch.mjs here. The tree view lists this section's sessions.");
-  return $("div",{class:"graphs"},...shown.map(([r,depth])=>graphPanel(sec,r,depth)))}
-// A run's panel: a one-line header (its goal, cut short with the whole goal in the tooltip, its short
-// id, who delegated it, and a count of its tasks and of those needing attention), then its graph.
-const NEEDS=[["needs-decision","needs decision","need decision"],["failed","failed","failed"],["awaiting-review","awaiting review","awaiting review"],["silent","silent","silent"]];
-// Its graph wraps independent tasks to the width the panel will have: the board's, less the paddings
-// and borders of the section, the panel list and the panel, and a nested panel's indent and accent.
-function graphPanel(sec,r,depth){const nodes=r.graph.nodes,running=nodes.filter(n=>n.state==="running").length;
-  const room=document.getElementById("runs")?.clientWidth,fit=room?room-88-(depth?depth*24+2:0):Infinity;
-  const count=[nodes.length+(nodes.length===1?" task":" tasks"),running?running+" running":null,
-    ...NEEDS.map(([kind,one,many])=>{const c=nodes.filter(n=>n.attention===kind).length;return c?c+" "+(c===1?one:many):null})].filter(Boolean).join(" · ");
-  return $("div",{class:"gpanel"+(depth?" nested":""),"data-run":sec.id+"/"+r.id,role:"group","aria-label":"Plan of "+sectionTitle(r),...(depth?{style:"--depth:"+depth}:{})},
-    $("h3",{class:"ghead",title:(r.goal||r.id)+"\nrun "+r.id},$("span",{class:"ggoal"},sectionTitle(r)),$("span",{class:"grun"},clip(r.id.replace(/^\d{8}-\d{6}-/,""),32)),
-      r.parent?$("span",{class:"gfrom"},"delegated by "+r.parent.task):null,$("span",{class:"gcount"},count)),
-    $("div",{class:"gwrap","data-run":sec.id+"/"+r.id},graphSvg(sec,r,fit)))}
-// One run's graph as inline SVG. A node is colored by state like the tree's dots, dashed while only
-// planned, outlined in its attention color, and marked "×N" after several attempts and "+N" for the
-// tasks it delegated to a nested run. Choosing a node chooses its row (the click and key handlers).
-// An edge is dashed until the task it starts from is integrated, then solid (`met`).
-const $s=(t,a={},...kids)=>{const e=document.createElementNS("http://www.w3.org/2000/svg",t);for(const[k,v]of Object.entries(a))if(v!=null)e.setAttribute(k,v);
-  for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextNode(String(c)));return e};
-const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
-const nodeWord=n=>n.planned?(n.ready?"ready":"planned"):((n.state==="completed"&&n.phase)||(n.phase==="parked"&&"parked")||n.state||"not started").replace(/-/g," ");
-function graphSvg(sec,r,fit=Infinity){const{nodes,edges}=r.graph,L=graphLayout(nodes,edges,{fit}),at=new Map(L.nodes.map(p=>[p.id,p])),byId=new Map(nodes.map(n=>[n.id,n]));
-  const keyOf=n=>n.key?sec.id+"/"+n.key:null,hot=new Set(nodes.filter(n=>keyOf(n)&&keyOf(n)===sel).map(n=>n.id));
-  // Drawn one unit to a pixel, at least as wide as its panel, so the lanes' bands span the panel.
-  const svg=$s("svg",{class:"graph",width:L.width,height:L.height,role:"group","aria-label":"Plan graph: "+sectionTitle(r)});
-  // One band per lane, every other one shaded, a thin line between them, and the labels of the lanes
-  // of tasks linked to no other.
-  for(const lane of L.lanes){svg.append($s("rect",{class:"glane"+(lane.index%2?" alt":""),x:0,y:lane.y,width:"100%",height:lane.h}));
-    if(lane.index)svg.append($s("line",{class:"gdivide",x1:0,y1:lane.y,x2:"100%",y2:lane.y}));
-    if(lane.independent)svg.append($s("text",{class:"glabel",x:12,y:lane.labelY},lane.label))}
-  for(const e of L.edges){const c=(byId.get(e.from)?.phase==="integrated"?" met":"")+(hot.has(e.from)||hot.has(e.to)?" hot":"");
-    svg.append($s("path",{class:"gedge"+c,d:e.d}),$s("path",{class:"garrow"+c,d:"M"+(e.x2-7)+" "+(e.y2-4)+"L"+e.x2+" "+e.y2+"L"+(e.x2-7)+" "+(e.y2+4)+"Z"}))}
-  // Awaiting review has a color of its own, apart from the green of accepted and integrated work.
-  // Nodes go in as the eye reads them (L.order), so Tab moves through them in that order.
-  for(const n of L.order.map(id=>byId.get(id))){const p=at.get(n.id),k=keyOf(n),word=nodeWord(n),review=!n.planned&&n.phase==="awaiting-review";
-    const dc=n.planned||!n.state?"":review?"d-review":dotClass({state:n.state,phase:n.phase});
-    const tip=[n.id+(n.type?" ("+n.type+")":""),n.title,word+(n.attempts>1?" · "+n.attempts+" attempts":""),n.attention?"needs attention: "+n.attention.replace(/-/g," "):null,
-      n.delegated?n.delegated+" task"+(n.delegated>1?"s":"")+" delegated to a nested run":null,k?null:"not started yet: nothing to show"].filter(Boolean);
-    const badge=n.delegated?"+"+n.delegated:"",bw=10+badge.length*7;
-    svg.append($s("g",{class:"gnode"+(dc?" "+dc:"")+(n.planned?" planned":"")+(k&&k===sel?" sel":""),transform:"translate("+p.x+" "+p.y+")",tabindex:"0",role:"button",
-        "data-key":k,"data-node":sec.id+"/"+r.id+"/"+n.id,"aria-disabled":k?null:"true","aria-label":tip.join(", ")},
-      $s("title",{},tip.join("\n")),
-      n.attention?$s("rect",{class:"gattn a-"+n.attention,x:-4,y:-4,width:p.w+8,height:p.h+8,rx:10}):null,
-      $s("rect",{class:"box",width:p.w,height:p.h,rx:7}),$s("circle",{class:"gdot",cx:13,cy:16,r:4}),
-      $s("text",{class:"gid",x:24,y:20},clip(n.id,21)),
-      $s("text",{class:"gsub",x:10,y:36},clip([n.agent,n.tier].filter(Boolean).join(" · ")||"agent not chosen",n.attempts>1?18:24)),
-      n.attempts>1?$s("text",{class:"gsub",x:p.w-10,y:36,"text-anchor":"end"},"×"+n.attempts):null,
-      $s("text",{class:"gword "+(n.planned||!n.state?"s-idle":review?"s-review":cls(outcome(n))),x:10,y:50},clip(word,26)),
-      badge?$s("g",{class:"gbadge"},$s("rect",{x:p.w-bw+6,y:-7,width:bw,height:15,rx:7.5}),$s("text",{x:p.w+6-bw/2,y:4,"text-anchor":"middle"},badge)):null))}
-  return svg}
 // Where the details panel scrolls when it is rebuilt: a session just chosen opens at its newest
 // events (the bottom), and a reader at the bottom (within 40 px) stays pinned there as events
 // arrive; a reader who scrolled up keeps their place, and the jump buttons take them back down.
@@ -381,14 +231,33 @@ function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSour
   const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(lk)?.ev||[]).then(ev=>{loading.delete(lk);logs.delete(lk);
     logs.set(lk,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
   loading.set(lk,load);return load}
-function preload(key){const t=taskAt(key),lk=logKey(key,t);if(t&&!loading.has(lk)&&!(Date.now()-(logs.get(lk)?.at||0)<3000))loadLog(key,t)}
+// The agents that a task's own shell started (`t.inner`, from the board) show in its details, each with
+// its events from its own transcript (api/transcript, the same 400 events as a native agent's log).
+// Kept by the agent's key, from successful reads only: a read that fails keeps what an earlier one
+// gave, is marked in `innerFailed`, and is tried again at the next refresh. A finished agent's
+// transcript no longer changes, so a good read is fetched again only when the board says it was
+// active since.
+const innerLogs=new Map(),innerLoading=new Map(),innerFailed=new Set();
+const innerSource=x=>x.file?"api/transcript?file="+encodeURIComponent(x.file):null;
+function loadInner(x){const src=innerSource(x);if(!src)return Promise.resolve([]);
+  const hit=innerLogs.get(x.key);if(hit&&x.state!=="running"&&hit.active===x.lastActiveMs)return Promise.resolve(hit.ev);
+  if(innerLoading.has(x.key))return innerLoading.get(x.key);
+  const load=fetch(src).then(r=>{if(r.ok===false)throw new Error("HTTP "+r.status);return r.json()}).then(v=>{if(!Array.isArray(v?.events))throw new Error("no events");return v.events})
+    .then(ev=>{innerFailed.delete(x.key);innerLogs.delete(x.key);innerLogs.set(x.key,{ev,at:Date.now(),active:x.lastActiveMs});if(innerLogs.size>40)innerLogs.delete(innerLogs.keys().next().value);return ev},
+      ()=>{innerFailed.add(x.key);return innerLogs.get(x.key)?.ev||[]})
+    .finally(()=>innerLoading.delete(x.key));
+  innerLoading.set(x.key,load);return load}
+const loadInners=t=>Promise.all((t?.inner||[]).map(loadInner));
+const innerSig=t=>(t.inner||[]).map(x=>x.key+":"+(innerSource(x)?logPrint(innerLogs.get(x.key)?.ev)+(innerFailed.has(x.key)?"!":""):"none")).join();
+function preload(key){const t=taskAt(key),lk=logKey(key,t);if(t&&!loading.has(lk)&&!(Date.now()-(logs.get(lk)?.at||0)<3000))loadLog(key,t);
+  for(const x of t?.inner||[])if(!(Date.now()-(innerLogs.get(x.key)?.at||0)<3000))loadInner(x)}
 async function detail(){
   if(!sel)return;const key=sel,[runId,taskId]=key.split("/");const run=state.find(r=>r.id===runId);const t=run?.tasks.find(x=>x.key===taskId);if(!t)return;
   const ext=t.native||t.main;
   // A newly chosen row paints at once, with the log it last had, before its fresh log arrives.
   const lk=logKey(key,t);
   if(document.getElementById("detail").dataset.sel!==key)paint(key,t,ext,logSource(t)?logs.get(lk)?.ev??null:[]);
-  const ev=await loadLog(key,t);
+  const[ev]=await Promise.all([loadLog(key,t),loadInners(t)]);
   // A slower load for a row chosen earlier, or for another attempt of this row, must not repaint
   // the panel over the current one.
   const now=state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskId)||t;
@@ -406,16 +275,31 @@ function shownMessage(t){const m=String(t.finalMessage||"");if(!t.report||t.repo
 // An agent's message in the event log, with its orch-result block shortened: the structured report
 // above shows it.
 const saysText=x=>{const m=String(x??"");return m.replace(REPORT_BLOCK,"[orch-result block: see the report above]")};
+// A tool event with no output text gets no OUTPUT row.
+const eventRows=ev=>(ev||[]).filter(e=>e.kind!=="output"||String(e.text??"").trim());
+const eventView=e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.kind==="says"?saysText(e.text):e.text));
+// The headless agents that the task's own shell started, one block each after the task's events,
+// oldest first: "Inside this task: <kind> · <model> · <state>", its figures, and its events in the
+// task's own format. Its tokens are its own, never in the task's totals above.
+function innerView(t){const list=t.inner||[];if(!list.length)return[];
+  const skipped=t.innerOmitted?[$("p",{class:"muted"},t.innerOmitted+" earlier "+(t.innerOmitted===1?"agent":"agents")+" that this task started "+(t.innerOmitted===1?"is":"are")+" not shown.")]:[];
+  return[...skipped,...list.map(x=>{const ev=innerLogs.get(x.key)?.ev,src=innerSource(x),rows=eventRows(ev);
+    return $("section",{class:"inner","data-inner":x.key},
+      $("h3",{},"Inside this task: "+x.kind+" · "+(x.model||"model unknown")+" · ",$("span",{class:"state "+cls(x.state)},x.state),t.attempt>1&&x.attempt?" · attempt "+x.attempt:""),
+      $("dl",{},...[["started by",x.launcher],["session",x.session],["activity",x.state==="running"?x.now:null],["elapsed",x.elapsed],["steps",x.steps],
+        ["tokens",(x.tokensExact?"":"~")+fmt(x.tokensIn)+" in ("+fmt(x.tokensCached)+" cached) / "+fmt(x.tokensOut)+" out; not in the task's totals"],["working dir",x.cd],["transcript",x.file]]
+        .filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
+      $("h3",{},!src?"Events: its transcript was not found":"Events"+(ev?" ("+rows.length+", newest last), from its transcript":innerFailed.has(x.key)?": could not be read, trying again":" (loading…)")+(ev&&innerFailed.has(x.key)?"; the latest read failed, trying again":"")),
+      ...rows.map(eventView))})]}
 // `ev` is null while the row's first log is still loading; it must be the log of the attempt the
 // panel shows (logKey). `keep` holds the scroll position as it is, after a click inside the panel.
 function paint(key,t,ext,ev,keep){
   // A task that orch.mjs started has receipts; its working directory and branch go in its Context line.
   const own=!ext&&!t.external&&(t.attempts||[]).length>0,n=own?shownAttempt(key,t):0,past=own&&n!==t.attempt;
-  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
+  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+"|"+innerSig(t)+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
   const d=document.getElementById("detail");if(holding(d)){behind=true;return}lastDetail=sig;
   const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d);
-  // A tool event with no output text gets no OUTPUT row.
-  const rows=(ev||[]).filter(e=>e.kind!=="output"||String(e.text??"").trim()),message=t.finalMessage?shownMessage(t):"";
+  const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
@@ -430,7 +314,8 @@ function paint(key,t,ext,ev,keep){
     ...messagesView(key,t),
     $("h3",{},(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":""):" (loading…)"),
       past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
-    ...rows.map(e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.kind==="says"?saysText(e.text):e.text))));
+    ...rows.map(eventView),
+    ...innerView(t));
   d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;
   if(focus)refocus(d,focus);
 }
@@ -710,8 +595,6 @@ refresh().then(detail);setInterval(()=>soon(),2000);limits();setInterval(limits,
 // The server pushes "change" when an agent writes; refresh at once, one refresh at a time.
 let refreshing=false,queued=false;
 function soon(){if(refreshing){queued=true;return}refreshing=true;refresh().then(detail).finally(()=>{refreshing=false;if(queued){queued=false;soon()}})}
-// A graph wraps its independent tasks to the board's width, so a resize redraws it once it settles.
-let resized=null;addEventListener("resize",()=>{clearTimeout(resized);resized=setTimeout(()=>{if(graphShown.size){lastState="";soon()}},250)});
 const presence=new EventSource("api/presence");
 presence.addEventListener("change",soon);
 function showEscalation(event){

@@ -13,10 +13,6 @@ Full workflow: [skills/agent-orchestrator/SKILL.md](skills/agent-orchestrator/SK
 
 The board: sessions, their task trees, and the attention lane.
 
-![The plan graph](docs/screenshots/graph.png)
-
-The plan graph: one panel per run, with a lane per chain.
-
 ![A task's details](docs/screenshots/task-detail.png)
 
 A task's details: final report, review receipts and event log.
@@ -39,7 +35,7 @@ The attention lane: decisions, failures, results awaiting review and silent task
 - **Messaging**: `send`, `steer` and `reply` talk to a running agent, which waits with `nap` so messages reach it at once.
 - **Nested delegation**: agents can start their own agents through the same CLI, with fewer slots at each level.
 - **Pull-request babysitting**: a Claude agent watches a pull request's checks and reviews, fixes what is in scope and replies.
-- **Dashboard**: task tree and plan graph, attention lane with notifications, stuck-loop detection, and a message box.
+- **Dashboard**: task tree, attention lane with notifications, stuck-loop detection, and a message box.
 - **Outside agents**: headless `codex exec` and `claude -p` agents started by skill scripts appear on the board too.
 - **Safety**: permission rules deny force pushes and risky `gh` commands, a kill guard blocks pattern kills, and steering never stops a commit or push.
 

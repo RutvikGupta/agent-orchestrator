@@ -256,8 +256,9 @@ function claudeTranscript(sessionId, cwd) {
   return file;
 }
 
-// Outside agents still running, or active since `sinceMs`, oldest first.
-export function externalAgents(sinceMs) {
+// Outside agents still running, or active since `sinceMs`, oldest first. `keep(record)` names more
+// to list however long ago they ended: the dashboard keeps the agents of a task that is still shown.
+export function externalAgents(sinceMs, keep = null) {
   scanExternalAgents();
   const all = [...records().values()];
   if (!all.length) return [];
@@ -274,7 +275,7 @@ export function externalAgents(sinceMs) {
     } catch {}
     const alive = newest.get(r.pid) === r && table?.get(r.pid)?.command?.slice(0, 300) === r.command
       && (r.agent !== "claude" || readJson(path.join(CLAUDE_SESSIONS, `${r.pid}.json`))?.sessionId === r.sessionId);
-    if (!alive && lastMs < sinceMs) continue;
+    if (!alive && lastMs < sinceMs && !keep?.(r)) continue;
     out.push({ ...r, file, alive, lastMs });
   }
   return out.sort((a, b) => a.startedMs - b.startedMs);
@@ -307,4 +308,47 @@ export function externalRow(x, id, parent) {
     now: cut ? `stopped without finishing; last: ${row.now}` : row.now,
     cd: x.cwd,
   };
+}
+
+// An agent that a task's own shell started (a script that runs `claude -p` or `codex exec`), as the
+// task's details list it: the board's row of the agent, without the row's tree fields. The summary
+// behind it is the incremental one in events.mjs, so a build reads only what the agent appended; the
+// panel reads the agent's events itself, from `file` (api/transcript). A finished agent's row cannot
+// change, so it is kept until its transcript or state does.
+const INNER_KEEP = 200;
+const innerMemo = new Map(); // record key -> { sig, value }
+export function innerAgent(x) {
+  const sig = [x.alive, x.lastMs, x.file, x.startedMs].join("|");
+  const memo = !x.alive && innerMemo.get(x.key);
+  if (memo?.sig === sig) return memo.value;
+  const row = externalRow(x, x.name, null);
+  const value = {
+    key: x.key,
+    agent: x.agent,
+    kind: x.agent === "codex" ? "codex exec" : "claude -p",
+    name: x.name,
+    launcher: x.launcher,
+    session: x.sessionId,
+    state: row.state,
+    model: row.model,
+    modelLabel: row.modelLabel,
+    startedAt: row.startedAt,
+    startedMs: x.startedMs,
+    lastActiveMs: row.lastActiveMs,
+    elapsed: row.elapsed,
+    steps: row.steps,
+    now: row.now,
+    tokensIn: row.tokensIn,
+    tokensCached: row.tokensCached,
+    tokensOut: row.tokensOut,
+    tokensExact: row.tokensExact,
+    cd: x.cwd,
+    file: x.file,
+  };
+  if (!x.alive) {
+    innerMemo.delete(x.key);
+    innerMemo.set(x.key, { sig, value });
+    if (innerMemo.size > INNER_KEEP) innerMemo.delete(innerMemo.keys().next().value);
+  }
+  return value;
 }
