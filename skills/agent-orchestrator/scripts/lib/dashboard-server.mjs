@@ -1,19 +1,16 @@
 // The dashboard's local web server: serves the page in scripts/dashboard/ and its JSON API, and
 // pushes a "change" event to open tabs as soon as an agent writes.
 
-import { heavyStatus } from "./heavy.mjs";
 import { CLI_PATH } from "./config.mjs";
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CODEX_HOME, DASHBOARD_DIR, DASHBOARD_FILE, DASHBOARD_TOKEN_FILE, RUNS_DIR, STATE_ROOT, TASK_ID, USAGE_CACHE } from "./config.mjs";
-import { anyTaskRunning, boardIds, dashboardState } from "./dashboard-state.mjs";
 import { eventLog, transcriptLog } from "./event-log.mjs";
 import { createEscalator, escalationCheckMs } from "./escalate.mjs";
 import { codexLimits, limitsText } from "./limits.mjs";
 import { SendError, deliverMessage, steerQueued } from "./commands/inbox.mjs";
-import { watchExternalAgents } from "./external.mjs";
 import { loadTask, readProcessesInBackground } from "./runs.mjs";
 import { readVendorStatusInBackground } from "./vendor-status.mjs";
 import { die, parseDuration, readJson, writeJson } from "./util.mjs";
@@ -160,28 +157,197 @@ async function readBrief(runDir, taskId, attempt) {
 // Serve the dashboard on host:port (or the next free port) until the process exits.
 export async function serveDashboard({ host, port, args }) {
   const http = await import("node:http");
+  const buildTimeoutMs = parseDuration(process.env.AGENT_ORCH_BUILD_TIMEOUT || "30s");
   readVendorStatusInBackground();
   readProcessesInBackground();
-  watchExternalAgents();
   const page = loadPage();
   const startedAt = new Date().toISOString();
   let lastPage = null;
   let address = null;
   const tabs = new Set(); // presence streams of the open tabs
-  // Tabs and change events can request state many times a second. Share one lane
-  // snapshot between endpoints so process inspection runs at most every five seconds.
-  let cachedHeavy = null, heavyCheckedAt = 0;
-  const dashboardHeavy = () => {
-    const now = Date.now();
-    if (cachedHeavy === null || now - heavyCheckedAt >= 5000) {
-      cachedHeavy = heavyStatus();
-      heavyCheckedAt = now;
-    }
-    return cachedHeavy;
+  // Only a worker process (dashboard-worker.mjs) builds the board, so a slow build never holds up
+  // HTTP: reads get the last board at once. One build runs at a time, and there is never more than
+  // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_TIMEOUT (30s), gets
+  // SIGTERM, then SIGKILL 2 seconds later, and the next one starts only once it has exited.
+  // A message or a steer rebuilds at once (`changed`), and so does a lost build's replacement. An
+  // escalation check, a read of a board older than 2 seconds, and a file write while someone views
+  // the board (`viewing`) ask for a background build (`later`): at most one a second, and never
+  // sooner after the last build's end than twice that build's duration, so a slow board cannot
+  // keep a core busy.
+  const POLL_MS = 2000, HEAVY_MS = 5000, VIEWER_MS = 30_000, KILL_AFTER_MS = 2000, FIRST_BOARD_MS = 10_000, PACE_MS = 1000;
+  let snapshot = null; // the last board built: { body, heavyBody, ids, running, heavyAt, startedAt, builtAt }
+  let failure = null; // why the latest build failed, until one succeeds
+  let worker = null; // { child, retiring, gone, killTimer }: the one worker, until it has exited
+  let build = null; // the build in flight: { id, startedAt, timer }
+  let builds = 0, again = false; // builds started; whether one must start as soon as the worker is free
+  let failedInRow = 0;
+  let lastStart = 0, lastEnd = 0, lastTook = 0;
+  let wantRead = false, wantFile = false, wantCheck = false, laterTimer = null;
+  let lastPoll = 0; // the last /api/state request
+  let escalate = null, escalateFrom = null, checkIdle = () => {};
+  const waiting = new Set(); // /api/state requests waiting for a first board
+  let firstBuild;
+  const ready = new Promise((resolve) => { firstBuild = resolve; });
+  const viewing = () => tabs.size > 0 || Date.now() - lastPoll < VIEWER_MS;
+  const failed = (error) => {
+    failure = { message: String(error?.message || error) };
+    failedInRow += 1;
+    process.stderr.write(`orch: dashboard build failed: ${failure.message}\n`);
+    firstBuild();
   };
-  // Tell open tabs to refresh as soon as an agent writes, not on their next poll: the skill's own
-  // run state, and the Claude and Codex files of sessions on the board (or newly created files,
-  // such as a new sub-agent's). Bursts are combined into at most one notice every 500 ms.
+  const endBuild = () => {
+    const done = build;
+    clearTimeout(done.timer);
+    build = null;
+    lastEnd = Date.now();
+    lastTook = lastEnd - done.startedAt;
+    return done;
+  };
+  // A build lost with its worker is retried by the next worker: always after a timeout, whose
+  // deadline already paces retries, and once after a crash or an IPC error, so a worker that
+  // dies at once cannot loop.
+  const lost = (error, timedOut = false) => {
+    endBuild();
+    failed(error);
+    if (timedOut || failedInRow < 2) again = true;
+  };
+  // Once the worker is free: start the build asked for meanwhile, or pace a background one.
+  const afterBuild = () => {
+    if (again) startBuild();
+    else if (wantRead || wantFile || wantCheck) later();
+  };
+  const sendSignal = (child, name) => {
+    try { process.kill(child.pid, name); } catch { /* already gone */ }
+  };
+  const gone = (w) => {
+    if (w.gone) return;
+    w.gone = true;
+    clearTimeout(w.killTimer);
+    if (worker !== w) return;
+    worker = null;
+    afterBuild();
+  };
+  // Stop a worker that failed or hangs. It stays the worker until it has exited, so no second one
+  // starts beside it.
+  const retire = (w, error, timedOut = false) => {
+    if (w.retiring) return;
+    w.retiring = true;
+    if (build && worker === w) lost(error, timedOut);
+    else failed(error);
+    // A worker that never started has no process (and emits no exit).
+    if (w.child.pid === undefined || w.child.exitCode !== null || w.child.signalCode !== null) return gone(w);
+    sendSignal(w.child, "SIGTERM");
+    const killWorker = () => {
+      if (w.child.exitCode === null && w.child.signalCode === null) sendSignal(w.child, "SIGKILL");
+    };
+    w.killTimer = setTimeout(killWorker, KILL_AFTER_MS);
+  };
+  const received = (w, result) => {
+    // A result that comes after its build was given up on is dropped.
+    if (worker !== w || w.retiring || !build) return;
+    const done = endBuild();
+    if (typeof result?.body !== "string") {
+      failed(new Error(result?.error || "the state worker sent no board"));
+      return afterBuild();
+    }
+    const { body, heavyBody, ids, running, heavyAt } = result;
+    snapshot = { body, heavyBody: String(heavyBody), ids: Array.isArray(ids) ? ids : [], running: Boolean(running), heavyAt: Number(heavyAt) || 0, startedAt: done.startedAt, builtAt: Date.now() };
+    failure = null;
+    failedInRow = 0;
+    for (const answer of [...waiting]) answer();
+    firstBuild();
+    // Escalate only from a build that started after the oldest check still waiting for one, so a
+    // notice never rests on a board read before its check.
+    if (escalate && escalateFrom !== null && done.id >= escalateFrom) {
+      escalateFrom = null;
+      try { escalate(JSON.parse(body)); }
+      catch (error) { process.stderr.write(`orch: escalation check failed: ${error.message}\n`); }
+    }
+    notify();
+    afterBuild();
+    checkIdle();
+  };
+  const spawnWorker = () => {
+    const child = fork(new URL("./dashboard-worker.mjs", import.meta.url), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+    const w = { child, retiring: false, gone: false, killTimer: null };
+    child.on("message", (result) => received(w, result));
+    child.on("error", (error) => retire(w, error));
+    child.on("exit", (code, sig) => {
+      // Invalid duration settings stop startup with the CLI usage code.
+      if (!snapshot && code === 2) process.exit(2);
+      if (w.retiring) process.stderr.write(`orch: stopped the dashboard state worker (${code ?? sig})\n`);
+      else {
+        w.retiring = true;
+        const error = new Error(`state worker exited (${code ?? sig})`);
+        if (build && worker === w) lost(error);
+        else failed(error);
+      }
+      gone(w);
+    });
+    return w;
+  };
+  const startBuild = () => {
+    if (build || worker?.retiring) {
+      again = true;
+      return;
+    }
+    again = false;
+    try {
+      worker ||= spawnWorker();
+    } catch (error) {
+      return failed(error);
+    }
+    wantRead = wantFile = wantCheck = false;
+    clearTimeout(laterTimer);
+    laterTimer = null;
+    const w = worker, current = { id: ++builds, startedAt: Date.now() };
+    build = current;
+    lastStart = current.startedAt;
+    const overdueBuild = () => {
+      if (build === current) retire(w, new Error(`state build timed out after ${buildTimeoutMs / 1000}s`), true);
+    };
+    current.timer = setTimeout(overdueBuild, buildTimeoutMs);
+    try {
+      w.child.send("build", (error) => { if (error) retire(w, error); });
+    } catch (error) {
+      retire(w, error);
+    }
+  };
+  // A background build, at its paced time. A file write's request lapses once nobody views the board.
+  const pacedBuild = () => {
+    laterTimer = null;
+    later();
+  };
+  const later = () => {
+    if (build || laterTimer) return;
+    const wait = Math.max(lastStart + PACE_MS, lastEnd + 2 * lastTook) - Date.now();
+    if (wait > 0) {
+      laterTimer = setTimeout(pacedBuild, wait);
+      return;
+    }
+    if (wantRead || wantCheck || (wantFile && viewing())) startBuild();
+    else wantFile = false;
+  };
+  // A read: serve the last board, and rebuild in the background once it is old. With no board at
+  // all there is nothing to serve, so build now.
+  const revalidate = () => {
+    if (!snapshot) return build ? undefined : startBuild();
+    if (Date.now() - snapshot.builtAt < POLL_MS && Date.now() - snapshot.heavyAt < HEAVY_MS) return;
+    wantRead = true;
+    later();
+  };
+  // A message or steer is already stored, so its request succeeds whatever happens here.
+  const changed = () => {
+    try {
+      startBuild();
+      notify();
+    } catch (error) {
+      process.stderr.write(`orch: dashboard refresh after a change failed: ${error.message}\n`);
+    }
+  };
+  // Tell open tabs to refresh once a build has read an agent's writes: the skill's own run state,
+  // and the Claude and Codex files of sessions on the board (or newly created files, such as a new
+  // sub-agent's). Bursts are combined into at most one notice every 500 ms.
   let pushTimer = null;
   let lastPush = 0;
   const notify = () => {
@@ -192,10 +358,15 @@ export async function serveDashboard({ host, port, args }) {
       for (const t of tabs) t.write("event: change\ndata: \n\n");
     }, Math.max(0, lastPush + 500 - Date.now()));
   };
-  const relevant = (kind, file) => kind === "rename" || !file || [...boardIds()].some((id) => String(file).includes(id));
+  const relevant = (kind, file) => kind === "rename" || !file || (snapshot?.ids || []).some((id) => String(file).includes(id));
   for (const [dir, all] of [[RUNS_DIR, true], [CLAUDE_PROJECTS, false], [path.join(CODEX_HOME, "sessions"), false]]) {
     try {
-      fs.watch(dir, { recursive: true }, (kind, file) => (all || relevant(kind, file)) && notify()).on("error", () => {});
+      fs.watch(dir, { recursive: true }, (kind, file) => {
+        if (viewing() && (all || relevant(kind, file))) {
+          wantFile = true;
+          later();
+        }
+      }).on("error", () => {});
     } catch {
       // A missing directory just means that host is not used here; polling still covers it.
     }
@@ -241,7 +412,7 @@ export async function serveDashboard({ host, port, args }) {
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return reply(404, { error: "unknown run" });
         const result = steerQueued({ ...readJson(path.join(dir, "run.json")), dir }, taskId);
-        notify();
+        changed();
         return reply(200, result);
       } catch (error) {
         if (error instanceof SendError) return reply(error.status, { error: error.message });
@@ -292,7 +463,7 @@ export async function serveDashboard({ host, port, args }) {
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return reply(404, { error: "unknown run" });
         const { message, delivery, reaches, steer } = deliverMessage({ ...readJson(path.join(dir, "run.json")), dir }, taskId, text, { from: "user", images, steer: body.steer === true });
-        notify();
+        changed();
         return reply(200, { id: message.id, time: message.time, attempt: message.attempt, images: message.images || [], delivery, reaches, steer });
       } catch (error) {
         if (error instanceof SendError) return reply(error.status, { error: error.message });
@@ -329,10 +500,50 @@ export async function serveDashboard({ host, port, args }) {
         });
         return;
       }
-      if (url.pathname === "/api/heavy") return reply(200, dashboardHeavy());
+      if (url.pathname === "/api/heavy") {
+        revalidate();
+        return send(200, "application/json", snapshot?.heavyBody || '{"running":0,"waiting":0}');
+      }
       if (url.pathname === "/api/state") {
-        lastPage = Date.now();
-        return send(200, "application/json", JSON.stringify(dashboardState()), { "x-orch-heavy": JSON.stringify(dashboardHeavy()) });
+        lastPage = lastPoll = Date.now();
+        revalidate();
+        // While the latest build has failed or is past its deadline, the last board comes with its
+        // age in seconds and the problem's first line, as printable ASCII so no error text can
+        // make the header invalid.
+        const board = () => {
+          const overdue = build && Date.now() - build.startedAt >= buildTimeoutMs ? `state build timed out after ${buildTimeoutMs / 1000}s` : null;
+          const problem = overdue || failure?.message;
+          send(200, "application/json", snapshot.body, {
+            "x-orch-heavy": snapshot.heavyBody,
+            ...(problem ? {
+              "x-orch-stale": String(Math.max(0, Math.floor((Date.now() - snapshot.startedAt) / 1000))),
+              "x-orch-error": problem.split(/\r\n|\r|\n/)[0].replace(/[^\x20-\x7e]/g, "?").slice(0, 300).trim() || "build failed",
+            } : {}),
+          });
+        };
+        if (snapshot) return board();
+        // No board yet. When the latest build failed, say why at once; otherwise wait up to 10
+        // seconds for one, and never answer an empty board.
+        const notYet = () => {
+          const why = failure?.message ? failure.message.split(/\r\n|\r|\n/)[0].replace(/[^\x20-\x7e]/g, "?").slice(0, 300).trim() || "build failed" : null;
+          return why
+            ? send(503, "application/json", JSON.stringify({ error: why }), { "x-orch-error": why })
+            : reply(503, { error: "building" });
+        };
+        if (failure) return notYet();
+        const answerWaitingRead = () => {
+          clearTimeout(timer);
+          waiting.delete(answerWaitingRead);
+          if (snapshot) return board();
+          return notYet();
+        };
+        const timer = setTimeout(answerWaitingRead, FIRST_BOARD_MS);
+        waiting.add(answerWaitingRead);
+        res.on("close", () => {
+          clearTimeout(timer);
+          waiting.delete(answerWaitingRead);
+        });
+        return;
       }
       if (url.pathname === "/api/usage") {
         const view = (l) => {
@@ -409,35 +620,45 @@ export async function serveDashboard({ host, port, args }) {
     }
   }
   address = `http://${host}:${port}/`;
-  // The first build reads every transcript on the board; do it before announcing the dashboard,
-  // so a tab that --open starts gets the board at once instead of a blank page.
+  // Escalation runs even with no open tabs: the macOS notice and optional command are push
+  // channels for a user who is not looking at the dashboard.
   try {
-    dashboardState();
-  } catch {
-    // The page's own request reports the error.
+    escalate = createEscalator({ url: address, broadcast: (message) => {
+      for (const tab of tabs) tab.write(`event: escalation\ndata: ${JSON.stringify(message)}\n\n`);
+    } });
+  } catch (error) {
+    process.stderr.write(`orch: cannot track escalations: ${error.message}\n`);
   }
-  fs.mkdirSync(STATE_ROOT, { recursive: true });
-  writeJson(DASHBOARD_FILE, { pid: process.pid, url: address, startedAt });
   const forget = () => {
     if (readJson(DASHBOARD_FILE)?.pid === process.pid) fs.rmSync(DASHBOARD_FILE, { force: true });
   };
   process.on("exit", forget);
+  // A worker stuck in a build cannot see its IPC channel close, and the server cannot wait for a
+  // grace period while it exits, so it kills its worker (whose few writes are atomic renames).
+  process.on("exit", () => { if (worker) sendSignal(worker.child, "SIGKILL"); });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => process.exit(0));
+  // The first board is also the first escalation check. Startup waits for it, or for its failure,
+  // so a tab that --open starts gets the board at once; HTTP (health, send) answers meanwhile.
+  if (escalate) escalateFrom = 1;
+  startBuild();
+  await ready;
+  fs.mkdirSync(STATE_ROOT, { recursive: true });
+  writeJson(DASHBOARD_FILE, { pid: process.pid, url: address, startedAt });
 
-  // Escalation runs even with no open tabs: the macOS notice and optional command are push
-  // channels for a user who is not looking at the dashboard.
-  try {
-    const escalate = createEscalator({ url: address, broadcast: (message) => {
-      for (const tab of tabs) tab.write(`event: escalation\ndata: ${JSON.stringify(message)}\n\n`);
-    } });
+  if (escalate) {
+    // A check only asks for a paced build that starts after it; that build's result escalates.
     const checkAttention = () => {
-      try { escalate(dashboardState()); }
-      catch (error) { process.stderr.write(`orch: escalation check failed: ${error.message}\n`); }
+      try {
+        if (escalateFrom === null) escalateFrom = builds + 1;
+        if (!build || build.id < escalateFrom) {
+          wantCheck = true;
+          later();
+        }
+      } catch (error) {
+        process.stderr.write(`orch: escalation check failed: ${error.message}\n`);
+      }
     };
-    checkAttention();
     setInterval(checkAttention, escalationCheckMs());
-  } catch (error) {
-    process.stderr.write(`orch: cannot track escalations: ${error.message}\n`);
   }
 
   // Reclaim in a child so lsof and the termination grace do not block HTTP requests.
@@ -458,9 +679,11 @@ export async function serveDashboard({ host, port, args }) {
   if (args["idle-exit"]) {
     const idleMs = parseDuration(args["idle-exit"]);
     const started = Date.now();
-    setInterval(() => {
-      if (!tabs.size && Date.now() - (lastPage || started) > idleMs && !anyTaskRunning()) process.exit(0);
-    }, 60000);
+    checkIdle = () => {
+      if (!tabs.size && Date.now() - (lastPage || started) > idleMs && snapshot && !build && !snapshot.running) process.exit(0);
+    };
+    // Escalation checks keep the board current, so this timer only reads it.
+    setInterval(checkIdle, 60000);
   }
   process.stdout.write(`dashboard: ${address}  (reads ${RUNS_DIR}; Ctrl-C to stop)\n`);
   if (args.open) openBrowser(keyedUrl(address));

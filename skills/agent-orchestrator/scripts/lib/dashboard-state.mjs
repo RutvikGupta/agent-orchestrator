@@ -376,7 +376,7 @@ function placeExternal(externals, sections, sectionOf, sessionSection) {
   }
 }
 
-function buildDashboardState() {
+export function buildDashboardState() {
   const now = Date.now();
   const idleMs = boardIdleMs();
   const rowIdle = rowIdleMs();
