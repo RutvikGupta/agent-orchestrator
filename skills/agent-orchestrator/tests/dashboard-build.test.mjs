@@ -514,6 +514,8 @@ test('a worker error while its process lives stops that process before another s
 test('an escalation check escalates only from a build that started after it, never from an older board', async (t) => {
   const b = await setup(t, {
     prepare: async (b) => {
+      // A run started from a terminal has the user as its orchestrator, so its items reach the user.
+      b.f.launchingSession(b.run, null, 'terminal');
       for (const id of ['resolved', 'kept']) {
         await b.f.start(b.run, id, { config: { status: 'failed', error: `${id} broke` } });
         await b.f.finished(b.run, id);
