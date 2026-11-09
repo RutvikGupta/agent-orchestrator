@@ -72,7 +72,11 @@ fix is waiting:
 3. After every push, confirm that the pull request's head is your local head:
    `gh pr view <n> --json headRefOid` against `git rev-parse HEAD`. Reply to a reviewer only after
    that matches.
-4. Go back to step 1.
+4. Report status, such as a push or "ready for review", with
+   `node <orch-path> tell "PUSHED #<n> <short sha>: <what changed>"`. It is a one-way note to the
+   agent that started you, which needs no answer and never reaches the user. Never use `ask` for
+   status: `ask` is only for a decision you need.
+5. Go back to step 1.
 
 ## Park
 

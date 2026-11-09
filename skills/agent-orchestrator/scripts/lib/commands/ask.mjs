@@ -1,11 +1,15 @@
 // `ask`: a delegated agent posts a question to whoever started it and keeps working. The question
 // goes into the parent task's inbox when the parent is an orch task that is running and reads its
-// messages; otherwise (a top-level run, whose parent is the user's own session, a parent that has
-// ended, or one that will not read them, such as a Codex attempt whose brief has no inbox note) it
-// shows on the dashboard as a `question` attention item, and wakes the top-level session's `wait`. The
-// answer comes back as an ordinary message in the asker's inbox (`send`, or the dashboard's box),
-// and the item clears once the asker has read a message sent after the question.
+// messages. In a top-level run, whose parent is the launching main session (a Claude Code or Codex
+// session with no inbox), it becomes a `question` attention item for that session, which wakes its
+// `wait` on the run (exit 5); the user gets it only once that session is gone (addressee.mjs). It
+// goes to the user directly with --user, from a run started from a terminal, or when the parent task
+// cannot take it (its run is gone, or it will not read messages, such as a Codex attempt whose brief
+// has no inbox note): then it shows in the dashboard's lane for the user. The answer comes back as
+// an ordinary message in the asker's inbox, and the question closes once its addressee's side sends
+// one after it: the user from the dashboard's box, the session with `send` (openQuestions, inbox.mjs).
 
+import { ORCHESTRATOR, mainSession, sessionLabel } from "../addressee.mjs";
 import { CLI_PATH } from "../config.mjs";
 import { callerTask, parentOf, runById } from "../finish-notice.mjs";
 import { appendQuestion } from "../inbox.mjs";
@@ -30,13 +34,14 @@ export function cmdAsk(args) {
   const run = runById(me.run) || die(`unknown run "${me.run}" (from AGENT_ORCH_RUN)`, 2);
   const task = loadTask(run, me.task) || die(`no task ${me.task} in run ${run.id} (from AGENT_ORCH_TASK)`, 2);
   const question = args._.join(" ").trim();
-  if (!question) die('missing the question: ask "<question>" [--options "a|b|c"] [--recommend a]', 2);
+  if (!question) die('missing the question: ask "<question>" [--options "a|b|c"] [--recommend a] [--user]', 2);
   const options = String(args.options ?? "").split("|").map((o) => o.trim()).filter(Boolean);
   const recommend = String(args.recommend ?? "").trim() || null;
   if (recommend && options.length && !options.includes(recommend)) die(`--recommend must be one of the options: ${options.join(", ")}`, 2);
   const attempt = task.attempt || 1;
-  const parent = parentOf(run, task);
-  let to = "user";
+  const parent = args.user ? null : parentOf(run, task);
+  const session = !args.user && !parent ? mainSession(run) : null;
+  let to = session ? ORCHESTRATOR : "user";
   let sent = null;
   let fallback = null;
   let entry;
@@ -65,8 +70,10 @@ export function cmdAsk(args) {
         }
       }
     }
+    // Only its addressee's side answers it: the user from the dashboard, or the session with `send`.
+    const answerFrom = to === "user" ? "user" : to === ORCHESTRATOR ? ORCHESTRATOR : null;
     entry = appendQuestion(taskDir(run, task.id), {
-      attempt, question, options, recommend, to, ...(sent ? { message: sent.message.id } : {}), ...(fallback ? { fallback } : {}),
+      attempt, question, options, recommend, to, ...(answerFrom ? { answerFrom } : {}), ...(sent ? { message: sent.message.id } : {}), ...(fallback ? { fallback } : {}),
     });
   } catch (error) {
     // A sandboxed agent may be unable to write the state folder.
@@ -74,7 +81,9 @@ export function cmdAsk(args) {
   }
   const where = sent
     ? `asked your parent, ${parent.run}/${parent.task}, in its inbox`
-    : `asked the user on the dashboard${fallback ? ` (your parent ${parent.run}/${parent.task} cannot take it: ${fallback})` : ""}`;
+    : to === ORCHESTRATOR
+      ? `asked your orchestrator, ${sessionLabel(session)}: its \`wait\` on run ${run.id} wakes with it, and the user gets it only if that session is gone`
+      : `asked the user on the dashboard${fallback ? ` (your parent ${parent.run}/${parent.task} cannot take it: ${fallback})` : ""}`;
   const text = [
     `${where} (question ${entry.id})`,
     "Keep working on everything that does not depend on the answer. The answer arrives as a message in your inbox: Claude gets it after a tool call; otherwise read it with",

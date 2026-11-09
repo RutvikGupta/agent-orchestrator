@@ -95,13 +95,20 @@ async function refresh(){
   root.replaceChildren();
   if(!state.length)root.append($("p",{class:"muted empty"},"No runs active recently."));
   // The attention lane: what needs someone now across every section, in the server's order (most
-  // urgent kind first, then the longest waiting); shown only when something does.
+  // urgent kind first, then the longest waiting); shown only when something does. Items addressed
+  // to the user come first and alone make the header's count; items an agent must act on (`to` is
+  // "agent") follow, muted, each "for" that agent. An item whose agent is gone is the user's.
   const lane=state.flatMap(run=>(run.attention||[]).map(a=>({...a,run,k:run.id+"/"+a.key}))).sort((a,b)=>a.rank-b.rank||a.sinceMs-b.sinceMs);
-  const need=document.getElementById("need");need.hidden=!lane.length;need.textContent=lane.length+(lane.length===1?" needs":" need")+" attention";
-  if(lane.length)root.append($("div",{class:"lane"},$("h2",{},"Needs attention"),...lane.map(a=>$("div",{class:"attn a-"+a.kind+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",title:a.reason},
+  const mine=lane.filter(a=>a.to!=="agent"),theirs=lane.filter(a=>a.to==="agent");
+  const need=document.getElementById("need");need.hidden=!mine.length;need.textContent=mine.length+(mine.length===1?" needs":" need")+" attention";
+  const attn=a=>$("div",{class:"attn a-"+a.kind+(a.to==="agent"?" for-agent":"")+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",title:a.reason,...(a.to==="agent"?{style:"opacity:.6"}:{})},
     $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)",title:"Asked while it keeps working: answer in the box under its details"}:{})},a.label),$("b",{},a.id),$("span",{class:"where",...(a.runId?{title:"run "+a.runId}:{})},a.runGoal||(a.runId?a.runId.replace(/^\d{8}-\d{6}-/,""):sectionTitle(a.run))),
     a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs),title:"waiting since "+new Date(a.sinceMs).toLocaleTimeString()},dur(Date.now()-a.sinceMs)):null,
-    $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,""))))));
+    $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,"")),
+    a.to==="agent"?$("span",{class:"muted",style:"flex:none",title:"It reaches "+a.agent+" through its inbox or its wait; you get it only if that agent is gone"},"for "+a.agent)
+      :a.gone&&a.agent?$("span",{style:"flex:none;color:var(--bad)",title:a.agent+" is gone: "+a.gone},a.agent+" is gone"):null);
+  if(lane.length)root.append($("div",{class:"lane"},...(mine.length?[$("h2",{},"Needs attention"),...mine.map(attn)]:[]),
+    ...(theirs.length?[$("h2",{class:"muted",title:"Agents are told about these; none needs you"},"For agents"),...theirs.map(attn)]:[])));
   tick();
   for(const run of state){tin+=run.totals.tokensIn;tout+=run.totals.tokensOut;running+=run.totals.running;root.append(sectionView(run))}
   for(const w of root.querySelectorAll(".gwrap[data-run]"))if(scrolled.get(w.dataset.run))w.scrollLeft=scrolled.get(w.dataset.run);
