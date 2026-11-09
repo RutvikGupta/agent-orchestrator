@@ -490,7 +490,9 @@ function buildDashboardState() {
       activeMs: Math.max(Date.parse(secRuns[0].createdAt) || 0, ...tasks.map((t) => t.lastActiveMs || 0)),
       tasks,
       // This section's part of the attention lane; the page merges every section's in the same order.
-      attention: tasks.filter((t) => t.attention).map((t) => ({ key: t.key, id: t.id, ...t.attention })).sort(byUrgency),
+      // Each item names its own run's goal: a section holds every run of one session, and the
+      // section's goal is only its newest run's.
+      attention: tasks.filter((t) => t.attention).map((t) => ({ key: t.key, id: t.id, runId: t.run || null, runGoal: secRuns.find((r) => r.id === t.run)?.goal || null, ...t.attention })).sort(byUrgency),
       totals: totals(work),
       totalsText: `${totalsText(totals(work))}${main ? " (without the main session)" : ""}`,
     };
