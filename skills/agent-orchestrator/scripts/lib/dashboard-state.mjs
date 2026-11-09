@@ -418,7 +418,7 @@ function placeExternal(externals, sections, sectionOf, sessionSection) {
   }
 }
 
-function buildDashboardState() {
+export function buildDashboardState() {
   const now = Date.now();
   let commands; // the process table for addresseeOf, read once per build when first needed
   const table = () => (commands === undefined ? (commands = commandTable()) : commands);

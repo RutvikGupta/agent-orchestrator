@@ -98,9 +98,12 @@ test('/api/state lists what needs attention, in order, from state, closed, and l
     await f.start(quiet, 'done', { config: { finalMessage: 'All good.' } });
     await f.finished(quiet, 'done');
     await f.command(['result', quiet.id, 'done']);
-    const state = await board.json('/api/state');
-    const s = state.find((x) => x.runs.some((r) => r.id === quiet.id));
-    assert.ok(s);
+    // State reads serve the previous snapshot while its worker rebuilds after the CLI action.
+    const s = await eventually(async () => {
+      const state = await board.json('/api/state');
+      const section = state.find((x) => x.runs.some((r) => r.id === quiet.id));
+      return section?.attention.length === 0 ? section : null;
+    }, 'the collected result remained in the attention lane');
     assert.deepEqual(s.attention, []);
   });
 
