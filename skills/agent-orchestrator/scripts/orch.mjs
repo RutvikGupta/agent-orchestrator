@@ -26,6 +26,7 @@ import { cmdPrWatch } from "./lib/commands/pr-watch.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
 import { cmdStart } from "./lib/commands/start.mjs";
+import { cmdTell } from "./lib/commands/tell.mjs";
 import { cmdClose, cmdLog, cmdResult, cmdStop } from "./lib/commands/task.mjs";
 import { cmdVerdict, cmdVerify } from "./lib/commands/verify.mjs";
 
@@ -91,8 +92,12 @@ Usage: node orch.mjs <command> [args] [--json]
   wait RUN [TASK...] [--all] [--timeout DUR]
                                   Block until any running task finishes (exit 0), the timeout
                                   passes (exit 3), or a task newly needs attention (exit 5):
-                                  decision, question, failure, dead or silent. Exit 6 = a new unread message
-                                  for this agent; read it, then run the same command again.
+                                  decision, question, failure, dead or silent; also exit 5 when a
+                                  finished task has waited AGENT_ORCH_REVIEW_REMIND (default 10m)
+                                  without accept, verdict or close, once per interval per task.
+                                  Exit 6 = a new unread message for this agent, or, in the session
+                                  that launched the run, a note a task sent with tell (printed);
+                                  read it, then run the same command again.
                                   Existing attention is listed
                                   but does not wake wait. --all waits until every task finishes
                                   (--any is the default and accepted). DUR like 90s, 10m, 2h; 0
@@ -150,12 +155,17 @@ Usage: node orch.mjs <command> [args] [--json]
   reply RUN TASK (TEXT | --file FILE) [--to ID]
                                   The agent answers the user's message (default: the latest it read);
                                   the dashboard shows the answer under it and in the agent's log
-  ask QUESTION [--options "a|b|c"] [--recommend a]
+  ask QUESTION [--options "a|b|c"] [--recommend a] [--user]
                                   A delegated agent asks whoever started it, and keeps working: into
-                                  the parent task's inbox, or, when the parent is the user's own
-                                  session or will not read it, as a "question" on the dashboard that
-                                  also wakes the user's session's wait (exit 5). The answer arrives in the asker's inbox
+                                  the parent task's inbox, or, in a top-level run, as a "question"
+                                  for the launching session that wakes its wait on the run (exit 5).
+                                  The user gets it with --user, when the parent cannot take it, or
+                                  once that session is gone. The answer arrives in the asker's inbox
                                   (the parent runs send); wait for it with nap
+  tell (TEXT | --file FILE)       A delegated agent sends whoever started it a one-way note, such as
+                                  a status update: into the parent task's inbox, or, in a top-level
+                                  run, to the launching session's next wait on the run (exit 6).
+                                  Never shown to the user; use ask for a decision
   lesson (RUN | --repo DIR) [TEXT] [--evidence TEXT] [--list]
                                   Record a verified lesson for the repository, which every later
                                   brief includes; --list prints them
@@ -208,7 +218,8 @@ const specs = {
   steer: {},
   inbox: { bool: ["ack", "all"] },
   reply: { value: ["to", "file"] },
-  ask: { value: ["options", "recommend"] },
+  ask: { value: ["options", "recommend"], bool: ["user"] },
+  tell: { value: ["file"] },
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check"] },
   dispatch: { value: ["max"], bool: ["dry-run"] },
@@ -241,6 +252,7 @@ const handlers = {
   inbox: cmdInbox,
   reply: cmdReply,
   ask: cmdAsk,
+  tell: cmdTell,
   nap: cmdNap,
   heavy: cmdHeavy,
   reclaim: cmdReclaim,

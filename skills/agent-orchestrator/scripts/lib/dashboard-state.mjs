@@ -6,13 +6,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { mainSession, sessionGone, sessionLabel } from "./addressee.mjs";
 import { CLAUDE_PROJECTS, HOME } from "./config.mjs";
 import { externalAgents, externalRow } from "./external.mjs";
+import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { planPath, planProgress, readPlan } from "./plan.mjs";
 import { reviveParked } from "./park.mjs";
-import { isParked, listRuns, listTasks, loadTask, relayAlive } from "./runs.mjs";
+import { isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
 
@@ -44,8 +46,8 @@ const boardRow = ({ result, activeMs, ...t }) => ({
 // from report.mjs); its wait counts from the first of those failures when the events carry a time.
 // /api/state exposes each kind's rank, so stuck takes 2.5 and the ranks before it stay as they were.
 // A running task that asked the user a question with `ask` (its row's `question`, from inbox.mjs)
-// comes first, at 0.5: it waits on the user while it works, and the item clears once the agent has
-// read a message sent after the question.
+// comes first, at 0.5: it waits on an answer while it works, and the item clears once its own
+// addressee sends a message after the question (openQuestions in inbox.mjs).
 const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, "awaiting-review": 3, silent: 4 };
 const UNFAILED = new Set(["running", "prepared", "completed", "needs-decision", "idle"]);
 
@@ -86,6 +88,46 @@ export function attentionOf(t, closed, now = Date.now()) {
 
 // Most urgent kind first; within a kind, the one that has waited longest.
 export const byUrgency = (a, b) => a.rank - b.rank || a.sinceMs - b.sinceMs;
+
+// Who must act on an attention item: the fields the board adds to it. `to` is "agent" or "user";
+// `agent` names the agent that must act ("task <run>/<task>" or "orchestrator session 425c2bc2"),
+// or is null when the item is the user's own; `agentTask` is that orch task, {run, task}, or null
+// for a session; `gone` says why that agent no longer takes it, when the item went to the user for
+// that reason. A task in a nested run reports to the orch task that started it, and one in a
+// top-level run to the session that launched the run (addressee.mjs), decisions it hands back
+// included. The user takes an item only when an agent passed it up (`ask --user`), when a usage
+// limit stopped the task, when the run was started from a terminal, or when the agent is gone: an
+// orch task that no longer runs, or a session whose process ended or that has had no live `wait`
+// on the run for the grace (agentGraceMs). `table` is the process table for that check, PID to
+// command line, so one board build runs `ps` once.
+export function addresseeOf(run, record, row, item, now = Date.now(), table = undefined) {
+  const user = (agent = null, gone = null, agentTask = null) => ({ to: "user", agent, agentTask, gone });
+  if (item.label === "usage limit") return user();
+  if (item.kind === "question" && row.question?.to === "user") return user();
+  const parent = parentOf(run, record);
+  if (!parent) {
+    const session = mainSession(run);
+    if (!session || !run.dir) return user();
+    const agent = sessionLabel(session);
+    const gone = sessionGone(run, session, now, table);
+    return gone ? user(agent, gone) : { to: "agent", agent, agentTask: null, gone: null };
+  }
+  const agent = `task ${parent.run}/${parent.task}`;
+  const agentTask = { run: parent.run, task: parent.task };
+  const parentRun = runById(parent.run);
+  const task = parentRun && loadTask(parentRun, parent.task);
+  const gone = !parentRun ? "its run is gone" : !task ? "its task is gone"
+    : relayAlive(task.pid, task.startedAt) || isParked(parentRun, task) ? null : "it is not running";
+  return gone ? user(agent, gone, agentTask) : { to: "agent", agent, agentTask, gone: null };
+}
+
+const addressed = (run, record, row, item, now, table) => (item ? { ...item, ...addresseeOf(run, record, row, item, now, table) } : null);
+
+// The board's process table for addresseeOf, PID to command line, from the shared snapshot.
+function commandTable() {
+  const rows = processSnapshot();
+  return rows ? new Map([...rows].map(([pid, r]) => [pid, r.command])) : null;
+}
 
 // The board hides a run once none of its sessions has run for AGENT_ORCH_BOARD_IDLE (2h). Its files
 // stay, so `status` and `result` still read it, and new activity in the run shows it again.
@@ -378,6 +420,8 @@ function placeExternal(externals, sections, sectionOf, sessionSection) {
 
 function buildDashboardState() {
   const now = Date.now();
+  let commands; // the process table for addresseeOf, read once per build when first needed
+  const table = () => (commands === undefined ? (commands = commandTable()) : commands);
   const idleMs = boardIdleMs();
   const rowIdle = rowIdleMs();
   reviewStaleMs(); // attentionOf reads it per row; reading it here checks it on every build
@@ -438,9 +482,9 @@ function buildDashboardState() {
     section.rows.push(
       ...described.map((t) => {
         const record = records.get(t.id);
-        return { ...t, run: run.id, under: p, attention: attentionOf(t, Boolean(record?.closedAt), now), activeMs: t.lastActiveMs || Date.parse(record?.createdAt) || 0 };
+        return { ...t, run: run.id, under: p, attention: addressed(run, record, t, attentionOf(t, Boolean(record?.closedAt), now), now, table()), activeMs: t.lastActiveMs || Date.parse(record?.createdAt) || 0 };
       }),
-      ...natives.map((t) => ({ ...t, run: run.id, attention: attentionOf(t, t.closed, now) })),
+      ...natives.map((t) => ({ ...t, run: run.id, attention: addressed(run, null, t, attentionOf(t, t.closed, now), now, table()) })),
     );
   }
   // Claude Code sessions whose sub-agents ran within AGENT_ORCH_BOARD_IDLE without this skill: each
@@ -467,7 +511,7 @@ function buildDashboardState() {
     if (sections.size >= BOARD_RUNS) break;
     if (known.has(c.sessionId) || now - c.lastMs >= idleMs) continue;
     const section = sessionSection("claude", c.sessionId, c.firstMs, true);
-    section.rows.push(...claudeNativeAgents(c.sessionId, "orchestrator").map((t) => ({ ...t, run: section.runs[0].id, attention: attentionOf(t, t.closed, now) })));
+    section.rows.push(...claudeNativeAgents(c.sessionId, "orchestrator").map((t) => ({ ...t, run: section.runs[0].id, attention: addressed(section.runs[0], null, t, attentionOf(t, t.closed, now), now, table()) })));
   }
   placeExternal(externals, sections, sectionOf, sessionSection);
   const delegated = new Map(); // "run/task" -> tasks on the board in nested runs that the task started
@@ -491,7 +535,8 @@ function buildDashboardState() {
       tasks,
       // This section's part of the attention lane; the page merges every section's in the same order.
       // Each item names its own run's goal: a section holds every run of one session, and the
-      // section's goal is only its newest run's.
+      // section's goal is only its newest run's. Its `to`, `agent` and `gone` say who must act
+      // (addresseeOf); the page counts and leads with the user's items only.
       attention: tasks.filter((t) => t.attention).map((t) => ({ key: t.key, id: t.id, runId: t.run || null, runGoal: secRuns.find((r) => r.id === t.run)?.goal || null, ...t.attention })).sort(byUrgency),
       totals: totals(work),
       totalsText: `${totalsText(totals(work))}${main ? " (without the main session)" : ""}`,

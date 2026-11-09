@@ -15,13 +15,13 @@ async function deliver() {
   process.stdout.on("error", () => {});
   const { default: path } = await import("node:path");
   const { RUNS_DIR } = await import("../lib/config.mjs");
-  const { CHILD_FIRST, USER_FIRST, fromAgent, markRead, readInbox, replyHint, senderLabel, steeredNote } = await import("../lib/inbox.mjs");
+  const { USER_FIRST, childHint, fromAgent, markRead, readInbox, replyHint, senderLabel, steeredNote } = await import("../lib/inbox.mjs");
   const dir = path.join(RUNS_DIR, runId, "tasks", taskId);
   const unread = readInbox(dir).filter((m) => !m.read);
   if (!unread.length) return;
   // A message from an agent this one started (a finish notice or a question) is labelled with that
   // agent's run and task, never as from the user.
-  const additionalContext = unread.map((m) => `${senderLabel(m)} (${m.time}): ${m.text}${m.steered ? `\n${steeredNote(m.steered)}` : ""}${m.from === "user" ? `\n${USER_FIRST} ${replyHint(runId, taskId)}` : fromAgent(m) ? `\n${CHILD_FIRST}` : ""}`).join("\n");
+  const additionalContext = unread.map((m) => `${senderLabel(m)} (${m.time}): ${m.text}${m.steered ? `\n${steeredNote(m.steered)}` : ""}${m.from === "user" ? `\n${USER_FIRST} ${replyHint(runId, taskId)}` : fromAgent(m) ? `\n${childHint(m)}` : ""}`).join("\n");
   // Registered for PostToolUse and, so that a stopped command delivers too, PostToolUseFailure.
   const hookEventName = process.argv[2] === "PostToolUseFailure" ? "PostToolUseFailure" : "PostToolUse";
   process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext } })}\n`);
