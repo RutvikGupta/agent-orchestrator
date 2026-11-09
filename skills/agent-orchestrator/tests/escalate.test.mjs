@@ -141,6 +141,11 @@ fs.appendFileSync(process.argv[2], text);
   };
 }
 
+// A run started from a terminal has the user as its orchestrator, so all its items are the user's.
+// Without this, `new` records whichever Claude Code or Codex session runs the suite, and its items
+// would go to that session instead (addresseeOf in dashboard-state.mjs).
+const fromTerminal = (f, run) => f.launchingSession(run, null, 'terminal');
+
 async function stopBoard(f, board) {
   await f.command(['dashboard', '--stop', '--port', new URL(board.url).port]);
   await eventually(async () => {
@@ -152,6 +157,7 @@ test('escalation waits, pushes SSE, persists timers and notices across restarts,
   const f = await fixture(t);
   const notify = notifier(f);
   const run = await f.newRun('escalation');
+  fromTerminal(f, run); // its decision goes to the user, not to a launching session
   await f.start(run, 'decision', { config: { finalMessage: 'NEEDS DECISION: Which service?' } });
   await f.finished(run, 'decision');
   await f.start(run, 'review', { config: { finalMessage: 'Ready to review.' } });
@@ -220,6 +226,7 @@ test('failed, dead, silent and uncollected finished tasks escalate, but closed t
   const notify = notifier(f);
   f.env.AGENT_ORCH_ESCALATE_AFTER = '100ms';
   const run = await f.newRun();
+  fromTerminal(f, run);
   await f.start(run, 'failed', { config: { status: 'failed', error: 'Usage limit reached' } });
   await f.finished(run, 'failed');
   const dead = await f.start(run, 'dead');
@@ -255,6 +262,7 @@ for (const failure of ['exit', 'spawn', 'config', 'timeout']) {
       [process.execPath, '-e', failure === 'timeout' ? 'process.stdin.resume();setInterval(()=>{},1000)' : 'process.stderr.write("delivery unavailable");process.exit(7)'];
     writeJson(path.join(f.state, 'notify.json'), { command });
     const run = await f.newRun();
+    fromTerminal(f, run);
     await f.start(run, 'failed', { config: { status: 'failed' } });
     await f.finished(run, 'failed');
     const board = await f.dashboard();
@@ -278,6 +286,7 @@ test('macOS notifications use a literal spawn argument array', { skip: process.p
   fs.writeFileSync(path.join(bin, 'osascript'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(captured)}, JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o755 });
   f.env.PATH = `${bin}${path.delimiter}${f.env.PATH}`;
   const run = await f.newRun();
+  fromTerminal(f, run);
   await f.start(run, 'failed', { config: { status: 'failed', error: 'Failed "quoted" \\ path; $(touch nope)' } });
   await f.finished(run, 'failed');
   await f.dashboard();

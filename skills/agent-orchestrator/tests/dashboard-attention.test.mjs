@@ -1,3 +1,5 @@
+import path from 'node:path';
+import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { eventually, fixture } from './helpers.mjs';
@@ -163,4 +165,24 @@ test('byUrgency orders by kind, then by how long each has waited', () => {
   const item = (id, rank, sinceMs) => ({ id, rank, sinceMs });
   const items = [item('silent-old', 4, 1), item('review-old', 3, 2), item('failed-new', 2, 50), item('ask-new', 1, 99), item('failed-old', 2, 10), item('ask-old', 1, 5)];
   assert.deepEqual(items.sort(byUrgency).map((x) => x.id), ['ask-old', 'ask-new', 'failed-old', 'failed-new', 'review-old', 'silent-old']);
+});
+
+test('an attention item names its own run, not the session section\'s newest run', async (t) => {
+  const f = await fixture(t);
+  const older = await f.newRun('older');
+  f.launchingSession(older, 'session-two-runs');
+  await f.start(older, 'reviewer', { config: { finalMessage: 'Found one issue.' } });
+  await f.finished(older, 'reviewer');
+  const newer = await f.newRun('newer');
+  f.launchingSession(newer, 'session-two-runs');
+  for (const [run, goal] of [[older, 'Review the older pull request'], [newer, 'Review the newer pull request']]) {
+    const file = path.join(run.dir, 'run.json');
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), goal }));
+  }
+  const board = await f.dashboard();
+  const s = (await board.json('/api/state')).find((x) => x.orchestrator?.sessionId === 'session-two-runs');
+  assert.ok(s, 'one section for the session');
+  assert.equal(s.goal, 'Review the newer pull request', 'the section shows its newest run');
+  const item = s.attention.find((a) => a.id === 'reviewer');
+  assert.deepEqual([item.runId, item.runGoal], [older.id, 'Review the older pull request']);
 });
