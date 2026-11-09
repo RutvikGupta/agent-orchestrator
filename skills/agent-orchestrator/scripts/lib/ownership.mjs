@@ -32,11 +32,11 @@ export const USER_DASHBOARD = "user (dashboard)";
 export const DASHBOARD_CALLER = Object.freeze({ kind: "user", via: "dashboard", record: null });
 
 // The orch.mjs commands anyone may run, whoever owns the run: they read, or act only on the
-// caller's own things (its new run, its own task's question) or on no run. `result` closes a task
+// caller's own things (its new run, its own task's question or note to its parent) or on no run. `result` closes a task
 // and `status` and `wait` revive parked watchers and retry tasks only for the owner.
 export const OPEN_COMMANDS = new Set([
   "status", "wait", "result", "log", "recover", "agents", "stats", "lesson", "runs", "watch", "nap",
-  "new", "ask", "heavy", "reclaim", "dashboard", "pr-watch",
+  "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch",
 ]);
 // The guarded commands. `self`: the command checks ownership itself, so its refusal names what it
 // would change; orch.mjs checks the others on their RUN argument before they run (gateCommand).
@@ -194,7 +194,9 @@ export function ownershipOf(run, caller = callerIdentity()) {
     r = parent;
   }
   const me = caller.record;
-  const matched = (me && links.find((l) => sameLauncher(l.launcher, me))) || null;
+  // The user, at a terminal or through the dashboard, owns the runs it launched from a terminal.
+  const userRun = (o) => caller.kind === "user" && (o?.agent === "terminal" || !o?.agent) && links.at(-1).launcher === o;
+  const matched = links.find((l) => (me && sameLauncher(l.launcher, me)) || userRun(l.launcher)) || null;
   const top = links.at(-1).launcher;
   const userOwned = !broken && top?.agent !== "delegated-agent" && !AGENT_HOSTS.has(top?.agent);
   const own = { run: run.id, caller, links, matched, mine: Boolean(matched), direct: links[0].launcher, top, userOwned };
@@ -311,7 +313,7 @@ export function gateCommand(command, args) {
       if (run && !ownTask) g = guard(run, `run \`${command}\` on run ${run.id}${rule.ownTask && args._[1] ? ` for task ${args._[1]}` : ""}`, { adopt: args.adopt });
     }
   }
-  const run = !["nap", "ask", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs"].includes(command) ? runNamed(args._[0]) : null;
+  const run = !["nap", "ask", "tell", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs"].includes(command) ? runNamed(args._[0]) : null;
   if (run) {
     process.once("exit", () => {
       try {
@@ -383,10 +385,12 @@ export function recordChange(run, g, { task = null, attempt = null, action }) {
   if (d?.agent === "delegated-agent") {
     const parent = runById(d.parentRun);
     const text = `${task ? `Task ${task} of your run ${run.id}` : `Your run ${run.id}`}: ${noticeText(notice)}.`;
+    // The change is made already: a notice that cannot be delivered never fails it. A task that is
+    // not running (SendError) sees it in its next status or wait.
     try {
       if (parent) deliverMessage(parent, d.parentTask, text, { kind: "owner-notice", about: { run: run.id, task, attempt } });
     } catch (error) {
-      if (!(error instanceof SendError)) throw error; // the task is not running: its next status or wait shows it
+      if (!(error instanceof SendError)) process.stderr.write(`orch: could not message task ${d.parentTask} of run ${d.parentRun} about the change: ${error.message}\n`);
     }
   }
   return notice;

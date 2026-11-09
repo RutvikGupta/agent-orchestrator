@@ -200,6 +200,10 @@ test('dashboard exposes heavy lane counts without changing state shape', async (
   const f = await fixture(t), board = await f.dashboard();
   const first = heavy(t, f, 'running'); await first.ready();
   const second = heavy(t, f, 'waiting'); await queued(f, 'waiting');
+  await eventually(async () => {
+    const counts = await board.json('/api/heavy');
+    return counts.running === 1 && counts.waiting === 1;
+  }, 'the worker did not refresh the heavy lane');
   assert.deepEqual(await board.json('/api/heavy'), { running: 1, waiting: 1 });
   const response = await board.get('/api/state');
   assert.deepEqual(JSON.parse(response.headers.get('x-orch-heavy')), { running: 1, waiting: 1 });
@@ -551,9 +555,9 @@ test('dashboard shares a five-second heavy snapshot across both endpoints', asyn
   const clock = path.join(f.root, 'clock'), reads = path.join(f.root, 'lane-reads');
   const preload = path.join(f.root, 'lane-cache.cjs'), epoch = Date.now();
   fs.writeFileSync(clock, String(epoch)); fs.writeFileSync(reads, '');
-  // Control time through a file, and count actual lane scans in the dashboard process only.
-  // There are no timing sleeps: each HTTP response is the completion handshake.
-  fs.writeFileSync(preload, `if(process.argv[2]==='dashboard'){const fs=require('fs'),read=fs.readdirSync;Date.now=()=>Number(fs.readFileSync(${JSON.stringify(clock)},'utf8'));fs.readdirSync=function(dir,...args){if(String(dir)===${JSON.stringify(path.join(f.state, 'heavy'))})fs.appendFileSync(${JSON.stringify(reads)},'scan\\n');return read.call(this,dir,...args)}}`);
+  // Control both server and worker time through a file, and count actual lane scans.
+  // Reads are stale while the worker rebuilds, so wait for the new counts as the handshake.
+  fs.writeFileSync(preload, `if(process.argv[2]==='dashboard'||process.argv[1]?.endsWith('dashboard-worker.mjs')){const fs=require('fs'),read=fs.readdirSync;Date.now=()=>Number(fs.readFileSync(${JSON.stringify(clock)},'utf8'));fs.readdirSync=function(dir,...args){if(String(dir)===${JSON.stringify(path.join(f.state, 'heavy'))})fs.appendFileSync(${JSON.stringify(reads)},'scan\\n');return read.call(this,dir,...args)}}`);
   f.env.NODE_OPTIONS = `--require=${preload}`;
   const board = await f.dashboard();
   const scans = () => fs.readFileSync(reads, 'utf8').trim().split('\n').filter(Boolean).length;
@@ -569,12 +573,17 @@ test('dashboard shares a five-second heavy snapshot across both endpoints', asyn
   assert.deepEqual(await counts(), { running: 1, waiting: 0 });
   assert.equal(scans(), 1);
   fs.writeFileSync(clock, String(epoch + 5000));
+  await eventually(async () => (await counts()).waiting === 1, 'the five-second heavy snapshot did not refresh');
   assert.deepEqual(await counts(), { running: 1, waiting: 1 });
   assert.deepEqual(await board.json('/api/heavy'), { running: 1, waiting: 1 });
   assert.equal(scans(), 2);
   first.release(); await first.proc.done; await second.ready(); second.release(); await second.proc.done;
   assert.deepEqual(await board.json('/api/heavy'), { running: 1, waiting: 1 });
   fs.writeFileSync(clock, String(epoch + 10000));
+  await eventually(async () => {
+    const value = await board.json('/api/heavy');
+    return value.running === 0 && value.waiting === 0;
+  }, 'the worker retained finished heavy commands');
   assert.deepEqual(await board.json('/api/heavy'), { running: 0, waiting: 0 });
   assert.equal(scans(), 3);
 });

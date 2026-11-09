@@ -2,12 +2,13 @@
 // dashboard, or by an agent it started (a finish notice or an `ask`), and how they reach it. Each
 // task folder holds inbox.jsonl, one message per line ({id, time, attempt, text, from}; `from` is
 // "user" for the dashboard, "agent:<run>/<task>" for an agent it started, absent otherwise; an
-// agent's message adds `kind`, "finished" or "question", and `about`, {run, task, attempt}), and
+// agent's message adds `kind`, "finished", "question" or "note" (`tell`), and `about`, {run, task, attempt};
+// a user's message may add `answers`, the ids of questions it answers beyond its own side's), and
 // inbox-read.jsonl, one {id, time} line per message the agent has read. A Claude agent receives
 // them as context after a tool call, through the orch-inbox hook; a Codex agent, and Claude as a
 // fallback, runs `orch.mjs inbox --ack`. The hook imports this module, so it loads only config.mjs.
 // questions.jsonl holds the questions the task asked with `ask`, one
-// {id, time, attempt, question, options, recommend, to, message} per line.
+// {id, time, attempt, question, options, recommend, to, answerFrom, message} per line.
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -83,11 +84,12 @@ export function logSize(dir, attempt) {
 // `steered` is the command that was stopped so the message reaches the agent at once, and
 // `steeredBy` who stopped it (ownership.mjs). `kind` and `about` mark a message from an agent the
 // task started (see the header), or a notice to an owning task.
-export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, steeredBy = null, kind = null, about = null } = {}) {
+// `answers` lists the questions a message from the user answers beyond its own (openQuestions).
+export function appendMessage(dir, attempt, text, { from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, steeredBy = null, kind = null, about = null, answers = [] } = {}) {
   const message = {
     id: randomUUID().slice(0, 8), time: new Date().toISOString(), attempt, text,
     ...(from === "user" || fromAgent({ from }) ? { from } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
-    ...(steered ? { steered } : {}), ...(steered && steeredBy ? { steeredBy } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}),
+    ...(steered ? { steered } : {}), ...(steered && steeredBy ? { steeredBy } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}), ...(answers.length ? { answers } : {}),
   };
   fs.appendFileSync(path.join(dir, INBOX_FILE), `${JSON.stringify(message)}\n`);
   return message;
@@ -105,6 +107,9 @@ export function senderLabel(message) {
 
 // What the agent is told about a message from an agent it started: that agent is waiting on it.
 export const CHILD_FIRST = "It comes first: that agent is waiting on you. Handle it now, before your next step on your own work, then resume where you left off.";
+// ... except for a note that agent sent with `tell`, which needs no answer.
+export const CHILD_NOTE = "A note for your information: that agent is not waiting on you, so no answer is needed. Act on it only if it changes your work.";
+export const childHint = (message) => (message?.kind === "note" ? CHILD_NOTE : CHILD_FIRST);
 
 // The questions the task folder `dir` asked with `ask`, oldest first.
 export function readQuestions(dir) {
@@ -117,11 +122,18 @@ export function appendQuestion(dir, entry) {
   return question;
 }
 
-// The questions of `attempt` that went to the user and are still open: no message was sent after
-// the question. A sent answer closes it at once; the agent reads it at its next tool call.
+// The questions of `attempt` that went to the user, or to the launching main session of a top-level
+// run ("orchestrator", addressee.mjs), and are still open. Each is answered only from its own side:
+// a question with `answerFrom` "user" by a later message from the user (the dashboard's box), one
+// with "orchestrator" by a later message from the orchestrator (`send`). A message from the user
+// also answers the questions it lists in `answers`: those the user was shown when it was sent,
+// because their session was gone (deliverMessage). A question recorded before `answerFrom` existed
+// is answered by any later message. A sent answer closes it at once; the agent reads it at its next
+// tool call.
 export function openQuestions(questions, messages, attempt) {
-  const answered = (q) => messages.some((m) => Date.parse(m.time) > Date.parse(q.time));
-  return questions.filter((q) => q.to === "user" && q.attempt === attempt && !answered(q));
+  const answers = (q, m) => Date.parse(m.time) > Date.parse(q.time)
+    && (!q.answerFrom || (q.answerFrom === "user" ? m.from === "user" : !m.from) || (m.from === "user" && Array.isArray(m.answers) && m.answers.includes(q.id)));
+  return questions.filter((q) => (q.to === "user" || q.to === "orchestrator") && q.attempt === attempt && !messages.some((m) => answers(q, m)));
 }
 
 // What the agent is told about a message from the user: it comes before the work in hand.
@@ -189,9 +201,16 @@ export function inboxFields(run, task, row) {
   if (!asked && !sent) return {};
   const messages = sent ? readInbox(dir) : [];
   const open = asked ? openQuestions(readQuestions(dir), messages, row.attempt) : [];
-  const question = open.length
-    ? { question: { id: open[0].id, time: open[0].time, text: open[0].question.slice(0, 2000), options: open[0].options || [], recommend: open[0].recommend || null, open: open.length } }
-    : {};
+  // Each question keeps its own addressee. `question`, which the lane shows, is the oldest open
+  // question for the user, else the oldest for the session; `sessionQuestion`, which wakes the
+  // session's `wait`, is the oldest open question for the session. `open` counts that addressee's.
+  const brief = (list) => ({ id: list[0].id, time: list[0].time, text: list[0].question.slice(0, 2000), options: list[0].options || [], recommend: list[0].recommend || null, open: list.length, to: list[0].to });
+  const forUser = open.filter((q) => q.to === "user");
+  const forSession = open.filter((q) => q.to === "orchestrator");
+  const question = {
+    ...(open.length ? { question: brief(forUser.length ? forUser : forSession) } : {}),
+    ...(forSession.length ? { sessionQuestion: brief(forSession) } : {}),
+  };
   if (!sent) return question;
   const unread = messages.filter((m) => !m.read);
   const replies = readReplies(dir);

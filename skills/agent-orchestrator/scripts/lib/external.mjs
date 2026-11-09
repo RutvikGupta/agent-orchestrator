@@ -81,7 +81,9 @@ function processEnv(pid) {
   try {
     text = fs.readFileSync(`/proc/${pid}/environ`, "utf8").replace(/\0/g, "\n");
   } catch {
-    text = spawnSync("ps", ["-Eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", maxBuffer: 8 << 20 }).stdout || "";
+    const r = spawnSync("ps", ["-Eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", maxBuffer: 8 << 20, timeout: 5000 });
+    // A timed-out ps may have printed part of the environment; that text is not trusted.
+    text = r.error ? "" : r.stdout || "";
   }
   const env = {};
   for (const name of ENV_NAMES) {
@@ -102,7 +104,9 @@ const realOrNull = (f) => {
   }
 };
 function openRollout(pids) {
-  const out = spawnSync("lsof", ["-nP", "-Fn", "-p", pids.join(",")], { encoding: "utf8", maxBuffer: 8 << 20 }).stdout || "";
+  const r = spawnSync("lsof", ["-nP", "-Fn", "-p", pids.join(",")], { encoding: "utf8", maxBuffer: 8 << 20, timeout: 5000 });
+  // A timed-out lsof may have printed part of its list; a rollout path from that part is not trusted.
+  const out = r.error ? "" : r.stdout || "";
   const file = out.split("\n").find((l) => l.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(l))?.slice(1);
   if (!file) return null;
   const root = realOrNull(path.join(CODEX_HOME, "sessions"));

@@ -92,7 +92,7 @@ function refreshTableInBackground() {
   });
 }
 function readTable() {
-  const r = spawnSync("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const r = spawnSync("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 5000 });
   if (r.status !== 0) return null;
   processTable = { at: Date.now(), rows: parseTable(r.stdout) };
   return processTable.rows;
@@ -212,7 +212,9 @@ const PS_ENV = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
 // A process's start time (`ps -o lstart=`), which tells it apart from a later process with the same
 // PID; null when `ps` cannot read it.
 export function processStarted(pid) {
-  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV() });
+  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV(), timeout: 5000 });
+  // A timed-out ps may have printed part of a start time; that is no start time.
+  if (r.error) return null;
   return r.stdout?.replace(/\s+/g, " ").trim() || null;
 }
 
@@ -220,8 +222,9 @@ export function processStarted(pid) {
 // null when the PID is gone; undefined when `ps` cannot read a process that exists.
 export function processInfo(pid) {
   if (!pid || !exists(pid)) return null;
-  const r = spawnSync("ps", ["-o", "lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV() });
-  const m = /^\s*(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
+  const r = spawnSync("ps", ["-o", "lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV(), timeout: 5000 });
+  // A timed-out `ps` may have printed part of a line: that is no answer.
+  const m = r.error ? null : /^\s*(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
   if (m) return { started: m[1].replace(/\s+/g, " "), command: m[2].trim() };
   return exists(pid) ? undefined : null;
 }
@@ -230,7 +233,7 @@ export function processInfo(pid) {
 // { started, command }, or null when `ps` fails. Park checks share it, so that reviving the parked
 // tasks of a run costs a single `ps`.
 export function parkProcessTable() {
-  const r = spawnSync("ps", ["-axww", "-o", "pid=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: PS_ENV() });
+  const r = spawnSync("ps", ["-axww", "-o", "pid=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: PS_ENV(), timeout: 5000 });
   if (r.status !== 0) return null;
   const rows = new Map();
   for (const line of r.stdout.split("\n")) {
@@ -620,8 +623,8 @@ export function detectOrchestrator({ started = false } = {}) {
   for (let hops = 0; pid > 1 && hops < 20; hops++) {
     let row = table?.get(pid);
     if (!row) {
-      const r = spawnSync("ps", ["-o", "ppid=,lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV() });
-      const m = /^(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
+      const r = spawnSync("ps", ["-o", "ppid=,lstart=,command=", "-p", String(pid)], { encoding: "utf8", env: PS_ENV(), timeout: 5000 });
+      const m = r.error ? null : /^(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec((r.stdout || "").trim());
       if (!m) break;
       row = { ppid: Number(m[1]), started: m[2].replace(/\s+/g, " "), command: m[3] };
     }

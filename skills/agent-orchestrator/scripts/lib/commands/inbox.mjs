@@ -4,7 +4,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
-import { CHILD_FIRST, INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, fromAgent, inboxWake, markRead, markSteered, readInbox, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
+import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
@@ -62,6 +63,14 @@ export function imageKind(data) {
   return null;
 }
 
+// The open questions for the launching session that the user is shown, because that session is
+// gone (addressee.mjs): a reply from the user answers them too. Its own questions it answers anyway.
+function shownToUser(run, task, dir) {
+  const theirs = openQuestions(readQuestions(dir), readInbox(dir), task.attempt || 1).filter((q) => q.to === ORCHESTRATOR);
+  const session = theirs.length ? mainSession(run) : null;
+  return session && sessionGone(run, session) ? theirs.map((q) => q.id) : [];
+}
+
 // Append `text` to a running task's inbox. `send` and the dashboard both deliver through this.
 // Attached images (Buffers that imageKind accepts) are saved in the task's folder, where only the
 // user can read them, and their paths are added to the text the agent receives.
@@ -109,7 +118,8 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   // The plan is made before the message is written, so the agent learns its command was stopped.
   const plan = steer && !parked ? planSteer(task) : null;
   const g = plan?.stop ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
-  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about });
+  const answers = from === "user" ? shownToUser(run, task, dir) : [];
+  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
     : messageReach(task);
@@ -257,7 +267,7 @@ export function cmdInbox(args) {
       for (const r of replies.filter((r) => r.to === m.id)) lines.push(`  replied ${r.time}: ${r.text}`);
       if (m.steered && !m.read) lines.push(steeredNote(m.steered));
       if (m.from === "user" && !m.read) lines.push(`${USER_FIRST} ${replyHint(run.id, id)}`);
-      else if (fromAgent(m) && !m.read) lines.push(CHILD_FIRST);
+      else if (fromAgent(m) && !m.read) lines.push(childHint(m));
     }
     if (args.ack && unread.length && !ackError) lines.push("", `marked ${plural(unread.length, "message")} as read`);
   }

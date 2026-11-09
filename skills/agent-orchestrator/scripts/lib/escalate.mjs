@@ -1,12 +1,41 @@
-// Attention first wakes the orchestrator's wait. If it stays unhandled, the dashboard tells
-// the user once per task, attempt and kind (and, for a stuck task, episode; for a question, each
-// question). Pending timers and sent notices survive restarts.
+// Attention first wakes the orchestrator's wait. If it stays unhandled, the dashboard tells whoever
+// must act (addresseeOf in dashboard-state.mjs) once per task, attempt and kind (and, for a stuck
+// task, episode; for a question, each question). The user gets a notice only for an item addressed
+// to the user. An orch task gets an inbox message instead; a launching session gets nothing here,
+// since its `wait` wakes on the item. Once that agent is gone, or cannot take the message, the item
+// is the user's, and its notice says so. Pending timers and sent notices survive restarts.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { STATE_ROOT } from "./config.mjs";
+import { SendError, deliverMessage } from "./commands/inbox.mjs";
+import { CLI_PATH, STATE_ROOT } from "./config.mjs";
 import { attentionOf } from "./dashboard-state.mjs";
+import { runById } from "./finish-notice.mjs";
+import { agoText } from "./format.mjs";
 import { parseDuration, writeJson } from "./util.mjs";
+
+// What an item of each kind waits for, after "<task> has waited 25m".
+const WAITS_FOR = { "awaiting-review": "for review", question: "for an answer", "needs-decision": "for a decision", stuck: "while stuck", silent: "while silent", dead: "since its relay died" };
+
+// The notice for an item that went to the user because its agent is gone or cannot take it:
+// "orchestrator session 425c2bc2 is gone (…); review-me has waited 25m for review".
+export function goneText(id, item, waitedMs, state = `is gone (${item.gone})`) {
+  const what = WAITS_FOR[item.kind] || `since it ended (${item.label})`;
+  return `${item.agent} ${state}; ${id} has waited ${agoText(waitedMs)} ${what}`;
+}
+
+// The inbox message an orch task gets about an item of a task it started, with what to do.
+export function agentNoticeText(run, task, item, waitedMs) {
+  const cmd = (rest) => `\`node ${CLI_PATH} ${rest} ${run} ${task.id}\``;
+  const todo = {
+    "awaiting-review": `Read it with ${cmd("result")}, then ${cmd("accept")} once its work is committed, or record ${cmd("verdict").replace(/`$/, ' changes --note "<fixes>"`')} and resume it, or ${cmd("close")}.`,
+    "needs-decision": `Read it with ${cmd("result")}, decide what your brief covers, and resume it; pass a decision beyond your brief up at once with \`node ${CLI_PATH} ask "<question>"\`.`,
+    stuck: `Read its log with ${cmd("log")}, then give it a hint with ${cmd("send").replace(/`$/, ' "<hint>" --steer`')}, or ${cmd("stop")} it.`,
+    silent: `Check it with ${cmd("log")}, then nudge it with ${cmd("send").replace(/`$/, ' "<message>"`')}, or ${cmd("stop")} it.`,
+    question: `Answer it with ${cmd("send").replace(/`$/, ' "<answer>"`')}.`,
+  }[item.kind] || `Read it with ${cmd("result")}, then fix and resume it, or ${cmd("close")} it.`;
+  return `Agent ${run}/${task.id} (attempt ${task.attempt || 1}), which you started, has waited ${agoText(waitedMs)} on you: ${item.label} — ${item.reason}.\n${todo}`;
+}
 
 // `review` includes results nobody has collected yet. `wait` leaves them out (a finished task
 // already wakes it), but escalation to the user includes them: an orchestrator that never picks
@@ -115,6 +144,7 @@ export function createEscalator({ url, broadcast }) {
     records = Object.fromEntries(Object.entries(records).map(([key, record]) => [key, { ...record }]));
     const active = new Set();
     const pending = [];
+    const tellAgent = [];
     let changed = false;
     for (const section of sections) for (const task of section.tasks) {
       // The board already applies explicit closedAt (describe().closed also includes completed
@@ -132,14 +162,28 @@ export function createEscalator({ url, broadcast }) {
         changed = true;
       }
       const record = records[key];
-      if (record.escalatedAt != null || now - record.since < escalationDelay(item.kind, delays)) continue;
-      Object.assign(record, { reason: item.reason, waited: now - record.since, escalatedAt: now, deliveries: {} });
-      changed = true;
+      const due = now - record.since >= escalationDelay(item.kind, delays);
       const title = section.runs?.find((r) => r.id === run)?.goal || section.goal || run;
-      pending.push([key, { ...record, url, key: `${section.id}/${task.key}`, text: `${task.id} · ${title} · ${item.reason}` }]);
+      const notice = (reason) => {
+        Object.assign(record, { reason, waited: now - record.since, escalatedAt: now, deliveries: {} });
+        return [key, { ...record, url, key: `${section.id}/${task.key}`, text: `${task.id} · ${title} · ${reason}` }];
+      };
+      // An item for an agent goes to that agent, never to the user. A session learns it from its
+      // `wait`; an orch task gets one inbox message when the user would have been told. The timer
+      // keeps running, so the item goes to the user at once if that agent is gone by then.
+      if (item.to === "agent") {
+        if (!item.agentTask || record.agentNoticeAt != null || !due) continue;
+        record.agentNoticeAt = now;
+        changed = true;
+        tellAgent.push({ key, item, task, run, notice });
+        continue;
+      }
+      if (record.escalatedAt != null || !due) continue;
+      changed = true;
+      pending.push(notice(item.gone && item.agent ? goneText(task.id, item, now - (item.sinceMs || record.since)) : item.reason));
     }
     for (const [key, record] of Object.entries(records)) {
-      if (record.escalatedAt == null && !active.has(key)) {
+      if (record.escalatedAt == null && record.agentNoticeAt == null && !active.has(key)) {
         delete records[key];
         changed = true;
       }
@@ -149,6 +193,30 @@ export function createEscalator({ url, broadcast }) {
     if (changed) {
       try { save(); }
       catch (error) { records = before; throw error; }
+    }
+    // An agent that cannot take its notice (it stopped, or will not read messages) leaves it to the
+    // user. Its record, and any notice that falls back to the user, are saved before that goes out.
+    for (const { key, item, task, run, notice } of tellAgent) {
+      const { run: parentRun, task: parentTask } = item.agentTask;
+      const to = `${parentRun}/${parentTask}`;
+      let why = null;
+      try {
+        const target = runById(parentRun);
+        if (!target) throw new SendError(`its run ${parentRun} is gone`, 404);
+        const sent = deliverMessage(target, parentTask, agentNoticeText(run, task, item, now - (item.sinceMs || records[key].since)), {
+          from: `agent:${run}/${task.id}`, kind: "attention", about: { run, task: task.id, attempt: task.attempt || 0 },
+        });
+        records[key].agentNotice = { to, message: sent.message.id, at: sent.message.time };
+        if (!sent.reaches) why = "it will not read messages";
+      } catch (error) {
+        // Not running, gone, or an unwritable inbox: whatever stops the message, the user hears.
+        why = String(error?.message || error).replace(/; resume it .*$/, "");
+        records[key].agentNotice = { to, error: why };
+      }
+      if (why) pending.push(notice(goneText(task.id, item, now - (item.sinceMs || records[key].since), `cannot take it (${why})`)));
+    }
+    if (tellAgent.length) {
+      try { save(); } catch (error) { process.stderr.write(`orch: cannot record agent notices: ${error.message}\n`); }
     }
     for (const [key, message] of pending) send(key, message);
   };

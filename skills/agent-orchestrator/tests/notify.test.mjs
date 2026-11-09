@@ -220,14 +220,16 @@ test('ask reaches a running parent task as a labelled question, and the answer c
   await notice(child, 'asker');
 });
 
-test('ask from a top-level task is a question in the attention lane, wakes wait with exit 5, and clears as soon as a later message is sent', async (t) => {
+test('ask from a top-level task is a question for the launching session, wakes its wait with exit 5, and clears as soon as a later message is sent', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('top');
+  const owner = f.launchingSession(run, 'toplevel-session');
   const asker = await f.start(run, 'asker', { config: { hold: true }, flags: ['--read-only'] });
   await f.ready(asker);
   await f.start(run, 'decides', { config: { finalMessage: 'NEEDS DECISION:\n- Keep the old flag? Recommendation: no.' }, flags: ['--read-only'] });
   await f.finished(run, 'decides');
-  await f.command(['result', run.id, 'decides']);
+  // The launching session reads the decision: only the run's owner marks it seen with `result`.
+  await f.command(['result', run.id, 'decides'], { env: owner });
   const me = as(run, 'asker');
   // A message sent before the question does not answer it.
   await f.command(['send', run.id, 'asker', 'An earlier note.']);
@@ -235,28 +237,32 @@ test('ask from a top-level task is a question in the attention lane, wakes wait 
   const waited = await f.waitAfterPoll([run.id, '--timeout', '0', '--json'], async () => {
     asked = await f.command(['ask', 'Which database for the cache?', '--options', 'pg|sqlite', '--recommend', 'pg'], { env: me });
   }, { code: 5 });
-  assert.match(asked.stdout, /^asked the user on the dashboard \(question \w+\)\nKeep working on everything that does not depend on the answer/);
+  assert.match(asked.stdout, /^asked your orchestrator, orchestrator session toplevel: its `wait` on run \S+ wakes with it, and the user gets it only if that session is gone \(question \w+\)\nKeep working on everything that does not depend on the answer/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(run.dir, 'tasks', 'asker', 'questions.jsonl'), 'utf8').trim()).to, 'orchestrator');
   assert.ok(asked.stdout.includes(`node ${cli} nap 5m`));
   const reason = 'Which database for the cache? · options: pg | sqlite · recommends pg';
   const woken = JSON.parse(waited.stdout);
   assert.deepEqual(woken.attention.map((a) => [a.task, a.kind, a.rank]), [['asker', 'question', 0.5], ['decides', 'needs-decision', 1]]);
   assert.equal(woken.attention.find((a) => a.task === 'asker').reason, reason);
-  const listed = await f.command(['wait', run.id, '--timeout', '1ms'], { code: 3 });
+  // An open question wakes every later wait (exit 5) until it is answered.
+  const listed = await f.command(['wait', run.id, '--timeout', '1ms'], { code: 5 });
   assert.ok(listed.stdout.includes(`asker: question — ${reason}`));
-  assert.ok(listed.stdout.includes(`asker asked a question and keeps working: answer what the user's request covers with \`node ${cli} send ${run.id} <task> "<answer>"\``));
+  assert.match(listed.stdout, /\nasker asked you, \d+m ago, and keeps working: "Which database for the cache\?"\. Answer it now with `[^`]+ send \S+ asker "<answer>"`: wait exits 5 until you do\.\n/);
+  assert.match(listed.stdout, /\(asker waits for your answer\)/);
 
-  // First in the dashboard's lane, ahead of a handed-back decision.
+  // First in the dashboard's lane, ahead of a handed-back decision. Both are the session's.
   const board = await f.dashboard();
   const lane = async () => (await board.json('/api/state')).flatMap((s) => s.attention).filter((a) => ['asker', 'decides'].includes(a.id));
   const items = await lane();
-  assert.deepEqual(items.map((a) => [a.id, a.kind, a.rank, a.label]), [['asker', 'question', 0.5, 'question'], ['decides', 'needs-decision', 1, 'needs decision']]);
+  assert.deepEqual(items.map((a) => [a.id, a.kind, a.rank, a.label, a.to]), [['asker', 'question', 0.5, 'question', 'agent'], ['decides', 'needs-decision', 1, 'needs decision', 'agent']]);
+  assert.equal(items[0].agent, 'orchestrator session toplevel');
   assert.equal(items[0].reason, reason);
 
-  const open = async () => (await f.json(['wait', run.id, 'asker', '--timeout', '1ms'], { code: 3 })).attention.map((a) => a.kind);
+  const open = async (code) => (await f.json(['wait', run.id, 'asker', '--timeout', '1ms'], { code })).attention.map((a) => a.kind);
   await f.command(['inbox', run.id, 'asker', '--ack'], { env: me });
-  assert.deepEqual(await open(), ['question'], 'reading an earlier message does not clear it');
+  assert.deepEqual(await open(5), ['question'], 'reading an earlier message does not clear it');
   await f.command(['send', run.id, 'asker', 'Use pg.']);
-  assert.deepEqual(await open(), [], 'a sent answer clears it before the agent reads it');
+  assert.deepEqual(await open(3), [], 'a sent answer clears it before the agent reads it');
   await eventually(async () => (await lane()).every((a) => a.id !== 'asker'), 'the question stayed in the lane');
 });
 
@@ -384,13 +390,14 @@ test('decisions and questions escalate after AGENT_ORCH_DECISION_ESCALATE_AFTER;
   writeJson(path.join(f.state, 'notify.json'), { command: [process.execPath, script, output] });
   const messages = () => (fs.existsSync(output) ? fs.readFileSync(output, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []);
   const run = await f.newRun();
+  f.launchingSession(run, null, 'terminal'); // the user's own run: its decision is the user's
   await f.start(run, 'decides', { config: { finalMessage: 'NEEDS DECISION: Which service?' }, flags: ['--read-only'] });
   await f.finished(run, 'decides');
   await f.start(run, 'broke', { config: { status: 'failed', error: 'Build failed' }, flags: ['--read-only'] });
   await f.finished(run, 'broke');
   const asker = await f.start(run, 'asker', { config: { hold: true }, flags: ['--read-only'] });
   await f.ready(asker);
-  await f.command(['ask', 'Ship it today?'], { env: as(run, 'asker') });
+  await f.command(['ask', 'Ship it today?', '--user'], { env: as(run, 'asker') });
   await f.dashboard();
   await eventually(() => messages().length === 2, 'decision and question did not escalate', 20_000);
   assert.deepEqual(messages().map((m) => [m.task, m.kind]).sort(), [['asker', 'question'], ['decides', 'needs-decision']]);

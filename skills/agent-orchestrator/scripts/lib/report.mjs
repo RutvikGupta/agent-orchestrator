@@ -76,13 +76,13 @@ function scopeViolations(run, task, row, report) {
   const expanded = files.filter((file) => typeof file === "string" && file.length).flatMap((file) => {
     if (!file.endsWith("/")) return [normalize(file)];
     if (checkout === undefined) {
-      const probe = fs.existsSync(cwd) && spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+      const probe = fs.existsSync(cwd) && spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000 });
       checkout = probe && probe.status === 0 && probe.stdout.trim() === "true";
     }
     if (checkout) {
       // Porcelain status collapses untracked directories. NUL output preserves quoted/unusual
       // names; literal pathspecs prevent brackets and other filename characters acting as globs.
-      const listed = spawnSync("git", ["--literal-pathspecs", "-C", cwd, "ls-files", "--others", "--exclude-standard", "-z", "--", file], { encoding: "utf8" });
+      const listed = spawnSync("git", ["--literal-pathspecs", "-C", cwd, "ls-files", "--others", "--exclude-standard", "-z", "--", file], { encoding: "utf8", timeout: 5000 });
       if (listed.status === 0) return listed.stdout.split("\0").filter(Boolean).map(normalize);
       // An existing checkout whose inspection fails must not silently hide possible violations.
       return [normalize(file)];
@@ -99,9 +99,9 @@ function scopeViolations(run, task, row, report) {
 // A checkout's HEAD commit, and whether it holds uncommitted changes beyond the tool caches that
 // gate runs leave behind; both null outside a git checkout.
 export function treeState(dir) {
-  const head = dir && fs.existsSync(dir) ? spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }) : null;
+  const head = dir && fs.existsSync(dir) ? spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 5000 }) : null;
   if (!head || head.status !== 0) return { commit: null, dirty: null };
-  const status = spawnSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8" });
+  const status = spawnSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8", timeout: 5000 });
   const dirty = status.status === 0 ? status.stdout.split("\n").some((l) => l.trim() && !CACHE_PATH.test(l.slice(3))) : null;
   return { commit: head.stdout.trim(), dirty };
 }

@@ -3,6 +3,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { NOTES_FILE, markNotesRead, noteMainWait, noteText, reviewRemindMs, unreadNotes } from "../addressee.mjs";
+import { callerTask } from "../finish-notice.mjs";
+import { agoText } from "../format.mjs";
 import { INBOX_FILE, QUESTIONS_FILE, inboxWake } from "../inbox.mjs";
 import { acceptedNow, lifecycleHints } from "../lifecycle.mjs";
 import { reviveParked } from "../park.mjs";
@@ -12,7 +15,7 @@ import { taskAttention } from "../escalate.mjs";
 import { CLI_PATH, RUNS_DIR } from "../config.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
 import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
-import { die, emit, parseDuration, writeJson } from "../util.mjs";
+import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
 
 export function cmdStatus(args) {
@@ -46,7 +49,10 @@ export function parkHelper(deadline, command, args, state, { pids = [], files = 
     const stamp = Math.floor(checkedAt / 1000) - 1;
     fs.utimesSync(marker, stamp, stamp);
     const module = command === "cmdWait" ? import.meta.url : new URL("./inbox.mjs", import.meta.url).href;
-    const source = `import fs from 'node:fs'; const file=process.argv[1]; const {args,state,execArgv}=JSON.parse(fs.readFileSync(file,'utf8')); fs.rmSync(process.argv[2],{recursive:true}); process.execArgv=execArgv; const mod=await import(${JSON.stringify(module)}); await mod.${command}(args,state);`;
+    // The shell's name, and a comment that starts the resumed source, are the command it stands
+    // for, so `ps` shows a parked or resumed wait as `orch.mjs wait <run dir>` (waitsOn, addressee.mjs).
+    const label = `${CLI_PATH} ${command === "cmdWait" ? "wait" : "nap"} ${args._.join(" ")}`;
+    const source = `/* ${label.replace(/\*\//g, "* /")} */ import fs from 'node:fs'; const file=process.argv[1]; const {args,state,execArgv}=JSON.parse(fs.readFileSync(file,'utf8')); fs.rmSync(process.argv[2],{recursive:true}); process.execArgv=execArgv; const mod=await import(${JSON.stringify(module)}); await mod.${command}(args,state);`;
     // Only sleep forks. PID checks, file tests and the bounded countdown are shell builtins.
     // Function arguments retain each path literally, including whitespace and newlines.
     const script = `file=$1; dir=$2; ticks=$3; tail=$4; marker=$dir/marker; shift 4
@@ -78,7 +84,7 @@ exec "$@" "$file" "$dir"`;
     const ms = Math.min(max, Math.max(0, deadline - Date.now()));
     const watchedPids = [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
     const watchedFiles = [...new Set(files)];
-    process.execve("/bin/sh", ["sh", "-c", script, `${CLI_PATH} ${command === "cmdWait" ? "wait" : "nap"} ${args._.join(" ")}`,
+    process.execve("/bin/sh", ["sh", "-c", script, label,
       file, dir, String(Math.floor(ms / 1000)), String((ms % 1000) / 1000),
       String(watchedPids.length), ...watchedPids.map(String), String(watchedFiles.length), ...watchedFiles,
       process.execPath, ...process.execArgv, "--input-type=module", "-e", source], process.env);
@@ -90,15 +96,50 @@ exec "$@" "$file" "$dir"`;
   return false;
 }
 
+// The review reminder: a finished task that has waited longer than AGENT_ORCH_REVIEW_REMIND (10m;
+// 0 turns it off) without being accepted, closed or given a verdict on its current attempt. A
+// babysitter never awaits review. `wait` exits 5 for it once per interval per task, recorded in
+// the run's review-reminders.json ({task: {attempt, at}}), and prints the commands that clear it.
+const REMINDERS_FILE = "review-reminders.json";
+function reviewsDue(run, tasks, now = Date.now()) {
+  const every = reviewRemindMs();
+  if (!(every > 0)) return [];
+  const sent = readJson(path.join(run.dir, REMINDERS_FILE)) || {};
+  return tasks.filter((t) => {
+    if (t.phase !== "awaiting-review" || String(t.mode || "").startsWith("babysit") || !((t.awaitingReviewMs ?? 0) >= every)) return false;
+    if (loadTask(run, t.id)?.closedAt || t.reviewRounds?.some((r) => r.attempt === t.attempt)) return false;
+    const last = sent[t.id];
+    return !last || last.attempt !== t.attempt || !(now - Date.parse(last.at) < every);
+  });
+}
+
+function remindText(run, t) {
+  const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
+  const ways = t.mode === "read-only"
+    ? [`read it, which closes it: ${cmd(`result ${run.id} ${t.id}`)}`, `or close it: ${cmd(`close ${run.id} ${t.id}`)}`]
+    : [
+      `accept it after committing its work: ${cmd(`accept ${run.id} ${t.id} --note "<why>"`)}`,
+      `or ask for changes, then resume it: ${cmd(`verdict ${run.id} ${t.id} changes --note "<fixes>"`)}`,
+      `or close it if you handled it another way: ${cmd(`close ${run.id} ${t.id}`)}`,
+    ];
+  return [`${t.id} has waited ${agoText(t.awaitingReviewMs || 0)} for review: not accepted, closed or given a verdict. Handle it now:`, ...ways.map((w) => `  ${w}`)].join("\n");
+}
+
 export async function cmdWait(args, resumed = null) {
   const wake = inboxWake(resumed?.inbox);
   const run = loadRun(args._[0]);
+  // Reviving a parked watcher and retrying a task change the run: only the owner's `wait` does them.
+  // Another agent session's `wait` changes nothing at all (ownership.mjs): it records no live main
+  // wait, reads no notes and shows no reminders, which stay for the run's own session.
+  const own = ownershipOf(run);
+  const mine = own.mine;
+  const may = mayAct(own);
+  // A wait that no orch task runs is the launching session's (or a terminal's): it records that it
+  // is live (addressee.mjs) and prints the notes that the run's tasks sent with `tell`.
+  const main = !callerTask() && may;
   const ids = args._.slice(1);
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
   const deadline = resumed ? (resumed.deadline ?? Infinity) : timeout === 0 ? Infinity : Date.now() + timeout;
-  // Reviving a parked watcher and retrying a task change the run: only the owner's `wait` does them;
-  // anyone else's changes nothing (ownership.mjs).
-  const mine = ownershipOf(run).mine;
   // A long wait hands itself to a shell and back, without exiting: record the owner's use now.
   if (mine && !resumed) touchOwner(run);
   const snapshot = () => {
@@ -130,6 +171,7 @@ export async function cmdWait(args, resumed = null) {
   };
   for (;;) {
     const checkedAt = Date.now();
+    if (main) noteMainWait(run, checkedAt);
     let tasks = snapshot().filter((t) => (ids.length ? ids.includes(t.id) : t.state !== "prepared"));
     if (!tasks.length) die(ids.length ? `no tasks named ${ids.join(", ")}` : "no started tasks in this run");
     // Snapshot before retries, so attention already present at entry never wakes a repeated wait.
@@ -156,26 +198,55 @@ export async function cmdWait(args, resumed = null) {
     // A finish notice about a task this wait watches is no reason to wake: the finished result
     // wakes it (exit 0) and names the task. The notice stays unread for the hook or `inbox`.
     const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id && tasks.some((t) => t.id === m.about.task));
-    if (newAttention || done || message || Date.now() >= deadline) {
+    const notes = main ? unreadNotes(run) : [];
+    const due = may ? reviewsDue(run, tasks) : [];
+    // An open question for the session wakes its wait every time, until it is answered with
+    // `send`, even one asked before this wait began.
+    const asked = main ? tasks.filter((t) => t.state === "running" && t.sessionQuestion) : [];
+    const wakes = newAttention || due.length > 0 || asked.length > 0;
+    if (wakes || done || message || notes.length || Date.now() >= deadline) {
       const asking = tasks.filter((t) => t.state === "needs-decision").map((t) => t.id);
-      const questions = needing.filter((item) => item.kind === "question").map((item) => item.task);
+      // Questions this wait does not own: for the user, or, in a wait that an orch task runs, any.
+      const questions = needing.filter((item) => item.kind === "question" && !asked.some((t) => t.id === item.task)).map((item) => item.task);
       const limited = tasks.filter((t) => t.limitHit).map((t) => `${t.id} (${t.agent})`);
       const hint =
+        // A change someone else made shows in statusText(), once.
         needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${item.task}: ${item.label} — ${item.reason}`).join("") +
-        (questions.length ? `\n${questions.join(", ")} asked a question and ${questions.length > 1 ? "keep" : "keeps"} working: answer what the user's request covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\`, and ask the user the rest (SKILL.md, "Decisions agents hand back")` : "") +
+        (questions.length ? `\n${questions.join(", ")} asked ${main ? "the user" : "a question"} and ${questions.length > 1 ? "keep" : "keeps"} working: ${main ? "it waits on the dashboard for the user's answer" : `answer what your brief covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\``} (SKILL.md, "Decisions agents hand back")` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
         (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +
-        [...lifecycleHints(run, tasks), ...reportHints(run, tasks)].map((line) => `\n${line}`).join("");
-      markNoticesSeen(run, notices);
-      emit(args, { run: run.id, finished: done, tasks, attention: needing, ...(message ? { message } : {}) }, `${statusText(run, tasks, notices)}${hint}${newAttention ? "\n(a task needs attention)" : done ? (finishedNow.length ? `\n(${finishedNow.map((t) => t.id).join(", ")} finished and nobody has read ${finishedNow.length > 1 ? "their results" : "its result"}: review ${finishedNow.length > 1 ? "them" : "it"} now with \`result\`, or \`close\` what you handled another way${running.length ? `, then wait again for ${running.map((t) => t.id).join(", ")}` : ""})` : "") : message ? "" : "\n(still running: wait timed out)"}${message ? `\n${message.hint}` : ""}`);
+        [...lifecycleHints(run, tasks), ...reportHints(run, tasks)].map((line) => `\n${line}`).join("") +
+        due.map((t) => `\n${remindText(run, t)}`).join("");
+      const unreadText = finishedNow.length ? `\n(${finishedNow.map((t) => t.id).join(", ")} finished and nobody has read ${finishedNow.length > 1 ? "their results" : "its result"}: review ${finishedNow.length > 1 ? "them" : "it"} now with \`result\`, or \`close\` what you handled another way${running.length ? `, then wait again for ${running.map((t) => t.id).join(", ")}` : ""})` : "";
+      const reminded = `\n(review overdue: ${due.map((t) => t.id).join(", ")})${done ? unreadText : ""}`;
+      const open = asked.map((t) => `\n${t.id} asked you, ${agoText(Date.now() - Date.parse(t.sessionQuestion.time))} ago, and keeps working: "${t.sessionQuestion.text.replace(/\s+/g, " ").slice(0, 300)}"${t.sessionQuestion.open > 1 ? ` (+${t.sessionQuestion.open - 1} more)` : ""}. Answer it now with \`node ${CLI_PATH} send ${run.id} ${t.id} "<answer>"\`: wait exits 5 until you do.`).join("");
+      const tail = newAttention ? "\n(a task needs attention)" : due.length ? reminded : asked.length ? `\n(${asked.map((t) => t.id).join(", ")} ${asked.length > 1 ? "wait" : "waits"} for your answer)${done ? unreadText : ""}` : done ? unreadText : message || notes.length ? "" : "\n(still running: wait timed out)";
+      const noted = notes.length ? `\n${notes.map(noteText).join("\n")}\n(${notes.length > 1 ? "notes" : "a note"} from your tasks, sent with \`tell\`: no answer needed)` : "";
+      emit(args, {
+        run: run.id, finished: done, tasks, attention: needing, ...(message ? { message } : {}),
+        ...(due.length ? { reminders: due.map((t) => ({ task: t.id, attempt: t.attempt, waitedMs: t.awaitingReviewMs })) } : {}),
+        ...(notes.length ? { notes } : {}),
+        ...(asked.length ? { questions: asked.map((t) => ({ task: t.id, ...t.sessionQuestion })) } : {}),
+      }, `${statusText(run, tasks, notices)}${hint}${open}${tail}${message ? `\n${message.hint}` : ""}${noted}`);
       if (message) {
-        if (newAttention || done) writeJson(wake.pendingPath, { id: message.id });
+        if (wakes || done) writeJson(wake.pendingPath, { id: message.id });
         else fs.rmSync(wake.pendingPath, { force: true });
       }
-      process.exit(newAttention ? 5 : done ? 0 : message ? 6 : 3);
+      try {
+        if (due.length) {
+          const file = path.join(run.dir, REMINDERS_FILE);
+          const at = new Date().toISOString();
+          writeJson(file, { ...readJson(file), ...Object.fromEntries(due.map((t) => [t.id, { attempt: t.attempt, at }])) });
+        }
+        markNotesRead(run, notes.map((n) => n.id));
+        markNoticesSeen(run, notices); // each owner acknowledges a change for itself (ownership.mjs)
+      } catch (error) {
+        process.stderr.write(`orch: could not record the reminders or notes as shown (${error.message}); they will show again\n`);
+      }
+      process.exit(wakes ? 5 : done ? 0 : message || notes.length ? 6 : 3);
     }
     if (polled) {
-      const files = [...wake.files];
+      const files = [...wake.files, ...(main ? [path.join(run.dir, NOTES_FILE)] : [])];
       const pids = [];
       for (const task of tasks) {
         const dir = path.join(run.dir, "tasks", task.id);

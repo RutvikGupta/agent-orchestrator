@@ -77,6 +77,9 @@ Host-specific rules, which matter for every later step:
   that task right away (steps 5 and 6), then start `wait` again the same way while the others run.
   Never leave a finished task unreviewed until the rest are done. Never `sleep`-poll. Keep one `wait` per run, started only
   that way: never with `&`, `nohup` or `disown`, which leave a process the task-stop tool cannot stop.
+  The `Stop` hook `scripts/hooks/orch-stop.mjs` (`integrations/claude/settings.example.json`; Codex
+  0.166+ too) blocks ending your turn, once per set of items, while a question, unread result or
+  open decision waits on you (a closed task never does), or a task runs with no live `wait`.
 - **Stopping processes.** Stop a task with `$ORCH stop` or `$ORCH close`, and a background `wait`
   or `pr-watch` with the host's task-stop tool (Claude Code) or by interrupting the call (Codex).
   Never run `pkill`, `killall` or `kill $(pgrep ...)`: a pattern reaches processes you did not
@@ -459,14 +462,22 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 
 - `wait` exits 0 as soon as any task it watches has an unread result, and names it, so you review
   each result while the rest run (`--all` waits until every task has finished), and 3 when the
-  timeout passes; it exits 6 when this agent gets a new unread message during the call: read it,
-  then run the same command again. A result is unread until you run `result` on it, `close` the task, `accept` it, or
+  timeout passes; it exits 6 when this agent gets a new unread message during the call, or, in your
+  own session, when a task sent you a note with `tell` (printed): read it, then run the same
+  command again. A result is unread until you run `result` on it, `close` the task, `accept` it, or
   `resolve` its decision; a task that finished while no `wait` ran wakes the next `wait` at once.
   `result` on a task that handed back a decision marks the decision seen, and `close` on it marks
-  the decision resolved. It exits 5 as soon as a task
-  newly needs **attention**: a decision, a question, a failure, a dead or silent task, or a transient error
-  with no retries left. Handle it, then wait again; attention that was there when `wait` started is
-  listed, but does not wake it. `wait` also names the tasks ready to dispatch or awaiting review.
+  the decision resolved. It exits 5 as soon as a task newly needs **attention**: a decision, a
+  question, a failure, a dead or silent task, or a transient error with no retries left. A question
+  for you wakes every `wait` until you answer it with `send`, even one asked before the `wait`. It
+  also exits 5 when a finished task has waited `AGENT_ORCH_REVIEW_REMIND` (default 10m) with no
+  `accept`, `verdict` or `close`, once per interval per task, and prints the commands. Handle it,
+  then wait again; other attention that was there when `wait` started is listed, but does not wake it.
+  `wait` also names the tasks ready to dispatch or awaiting review.
+- **Handle each finished task in the same turn you read it:** `accept` a write task once its work
+  is committed, record `verdict changes` and resume it, or `close` it. Never leave one awaiting
+  review. Answer questions with `send`. Agents report status with `tell`, and use `ask` only for
+  decisions.
 - On POSIX with a Node version that supports `process.execve`, `wait` and `nap` spend idle
   time in a small shell. It checks watched PIDs and message/result files every second, then
   returns to Node on a change, at the deadline, or after `AGENT_ORCH_PARK_MAX` (default `30s`).
@@ -495,11 +506,15 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
   `agent:<run>/<task>` when each attempt ends: ready for review, needs a decision (with the
   questions), or failed (with the error's first line), and the `result` command. `nap`, `wait` and
   `pr-watch` wake on it (exit 6). The user's session gets none; its `wait` wakes on the result.
-- **Questions.** A running agent asks with `$ORCH ask "<question>" [--options "a|b|c"]
-  [--recommend a]` and keeps working. The question reaches the parent task's inbox, or, when the
-  parent is the user's session or will not read it, the dashboard's lane, first, as a `question`
-  that wakes `wait` (exit 5). Answer with `$ORCH send <run> <task-id> "<answer>"` (or the dashboard's box); it clears
-  as soon as a message is sent after it.
+- **Questions and notes.** A running agent asks with `$ORCH ask "<question>" [--options "a|b|c"]
+  [--recommend a]` and keeps working. The question reaches the parent task's inbox, or, in a
+  top-level run, the launching session as a `question` that wakes its `wait` (exit 5). It goes to
+  the user only with `--user`, when the parent will not read it, or once that agent is gone. Answer
+  with `$ORCH send <run> <task-id> "<answer>"`: a question clears once its own addressee answers,
+  the session with `send` or the user from the dashboard's box, and never by the other's message.
+  A session's question shown to the user, because that session is gone, clears on the user's reply. `$ORCH tell "<text>"` sends the parent a one-way note instead, such
+  as "pushed #123": into its inbox, or printed by the session's next `wait` (exit 6). It needs no
+  answer and never reaches the user.
 
 A task whose final message starts with `NEEDS DECISION:`, or whose `orch-result` block lists
 `decisions`, shows as `needs-decision` in `wait`, `status`, and the dashboard, and `result` lists
@@ -516,10 +531,10 @@ its questions. It is waiting on you, not done. For it, and for a question:
    `$ORCH ask` from a delegated agent, or as one question with your recommendation to the user.
    Keep every other task going, and pass the answer down as soon as it comes.
 
-Review a finished task and record `accept` or `verdict` right away. Never leave an agent waiting
-on your review or decision, never end your turn or report the work as done while one does, and
-never let an agent's question sit unanswered on GitHub in a reply that says "pending". Agents
-started with your host's own tool are marked the same way when they end with `NEEDS DECISION:`.
+Never leave an agent waiting on your review or decision, never end your turn or report the work as
+done while one does, and never let an agent's question sit unanswered on GitHub in a reply that
+says "pending". Agents started with your host's own tool are marked the same way when they end
+with `NEEDS DECISION:`.
 
 **Steer a running agent** instead of stopping it, for example to pass on a constraint that
 another agent just found: `$ORCH send <run> <task-id> "<message>"` (or `--file`). Add `--steer` when
@@ -555,8 +570,15 @@ whose tab was opened another way.
   server is read only with `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see
   threads another Codex process runs.
 - Its **attention lane** lists what needs someone: questions from running agents, decisions,
-  failures, results awaiting review, and silent tasks. A babysitter never awaits review. A review left waiting longer than
-  `AGENT_ORCH_REVIEW_STALE` (default 24h) leaves the lane; `recover` still lists it.
+  failures, results awaiting review, and silent tasks. An item for the agent that must act (the orch
+  task that started the task, or the session that launched a top-level run) shows muted, "for
+  <agent>", and never counts in the header's "N need attention". The user's items are usage limits,
+  `ask --user`, runs started from a terminal, and items whose agent is gone: an orch task that no
+  longer runs, or a session whose process ended or with no live `wait` on the run (parked ones
+  count) for `AGENT_ORCH_AGENT_GRACE` (default 15m, at least twice `AGENT_ORCH_PARK_MAX`). A
+  decision handed back in a top-level run goes to its session first. A babysitter never awaits
+  review. A review left waiting longer than `AGENT_ORCH_REVIEW_STALE` (default 24h) leaves the
+  lane; `recover` still lists it.
 - A running task is **stuck** when one shell command failed its last 3 runs
   (`AGENT_ORCH_STUCK_REPEATS`) with only read-only inspection, such as `cat`, `grep` or `git diff`,
   in between. Any edit, other command or success ends it. It shows in the lane, `status` and `watch`,
@@ -565,17 +587,18 @@ whose tab was opened another way.
   `dependsOn` as arrows. A dashed task is planned but not started, "×N" counts attempts, an
   outline marks attention, and "+N" counts tasks delegated to a nested run, drawn as its own graph.
   Clicking a task chooses it as its row does. `/api/state` carries each run's `graph`.
-- **Escalation.** An item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
+- **Escalation.** A user's item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
   (default 10m), or a decision or question for `AGENT_ORCH_DECISION_ESCALATE_AFTER` (default 2m,
   or the first when that is shorter; checked every tenth of the shorter, from 1 to 10 seconds),
-  goes to the user once, while
-  the dashboard runs, even with no tab open: a macOS
-  notification (`AGENT_ORCH_NOTIFY=off` turns it off), a browser notification, and the command in
-  `notify.json` under the state root (`~/.local/state/agent-orchestrator`, or `AGENT_ORCH_HOME`),
-  if that file exists: `{"command": ["/absolute/program", "arg"]}`, which gets the item as JSON
-  on stdin. A finished result nobody has collected with `result` escalates too: an orchestrator
-  that misses a finished task stalls the run. So review results as `wait` returns them, and handle
-  attention as soon as `wait` exits 5.
+  goes to the user once, while the dashboard runs, even with no tab open: a macOS notification
+  (`AGENT_ORCH_NOTIFY=off` turns it off), a browser notification, and the command in `notify.json`
+  under the state root (`~/.local/state/agent-orchestrator`, or `AGENT_ORCH_HOME`), if that file
+  exists: `{"command": ["/absolute/program", "arg"]}`, which gets the item as JSON on stdin. An
+  item for an orch task goes to that task instead, once, as an inbox message with what to do; one
+  for a session sends nothing, since its `wait` wakes on it. Once that agent is gone, or cannot take
+  the message, the item goes to the user and says so ("orchestrator session 425c2bc2 is gone (…);
+  review-me has waited 25m for review"). So review
+  results as `wait` returns them, and handle attention as soon as `wait` exits 5.
 - It also lists, as `native`, the sub-agents that the launching session or its tasks started with
   their host's own tool, and sums Codex's automatic approval reviews into one row per parent, as
   `status` and `watch` do. Other Claude Code sessions whose sub-agents ran recently get a section
