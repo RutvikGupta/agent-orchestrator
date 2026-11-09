@@ -11,6 +11,7 @@ import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, parallelAt
 import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
 import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
+import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
 import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { StartRefused, startTask } from "./start.mjs";
@@ -37,6 +38,8 @@ function uncommitted(dir, { untracked = true } = {}) {
 
 export function cmdPlan(args) {
   const run = loadRun(args._[0]);
+  // --check only validates, so anyone may run it.
+  const g = args.check ? null : guard(run, `replace the plan of run ${run.id}`, { adopt: args.adopt });
   if (!args._[1]) die("missing FILE: the plan as JSON", 2);
   const file = path.resolve(args._[1]);
   let plan;
@@ -62,7 +65,10 @@ export function cmdPlan(args) {
   }
   if (problems.length) die(`the plan has ${plural(problems.length, "problem")}:\n  - ${problems.join("\n  - ")}`);
 
-  if (!args.check) writeJson(planPath(run.dir), plan);
+  if (!args.check) {
+    writeJson(planPath(run.dir), plan);
+    recordChange(run, g, { action: "plan replaced" });
+  }
   const kept = dropped.filter((id) => rows.has(id)).map((id) => `${id} (${rows.get(id).state})`);
   // Briefs may be written after the plan is recorded (`brief` drafts them from it); `dispatch`
   // starts a task only once its brief is ready.
@@ -185,9 +191,11 @@ function briefRefusal(run, entry) {
 
 export function cmdDispatch(args) {
   const run = loadRun(args._[0]);
+  const dryRun = Boolean(args["dry-run"]);
+  // A dry run changes nothing, so anyone may look.
+  if (!dryRun) guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
   const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
   if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
-  const dryRun = Boolean(args["dry-run"]);
   const rows = listTasks(run);
   const progress = planProgress(plan, phaseMap(run, rows, plan));
   const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
@@ -275,6 +283,7 @@ export function cmdResolve(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  const g = guard(run, `resolve task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   const row = describe(run, task);
   if (row.state !== "needs-decision") die(`task ${id} is ${row.state}, not needs-decision`, 2);
   const resolved = {
@@ -282,8 +291,10 @@ export function cmdResolve(args) {
     decisionResolvedAt: new Date().toISOString(),
     decisionResolvedAttempt: row.attempt,
     decisionNote: note,
+    resolvedBy: g.actor,
   };
   saveTask(run, resolved);
+  recordChange(run, g, { task: id, attempt: row.attempt, action: "marked resolved" });
   emit(args, {
     id, decisionResolvedAt: resolved.decisionResolvedAt,
     decisionResolvedAttempt: resolved.decisionResolvedAttempt, decisionNote: note,
@@ -296,6 +307,7 @@ export function cmdAccept(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  const g = guard(run, `accept task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   const row = describe(run, task);
   if (row.state !== "completed") {
     const why = {
@@ -329,13 +341,14 @@ export function cmdAccept(args) {
   const cleanVerdict = rounds.filter((r) => r.attempt === attempt).at(-1)?.verdict === "clean";
   const accepted = {
     ...task, acceptedAt: new Date().toISOString(), acceptedAttempt: attempt, acceptedCommit: commit,
-    acceptedBy: "coordinator", acceptNote, acceptVerifications,
+    acceptedBy: "coordinator", acceptedActor: g.actor, acceptNote, acceptVerifications,
     // Accepting overrides an earlier `reject` of this attempt; reviews.jsonl keeps that round.
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
   // A different commit or attempt is new work, which no earlier integration covers.
   if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt)) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
   saveTask(run, accepted);
+  recordChange(run, g, { task: id, attempt, action: "accepted" });
   reclaimTask(run, task);
   const empty = !task.readOnly && task.worktree && commit === git(cwd, ["rev-parse", `${task.worktree.from}^{commit}`], { allowFail: true });
   emit(
@@ -364,6 +377,8 @@ export function cmdIntegrate(args) {
   const id = validTask(args._[1]);
   const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
   const dryRun = Boolean(args["dry-run"]);
+  // A dry run changes nothing, so anyone may look.
+  const g = dryRun ? null : guard(run, `integrate task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
   const row = describe(run, task);
   if (row.phase === "integrated") {
     if (!dryRun) reclaimTask(run, task);
@@ -379,7 +394,8 @@ export function cmdIntegrate(args) {
   const targetHead = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
   const record = (commit, text) => {
     if (!dryRun) {
-      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit });
+      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedBy: g.actor });
+      recordChange(run, g, { task: id, attempt: task.attempt || null, action: "integrated" });
       reclaimTask(run, task);
     }
     const ready = dryRun ? [] : readyAfter(run, id);
@@ -569,13 +585,17 @@ export function cmdRecover(args) {
       scope = "this session cannot be identified (no session id), so this covers every run active in the last 24 hours";
     }
   }
-  const reports = runs.map((run) => recoverRun(run, rowsOf(run)));
+  const reports = runs.map((run) => {
+    const own = ownershipOf(run);
+    if (own.mine) touchOwner(run); // recovering is using the run
+    return recoverRun(run, rowsOf(run), own);
+  });
   const text = reports.length ? reports.map((r) => r.text).join("\n\n") : "no runs";
   emit(args, { scope, runs: reports.map((r) => r.data) }, scope ? `${scope}\n\n${text}` : text);
 }
 
 // One run's tasks grouped by what they wait for, with the next command for each group. Reads only.
-function recoverRun(run, rows) {
+function recoverRun(run, rows, own) {
   const plan = readPlan(run.dir);
   const records = new Map(rows.map((r) => [r.id, loadTask(run, r.id)]));
   const progress = plan ? planProgress(plan, phaseMap(run, rows, plan), run.dir) : { ready: [], unbriefed: [], blocked: [], manual: [] };
@@ -665,8 +685,9 @@ function recoverRun(run, rows) {
     warnings.push(`${r.id}: its process is gone without a result (${CLI} log ${run.id} ${r.id})`);
   }
 
+  const mark = readOnlyMark(own);
   const lines = [
-    `run ${run.id}${run.goal ? `: ${run.goal}` : ""}`,
+    `run ${run.id}${run.goal ? `: ${run.goal}` : ""}${mark}`,
     `  repo ${run.repo}${run.baseBranch ? ` (base ${run.baseBranch} @ ${short(run.baseCommit)})` : ""} · ${plan ? `plan of ${plural(plan.tasks.length, "task")}` : "no plan"}`,
   ];
   for (const g of groups) {
@@ -688,6 +709,9 @@ function recoverRun(run, rows) {
       dir: run.dir,
       goal: run.goal || null,
       plan: Boolean(plan),
+      owner: launcherLabel(own.direct),
+      readOnly: Boolean(mark),
+      orphaned: own.orphaned,
       groups: {
         ...Object.fromEntries(groups.filter((g) => !["awaiting-review", "blocked"].includes(g.key)).map((g) => [g.key, ids(g.items)])),
         "awaiting-review": groups.find((g) => g.key === "awaiting-review").items.map((r) => ({ id: r.id, awaitingReviewMs: r.awaitingReviewMs })),

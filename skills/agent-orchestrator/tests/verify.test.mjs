@@ -187,8 +187,9 @@ test('verdicts record review rounds, and each attempt records why it started', a
   await f.json(['verdict', run.id, 'work', 'clean', '--reviewer', 'reviewer']);
   const rounds = lines(path.join(run.dir, 'tasks', 'work', 'reviews.jsonl'));
   assert.deepEqual(rounds.map(({ at: when, ...r }) => (assert.ok(Number.isFinite(Date.parse(when))), r)), [
-    { round: 1, attempt: 1, verdict: 'changes', note: 'handle the empty input', reviewer: 'coordinator', verifications: ['v1'] },
-    { round: 2, attempt: 2, verdict: 'clean', note: null, reviewer: 'reviewer', verifications: ['v2'] },
+    // `by` is who recorded the round: here the user at a terminal (no session variables).
+    { round: 1, attempt: 1, verdict: 'changes', note: 'handle the empty input', reviewer: 'coordinator', verifications: ['v1'], by: 'user (terminal)' },
+    { round: 2, attempt: 2, verdict: 'clean', note: null, reviewer: 'reviewer', verifications: ['v2'], by: 'user (terminal)' },
   ]);
   const row = await rowOf(f, run, 'work');
   assert.deepEqual(row.reviewRounds.map((r) => [r.round, r.verdict, r.reviewer]), [[1, 'changes', 'coordinator'], [2, 'clean', 'reviewer']]);

@@ -11,6 +11,7 @@
 // commands live in lib/commands/, the shared modules in lib/, and the dashboard page in dashboard/.
 
 import { STATE_ROOT } from "./lib/config.mjs";
+import { gateCommand } from "./lib/ownership.mjs";
 import { die, parseArgs } from "./lib/util.mjs";
 import { cmdHeavy } from "./lib/commands/heavy.mjs";
 import { cmdReclaim } from "./lib/commands/reclaim.mjs";
@@ -180,43 +181,50 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --once prints the current state and marks nothing as seen
 
 RUN may be a run id, a run directory, or "latest". State lives in ${STATE_ROOT}.
-Text after "--" is passed to the relay unchanged (for example: -- --session <id>).`;
+Text after "--" is passed to the relay unchanged (for example: -- --session <id>).
+
+Ownership: every command that changes a run acts only on runs the calling session launched, or
+their nested runs; reading (status, wait, result, log, recover, inbox, send without --steer, and
+dry runs) is open to anyone. Another session's run is refused (exit 4, nothing changed): ask its
+owner. A run launched from a terminal is the user's. The user at a terminal and the dashboard may
+act on any run, and the owner is told. When every owner of a run has gone and it has been unused
+for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.`;
 
 const [command, ...rest] = process.argv.slice(2);
 const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
-  worktree: { value: ["from", "branch", "path"], bool: ["no-prep"] },
-  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish"] },
+  worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
+  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
   wait: { value: ["timeout"], bool: ["any", "all"] },
   result: {},
   log: { value: ["lines"] },
-  stop: {},
-  close: { bool: ["all"] },
-  cleanup: { bool: ["force", "delete-branches"] },
+  stop: { bool: ["adopt"] },
+  close: { bool: ["all", "adopt"] },
+  cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },
   "pr-watch": { value: ["repo", "timeout", "interval"], bool: ["once"] },
-  brief: { value: ["type", "out"], bool: ["force", "read-only"] },
-  send: { value: ["file"], bool: ["steer"] },
+  brief: { value: ["type", "out"], bool: ["force", "read-only", "adopt"] },
+  send: { value: ["file"], bool: ["steer", "adopt"] },
   nap: {},
   heavy: { value: ["label"] },
   reclaim: { bool: ["dry-run"] },
-  steer: {},
+  steer: { bool: ["adopt"] },
   inbox: { bool: ["ack", "all"] },
   reply: { value: ["to", "file"] },
   ask: { value: ["options", "recommend"] },
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
-  plan: { bool: ["check"] },
-  dispatch: { value: ["max"], bool: ["dry-run"] },
-  accept: { value: ["commit", "note"] },
-  verify: { value: ["timeout"] },
-  verdict: { value: ["note", "reviewer"] },
-  resolve: { value: ["note"] },
-  integrate: { value: ["into"], bool: ["dry-run"] },
+  plan: { bool: ["check", "adopt"] },
+  dispatch: { value: ["max"], bool: ["dry-run", "adopt"] },
+  accept: { value: ["commit", "note"], bool: ["adopt"] },
+  verify: { value: ["timeout"], bool: ["adopt"] },
+  verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
+  resolve: { value: ["note"], bool: ["adopt"] },
+  integrate: { value: ["into"], bool: ["dry-run", "adopt"] },
   recover: { bool: ["all"] },
 };
 const handlers = {
@@ -263,5 +271,8 @@ if (command === "wait" && rest.includes("--help")) {
 } else if (!handlers[command]) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
-  await handlers[command](parseArgs(rest, specs[command]));
+  const args = parseArgs(rest, specs[command]);
+  // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
+  gateCommand(command, args);
+  await handlers[command](args);
 }

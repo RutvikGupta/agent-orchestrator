@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CLI_PATH, SKILL_DIR } from "../config.mjs";
+import { guard, recordChange } from "../ownership.mjs";
 import { loadRun, loadTask, validTask } from "../runs.mjs";
 import { die, emit, git } from "../util.mjs";
 import { recipeFor, readLessons } from "../lessons.mjs";
@@ -45,6 +46,7 @@ const codes = (items) => items.map(code).join(", ");
 export function cmdBrief(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
+  const g = guard(run, `write a brief in run ${run.id}`, { adopt: args.adopt, refused: [id] });
   const plan = loadPlan(run);
   const entry = plan?.tasks.find((t) => t?.id === id) || null;
   const type = args.type || (TYPES.includes(entry?.type) ? entry.type : null) || die(`--type is required: ${TYPES.join(", ")}`, 2);
@@ -76,6 +78,7 @@ export function cmdBrief(args) {
   });
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
+  recordChange(run, g, { task: id, action: "brief written" });
 
   const markers = text.split(MARKER).length - 1;
   const source = entry ? "goal and scope from plan.json" : `not in ${plan ? "plan.json" : "a plan"}: fill in its goal and scope`;

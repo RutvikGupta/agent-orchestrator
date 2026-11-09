@@ -7,6 +7,7 @@ import { compact, formatElapsed, shortText } from "../format.mjs";
 import { verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
 import { endPark } from "../park.mjs";
+import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { describe, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
@@ -65,12 +66,14 @@ export function cmdResult(args) {
   const d = describe(run, task);
   // Collecting a finished task's result closes it; resuming the task opens it again. A task that
   // handed back a decision stays open until it is resumed, resolved or closed, but reading it
-  // marks the decision seen, so `wait` stops waking for it.
-  if (!["running", "prepared", "needs-decision"].includes(d.state) && !task.closedAt) {
+  // marks the decision seen, so `wait` stops waking for it. That is the owner's to do: for anyone
+  // else `result` only reads, and the owner's `wait` still wakes for the task.
+  const mine = ownershipOf(run).mine;
+  if (mine && !["running", "prepared", "needs-decision"].includes(d.state) && !task.closedAt) {
     saveTask(run, { ...task, closedAt: new Date().toISOString() });
     reclaimTask(run, task);
   }
-  if (d.state === "needs-decision" && task.decisionSeenAttempt !== d.attempt) saveTask(run, { ...task, decisionSeenAttempt: d.attempt });
+  if (mine && d.state === "needs-decision" && task.decisionSeenAttempt !== d.attempt) saveTask(run, { ...task, decisionSeenAttempt: d.attempt });
   const r = d.result;
   const session = d.session;
   const lines = [
@@ -109,16 +112,19 @@ export function cmdStop(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   let task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  const g = guard(run, `stop task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
+  const stopped = () => recordChange(run, g, { task: id, attempt: task.attempt || null, action: "stopped" });
   // A parked babysitter has no relay. Mark it stopped first, so that a resume that has not started
   // its relay yet starts nothing and one that has keeps the stop; then end its park, stopping its
   // watcher and any relay a resume started.
   if (isParked(run, task)) {
-    saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString() });
+    saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
     const parked = endPark(run, task, "stop");
     parked?.ended?.();
     const latest = loadTask(run, id) || task;
     if (latest.attempt === task.attempt || !relayAlive(latest.pid)) {
       const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
+      stopped();
       process.stdout.write(`stopped parked ${id}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
       return;
     }
@@ -126,7 +132,8 @@ export function cmdStop(args) {
   }
   if (!relayAlive(task.pid)) die(`task ${id} is not running`);
   // Recorded on the task, whatever its attempt: a babysitter stopped as it ends parked never parks.
-  if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString() });
+  if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
+  stopped();
   try {
     process.kill(-task.pid, "SIGTERM"); // detached → the relay leads its own process group
   } catch {
@@ -137,21 +144,29 @@ export function cmdStop(args) {
 }
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark
-// them closed.
+// them closed. A run has one owner, so a refused close closes none of them and lists them all.
 export function cmdClose(args) {
   const run = loadRun(args._[0]);
-  const ids = args.all ? listTasks(run).map((t) => t.id) : args._.slice(1).map(validTask);
+  const rows = args.all ? listTasks(run) : null;
+  const ids = rows ? rows.map((t) => t.id) : args._.slice(1).map(validTask);
   if (!ids.length) die("name the tasks to close, or pass --all", 2);
+  const tasks = ids.map((id) => loadTask(run, id) || die(`no task ${id} in run ${run.id}`));
+  const g = guard(run, `close ${args.all ? "every task" : ids.length === 1 ? `task ${ids[0]}` : "tasks"} of run ${run.id}`, {
+    adopt: args.adopt,
+    refused: () => (rows || tasks.map((task) => describe(run, task))).map((r) => `${r.id} (${r.phase === "parked" ? "parked" : r.state})`),
+  });
   const lines = [];
-  for (const id of ids) {
-    const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
-    lines.push(`${id}: ${closeTask(run, task)}`);
+  for (const task of tasks) {
+    // A task that was closed already keeps who closed it: closing it again changes nothing.
+    lines.push(`${task.id}: ${closeTask(run, task, task.closedAt ? {} : { closedBy: g.actor })}`);
+    // The owner hears of a task that was open; one it had closed already changed nothing.
+    if (!task.closedAt) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
   emit(args, { run: run.id, closed: ids }, lines.join("\n"));
 }
 
-// Close one task: stop it if it still runs, and record closedAt, plus `extra` fields (a `reject`
-// verdict adds its own). Returns what happened, in words.
+// Close one task: stop it if it still runs, and record closedAt, plus `extra` fields (closedBy, the
+// actor; a `reject` verdict adds its own). Returns what happened, in words.
 export function closeTask(run, task, extra = {}) {
   let note = "closed";
   const now = new Date().toISOString();

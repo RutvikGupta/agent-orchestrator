@@ -26,11 +26,12 @@ const sectionOf = (state, run) => state.find((s) => s.runs.some((r) => r.id === 
 
 // Right after `start`, before `ps` shows the new relay, a busy machine can read the task as aborted.
 // Once its result exists it never does, so wait for the result before waiting for the finished state.
-async function finish(f, run, id, { config = {}, collect = false } = {}) {
+// `env` is the identity that collects the result: only the run's owner closes a task with `result`.
+async function finish(f, run, id, { config = {}, collect = false, env = {} } = {}) {
   const task = await f.start(run, id, { config });
   await eventually(() => fs.existsSync(path.join(task.outDir, 'result.json')), `${id} wrote no result`);
   await f.finished(run, id);
-  if (collect) await f.command(['result', run.id, id]);
+  if (collect) await f.command(['result', run.id, id], { env });
 }
 // `dashboard` reuses one that is serving, so stop it before starting one with other settings.
 async function restart(f, board) {
@@ -70,17 +71,17 @@ test('rows quiet for an hour are flagged older, whole subtrees at a time; runnin
   // Run A, launched by a Claude session with native sub-agents. Run B hangs under A's task `lead`,
   // and run C under A's task `lead-quiet`, as runs started by those tasks would.
   const a = await f.newRun('a');
-  f.launchingSession(a, 'session-declutter');
+  const owner = f.launchingSession(a, 'session-declutter'); // owns A, and B and C under it
   const transcripts = claudeTranscripts(f, 'session-declutter');
   const b = await f.newRun('b');
   const c = await f.newRun('c');
   editRun(b, { orchestrator: { agent: 'delegated-agent', sessionId: null, parentRun: a.id, parentTask: 'lead' } });
   editRun(c, { orchestrator: { agent: 'delegated-agent', sessionId: null, parentRun: a.id, parentTask: 'lead-quiet' } });
-  for (const id of ['fresh', 'lead', 'lead-quiet']) await finish(f, a, id, { collect: true });
+  for (const id of ['fresh', 'lead', 'lead-quiet']) await finish(f, a, id, { collect: true, env: owner });
   await finish(f, a, 'old-review', { config: { finalMessage: 'Parser fixed.' } }); // awaits review
-  await finish(f, b, 'child-fresh', { collect: true });
-  await finish(f, b, 'child-old', { collect: true });
-  await finish(f, c, 'grandchild', { collect: true });
+  await finish(f, b, 'child-fresh', { collect: true, env: owner });
+  await finish(f, b, 'child-old', { collect: true, env: owner });
+  await finish(f, c, 'grandchild', { collect: true, env: owner });
   for (const [run, id] of [[a, 'lead'], [a, 'lead-quiet'], [a, 'old-review'], [b, 'child-old'], [c, 'grandchild']]) backdate(run, id, 90 * MIN);
   // The session and two of its native sub-agents went quiet hours ago.
   const old = new Date(Date.now() - 3 * HOUR);

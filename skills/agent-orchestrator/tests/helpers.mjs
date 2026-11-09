@@ -143,10 +143,12 @@ export async function fixture(t) {
       return pending;
     },
     // The CLI discovers the launching session by inspecting ancestors. Seed only that
-    // external metadata so transcript tests work in terminal, Codex, Claude, and CI alike.
+    // external metadata so transcript tests work in terminal, Codex, Claude, and CI alike. Returns
+    // that session's environment: commands run with it act as the run's owner, whatever the host.
     launchingSession(run, sessionId, agent = 'claude') {
       const file = path.join(run.dir, 'run.json');
       writeJson(file, { ...readJson(file), orchestrator: { agent, sessionId } });
+      return { CLAUDE_CODE_SESSION_ID: sessionId, CODEX_THREAD_ID: sessionId };
     },
     async dashboard() {
       const probe = net.createServer();

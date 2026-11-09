@@ -13,6 +13,7 @@ import { eventLog, transcriptLog } from "./event-log.mjs";
 import { createEscalator, escalationCheckMs } from "./escalate.mjs";
 import { codexLimits, limitsText } from "./limits.mjs";
 import { SendError, deliverMessage, steerQueued } from "./commands/inbox.mjs";
+import { DASHBOARD_CALLER } from "./ownership.mjs";
 import { watchExternalAgents } from "./external.mjs";
 import { loadTask, readProcessesInBackground } from "./runs.mjs";
 import { readVendorStatusInBackground } from "./vendor-status.mjs";
@@ -240,7 +241,8 @@ export async function serveDashboard({ host, port, args }) {
         if (typeof runId !== "string" || typeof taskId !== "string" || !/^\w[\w.-]*$/.test(runId) || !TASK_ID.test(taskId)) return reply(400, { error: "bad run or task" });
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return reply(404, { error: "unknown run" });
-        const result = steerQueued({ ...readJson(path.join(dir, "run.json")), dir }, taskId);
+        // The user's click: the user may steer any session's task (ownership.mjs).
+        const result = steerQueued({ ...readJson(path.join(dir, "run.json")), dir }, taskId, { caller: DASHBOARD_CALLER });
         notify();
         return reply(200, result);
       } catch (error) {
@@ -291,7 +293,7 @@ export async function serveDashboard({ host, port, args }) {
         }
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return reply(404, { error: "unknown run" });
-        const { message, delivery, reaches, steer } = deliverMessage({ ...readJson(path.join(dir, "run.json")), dir }, taskId, text, { from: "user", images, steer: body.steer === true });
+        const { message, delivery, reaches, steer } = deliverMessage({ ...readJson(path.join(dir, "run.json")), dir }, taskId, text, { from: "user", images, steer: body.steer === true, caller: DASHBOARD_CALLER });
         notify();
         return reply(200, { id: message.id, time: message.time, attempt: message.attempt, images: message.images || [], delivery, reaches, steer });
       } catch (error) {
