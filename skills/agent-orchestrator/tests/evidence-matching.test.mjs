@@ -116,6 +116,11 @@ test('command identity preserves validation, mutation and selection flags in bot
     ['pytest tests/', 'pytest -k one tests/'], ['pytest tests/', 'pytest --keyword=one tests/'],
     ['node --test tests/a.mjs', 'node --test --test-name-pattern=one tests/a.mjs'],
     ['pytest tests/', 'pytest --ignore tests/integration tests/'],
+    // Flags that rerun only part of the work, or run none of it.
+    ['pytest tests/', 'pytest --lf tests/'], ['pytest tests/', 'pytest --collect-only tests/'],
+    ['pytest tests/', 'pytest --sw tests/'], ['cargo test', 'cargo test --no-run'],
+    ['go test ./...', 'go test -run=One ./...'], ['terraform fmt', 'terraform fmt -check'],
+    ['git diff', 'git diff --cached'], ['gofmt .', 'gofmt -w .'], ['gofmt -l .', 'gofmt -w .'],
   ]) {
     assert.equal(match(base, changed).ran, false, `${base} versus ${changed}`);
     assert.equal(match(changed, base).ran, false, `${changed} versus ${base}`);

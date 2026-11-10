@@ -384,7 +384,7 @@ function matchingRuns(run, cwd) {
 }
 
 // Ignore neutral flags, but keep options that select work, validate it, or mutate it.
-const PROOF_FLAGS = new Set(["-k", "-m", "-c", "-e", "--keyword", "--markers", "--check", "--exit-code", "--fix", "--write", "--dry-run", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--exclude-dir", "--include", "--config", "--test", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--filter", "--path", "--paths", "--file", "--files", "--repo", "-R", "--git-dir", "--work-tree", "-C", "-G", "-S", "--version"]);
+const PROOF_FLAGS = new Set(["--lf", "--last-failed", "--sw", "--stepwise", "--collect-only", "--co", "--no-run", "-check", "--cached", "--staged", "--all-files", "-run", "--lib", "--bin", "-k", "-m", "-c", "-e", "--keyword", "--markers", "--check", "--exit-code", "--fix", "--write", "--dry-run", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--exclude-dir", "--include", "--config", "--test", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--filter", "--path", "--paths", "--file", "--files", "--repo", "-R", "--git-dir", "--work-tree", "-C", "-G", "-S", "--version"]);
 const PYTEST_VALUES = new Set(["-k", "-m", "-c", "-p", "-n", "--keyword", "--markers", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--include", "--config", "--tb", "--color", "--capture", "--maxfail", "--durations", "--log-level", "--junitxml", "--basetemp", "--rootdir", "--confcutdir"]);
 const PROGRAM_VALUES = {
   node: new Set(["-e", "--eval", "-p", "--print", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination", "--test-concurrency"]),
@@ -418,6 +418,8 @@ function identity(key) {
     const protectedFlag = PROOF_FLAGS.has(option)
       || (program === "git" && words[1] === "diff" && ["-q", "--quiet"].includes(option))
       || (program === "git" && words[1] === "apply" && option === "--stat")
+      // gofmt's -l and -d only report, where -w rewrites: none of them stands in for another.
+      || (program === "gofmt" && ["-w", "-l", "-d"].includes(option))
       || (program === "node" && (["-v", "-p", "--print", "--eval"].includes(option) || (!words.includes("--test") && option === "--test-reporter")));
     const value = attached !== undefined ? attached
       : flagTakesValue(program, option) && words[i + 1] !== undefined ? words[++i] : undefined;
