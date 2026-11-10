@@ -318,3 +318,20 @@ test('a delegated agent cannot start a reviewer on a stronger tier than its own'
   const light = await f.json(['review', run.id, 'small', '--tier', 'light'], { env: as });
   assert.deepEqual([light.review, light.agent, light.tier], ['review-small', 'claude', 'light']);
 });
+
+test('a second rework of a Codex task moves it one tier up, as start does for any follow-up', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'work', { agent: 'codex' });
+  await f.finished(run, 'work');
+  const finding = 'a.mjs:2 (high): crashes on null.';
+  for (const [n, name] of [[1, 'look-1'], [2, 'look-2']]) {
+    await f.start(run, name, { flags: ['--read-only'], config: { finalMessage: `1. ${finding}\n\n${block([finding])}` } });
+    await f.finished(run, name);
+    await f.command(['rework', run.id, 'work', '--from', name]);
+    await f.finished(run, 'work');
+    const saved = readJson(f.taskFile(run, 'work'));
+    // One `changes` round keeps the tier; the second is the second counted failure.
+    assert.deepEqual([saved.attempt, saved.tier], [n + 1, n === 1 ? 'standard' : 'strong'], `after rework ${n}`);
+  }
+});

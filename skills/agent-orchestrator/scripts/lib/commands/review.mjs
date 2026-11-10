@@ -731,9 +731,10 @@ export function cmdRework(args) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, reworkBrief({ run, author, reviewer, rrow, reviewed, message, unresolved, other, note }));
 
-  // --tier passes through to `start`. A Codex task names its tier on every start; a Claude one keeps
-  // its own unless told. A new tier needs a reason: --why, or else the facts of this rework.
-  const tier = args.tier || (author.agent === "codex" ? author.tier : undefined);
+  // --tier passes through to `start`. Without it `start` chooses: the task keeps its tier, on either
+  // agent, until two counted failures move it one tier up. A new tier needs a reason: --why, or else
+  // the facts of this rework.
+  const tier = args.tier || undefined;
   const why = args.why ?? (args.tier && args.tier !== author.tier ? `rework of ${reviewer.id}'s findings on attempt ${reviewed}, which ran the ${author.tier || "default"} tier, at the ${args.tier} tier` : undefined);
   let started;
   try {
