@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fixture, readJson, writeJson } from './helpers.mjs';
-import { boundedModel, ceilingEnv, ceilingFor, modelExceedsCeiling } from '../scripts/lib/policy.mjs';
+import { boundedModel, ceilingEnv, ceilingFor, lowerEffort, modelExceedsCeiling } from '../scripts/lib/policy.mjs';
 
 const policy = readJson(new URL('../policy.json', import.meta.url));
 const keys = ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL', 'AGENT_ORCH_MAX_TIER', 'AGENT_ORCH_MAX_MODEL_CLAUDE', 'AGENT_ORCH_MAX_MODEL_CODEX',
@@ -134,7 +134,7 @@ test('higher ceilings preserve lighter model, subagent and effort choices withou
   assert.equal(vars.ANTHROPIC_DEFAULT_MODEL, policy.claude.tiers.light.model);
   assert.equal(vars.ANTHROPIC_DEFAULT_OPUS_MODEL, policy.claude.tiers.light.model);
   assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL, policy.claude.tiers.light.model);
-  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, null);
+  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1', 'the user\'s own force setting passes through');
   assert.equal(vars.CLAUDE_CODE_EFFORT_LEVEL, 'low');
   assert.equal(vars.CLAUDE_CODE_SUBAGENT_EFFORT, 'low');
 });
@@ -215,7 +215,7 @@ test('command ceilings include agent-env values without raising its cheaper choi
   assert.equal(capped.ANTHROPIC_DEFAULT_OPUS_MODEL, policy.claude.tiers.standard.model);
   assert.equal(capped.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
   assert.equal(capped.CLAUDE_CODE_SUBAGENT_EFFORT, 'medium');
-  assert.equal(capped.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, null);
+  assert.equal(capped.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1', 'the user\'s own force setting passes through');
   writeJson(file, {
     ANTHROPIC_MODEL: policy.claude.tiers.light.model,
     CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.light.model,
@@ -270,4 +270,13 @@ test('modeled effort ceilings also lower native overrides from the merged enviro
   } });
   await f.finished(run, 'native-overrides');
   assert.deepEqual(readJson(seen), { lead: 'medium', child: 'medium' });
+});
+
+test('an effort level the cap does not know is lowered to the cap, and a known one at or below it is kept', () => {
+  assert.equal(lowerEffort('ultracode', 'medium'), 'medium');
+  assert.equal(lowerEffort('auto', 'high'), 'high');
+  assert.equal(lowerEffort('low', 'medium'), 'low');
+  assert.equal(lowerEffort('xhigh', 'medium'), 'medium');
+  assert.equal(lowerEffort('ultracode', null), 'ultracode', 'no cap, no change');
+  assert.equal(ceilingEnv('standard', { CLAUDE_CODE_EFFORT_LEVEL: 'ultracode', AGENT_ORCH_MAX_EFFORT: 'medium' }).CLAUDE_CODE_EFFORT_LEVEL, 'medium');
 });

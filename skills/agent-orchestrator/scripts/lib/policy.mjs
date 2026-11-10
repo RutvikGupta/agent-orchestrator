@@ -229,6 +229,9 @@ export const lowerEffort = (wanted, cap) => {
   if (!cap) return wanted;
   if (!effortLevels.includes(cap)) refuse(`unknown effort ceiling "${cap}"`);
   if (!wanted) return cap;
+  // A level this list does not know, such as one a newer CLI adds, cannot be shown to be at or
+  // below the cap, so the cap replaces it.
+  if (!effortLevels.includes(wanted)) return cap;
   return effortLevels.indexOf(wanted) > effortLevels.indexOf(cap) ? cap : wanted;
 };
 
@@ -285,6 +288,5 @@ export function ceilingEnv(name, env = process.env) {
     AGENT_ORCH_MAX_MODEL_CODEX: cap.codex.model,
     AGENT_ORCH_MAX_EFFORT: effort || "",
     ...lowered,
-    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: undefined,
   };
 }
