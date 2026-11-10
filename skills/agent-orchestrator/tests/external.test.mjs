@@ -1,3 +1,5 @@
+import { readPolicy } from '../scripts/lib/policy.mjs';
+import { foldCommandAgents } from '../scripts/lib/dashboard-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -787,7 +789,7 @@ test('an agent a command task runs directly is named for itself, not for the orc
 test('a command task shows the agent its command runs in its own row: its model, tokens, activity and log, with no row under it', async (t) => {
   const { f, fakes } = await setup(t);
   const run = await f.newRun();
-  await f.command(['start', run.id, 'review', '--agent', 'command', '--why', 'runs a review script', '--', 'sleep', '60']);
+  await f.command(['start', run.id, 'review', '--agent', 'command', '--why', 'runs a review script', '--max-tier', 'standard', '--', 'sleep', '60']);
   transcript(f, 'cmd-agent', false, 'claude-fable-5-2');
   fakes.start(fakes.session('cmd-shell', 'claude', [
     fakes.script(`${SKILL}/standards_review.sh`, fakes.claude('inner', 'cmd-agent', { env: innerEnv(run, 'review') })),
@@ -804,7 +806,8 @@ test('a command task shows the agent its command runs in its own row: its model,
   assert.deepEqual(ours.map((r) => r.id), ['review'], 'one row: the agent has none of its own');
   assert.deepEqual([row.agent, row.model, row.modelLabel, row.state, row.kids], ['command', 'claude-fable-5-2', 'fable-5-2', 'running', 0]);
   assert.deepEqual({ in: row.tokensIn, out: row.tokensOut, steps: row.steps }, { in: 10, out: 5, steps: 1 });
-  assert.equal(row.now, 'Read README.md', 'the agent\'s activity while the command runs');
+  assert.equal(row.maxTier, 'standard');
+  assert.equal(row.now, 'Read README.md · ⚠ standards-review (claude claude-fable-5-2) exceeds the standard ceiling');
   assert.deepEqual(row.runs.map((a) => [a.kind, a.modelLabel, a.state, a.session]), [['claude -p', 'fable-5-2', 'running', 'cmd-agent']]);
   assert.match(row.agentLog, /cmd-agent\.jsonl$/);
   assert.deepEqual((await board.json(`/api/transcript?file=${encodeURIComponent(row.agentLog)}`)).events.map((e) => [e.kind, e.text]), [['user', 'Review the change.'], ['tool', 'Read README.md']]);
@@ -1054,4 +1057,45 @@ test('a task\'s activity is its own whatever its latest event is, and its agent\
   }
   for (const task of Object.values(tasks)) f.release(task);
   for (const id of ids) await f.finished(run, id);
+});
+
+test('folded command agent ceiling warnings distinguish above, equal, below, and no ceiling', () => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'standard', attempt: 1 };
+  const child = (id, model) => ({ run: 'r', id, parent: 'work', taskAgent: true, agent: 'claude', model, state: 'running', taskAttempt: 1 });
+  const rows = [task, child('above', 'claude-opus-5-5'), child('equal', 'claude-sonnet-5-5'), child('below', 'claude-haiku-5-5')];
+  assert.equal(foldCommandAgents(rows)[0].now, '⚠ above (claude claude-opus-5-5) exceeds the standard ceiling');
+  assert.equal(foldCommandAgents([{ ...task, maxTier: undefined }, ...rows.slice(1)])[0].now, undefined);
+});
+
+test('folded command warnings include native descendants and unrecognized models', () => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'standard' };
+  const external = { run: 'r', id: 'outer', parent: 'work', taskAgent: true, agent: 'claude', model: 'claude-sonnet-5-5' };
+  const native = { run: 'r', id: 'native', parent: 'outer', native: true, agent: 'claude', model: 'claude-opus-5-5' };
+  const descendant = { run: 'r', id: 'nested', parent: 'native', native: true, agent: 'claude', model: 'future-model' };
+  const result = foldCommandAgents([task, descendant, native, external]);
+  assert.match(result[0].now, /native \(claude claude-opus-5-5\) exceeds the standard ceiling/);
+  assert.match(result[0].now, /nested \(claude future-model\) unrecognized model/);
+  assert.equal(result.find((r) => r.id === 'native').parent, 'work');
+});
+
+test('folded command warnings check native rows sharing an id', () => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'standard' };
+  const lead = { run: 'r', id: 'outer', parent: 'work', taskAgent: true, agent: 'claude', model: 'claude-sonnet-5-5' };
+  const native = { run: 'r', id: 'same', parent: 'outer', native: true, agent: 'claude' };
+  const result = foldCommandAgents([task, lead, { ...native, model: 'claude-haiku-5-5' }, { ...native, model: 'claude-opus-5-5' }]);
+  assert.equal(result[0].now, '⚠ same (claude claude-opus-5-5) exceeds the standard ceiling');
+});
+
+test('stale ceilings and invalid policy do not fail the board', (t) => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'removed' };
+  const agent = { run: 'r', id: 'outer', parent: 'work', taskAgent: true, agent: 'claude', model: 'claude-opus-5-5' };
+  assert.doesNotThrow(() => foldCommandAgents([task, agent]));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-policy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'policy.json');
+  for (const contents of ['{bad json', '{}']) {
+    fs.writeFileSync(file, contents);
+    assert.throws(() => readPolicy(file), /invalid/);
+    assert.doesNotThrow(() => foldCommandAgents([{ ...task, maxTier: 'standard' }, agent], () => readPolicy(file)));
+  }
 });

@@ -13,7 +13,7 @@ import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
@@ -105,16 +105,31 @@ function callerTier() {
   if (!record) return null;
   const agent = attemptAgent(record, record.attempt) || record.agent;
   const tier = record.tier || (agent === "claude" ? CLAUDE_DEFAULT_TIER : null);
-  return agent === COMMAND_AGENT || !tier ? null : { run: runId, task: taskId, agent, tier };
+  return agent === COMMAND_AGENT || !tier ? null : { run: runId, task: taskId, agent, tier, effort: record.effort || null };
 }
 
 // A delegated agent never starts a stronger model than its own: it was given its task at a tier
 // chosen for that task, and handing the work to a stronger model defeats that choice. A babysitter's
-// tier is fixed by policy, so it is not checked.
-function refuseStronger(key, tier) {
-  const own = callerTier();
-  if (!own || !strongerThan({ agent: key, tier }, own)) return;
-  refuse(`refusing: this command runs in task ${own.run}/${own.task}, on ${tierText(own.agent, own.tier)}, and ${tierText(key, tier)} is stronger. A delegated agent never starts a stronger model than its own. Do the work at your tier, split it into pieces at your tier or lighter, or ask your orchestrator with \`node ${CLI_PATH} ask "<why it needs a stronger model>"\` (or end with NEEDS DECISION:) so it chooses.`, 2);
+// tier is fixed by policy, so only an inherited ceiling is checked for it.
+function refuseStronger(key, tier, ignoreCaller = false) {
+  try {
+    const own = ignoreCaller ? null : callerTier();
+    if (own) callerCeiling(own); // A stale caller must not turn the guard off.
+    const inherited = process.env.AGENT_ORCH_MAX_TIER;
+    const cap = inherited === undefined ? null : ceilingFor(inherited);
+    const bounds = [own, cap && {
+      agent: "claude", tier: cap.tier,
+      run: process.env.AGENT_ORCH_RUN || "environment",
+      task: process.env.AGENT_ORCH_TASK || "ceiling",
+    }].filter(Boolean);
+    for (const bound of bounds) {
+      if (!strongerThan({ agent: key, tier }, bound)) continue;
+      refuse(`refusing: this command runs in task ${bound.run}/${bound.task}, on ${tierText(bound.agent, bound.tier)}, and ${tierText(key, tier)} is stronger. A delegated agent never starts a stronger model than its own. Do the work at your tier, split it into pieces at your tier or lighter, or ask your orchestrator with \`node ${CLI_PATH} ask "<why it needs a stronger model>"\` (or end with NEEDS DECISION:) so it chooses.`, 2);
+    }
+  } catch (error) {
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
 }
 
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
@@ -128,6 +143,7 @@ export function startTask(args, extra = {}) {
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
   if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
+  if (args["max-tier"] !== undefined) refuse("--max-tier applies to --agent command only", 2);
   if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
   if (!args.brief) refuse("--brief FILE is required", 2);
   const briefSource = path.resolve(args.brief);
@@ -155,13 +171,16 @@ export function startTask(args, extra = {}) {
   let choice;
   try {
     choice = modelFor(key, tierArgs, babysit ? null : prevTier);
+    if (process.env.AGENT_ORCH_MAX_EFFORT !== undefined) {
+      choice.effort = lowerEffort(choice.effort, process.env.AGENT_ORCH_MAX_EFFORT);
+    }
   } catch (error) {
     // A refused start, not an exit: `dispatch` goes on with its other tasks.
     if (error instanceof ModelRefused) refuse(error.message, error.code);
     throw error;
   }
   const { tier, model, effort } = choice;
-  if (!babysit) refuseStronger(key, tier);
+  refuseStronger(key, tier, babysit);
   if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
@@ -199,6 +218,17 @@ export function startTask(args, extra = {}) {
 
   checkSlots(run, id, args, cd, { writes: !args["read-only"] });
   const agentEnv = readAgentEnv();
+  // Claude's effort environment overrides --effort, including values from agent-env.json.
+  // Lower those overrides too, so the relay's bounded choice remains effective.
+  if (process.env.AGENT_ORCH_MAX_EFFORT !== undefined) {
+    for (const name of ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SUBAGENT_EFFORT"]) {
+      const inherited = agentEnv[name] ?? process.env[name];
+      if (inherited) {
+        const bounded = lowerEffort(inherited, process.env.AGENT_ORCH_MAX_EFFORT);
+        if (bounded !== inherited) agentEnv[name] = bounded;
+      }
+    }
+  }
 
   // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
   // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
@@ -392,6 +422,21 @@ function startCommand(run, id, args, extra) {
     if (error instanceof ModelRefused) refuse(error.message, error.code);
     throw error;
   }
+  const agentEnv = readAgentEnv();
+  const inheritedEnv = { ...process.env, ...agentEnv };
+  let maxTier, defaults;
+  try {
+    const own = callerTier();
+    maxTier = lowerCeiling(args["max-tier"] ?? prev.maxTier, process.env.AGENT_ORCH_MAX_TIER, callerCeiling(own));
+    defaults = ceilingEnv(maxTier, inheritedEnv);
+    if (own?.effort) defaults = ceilingEnv(maxTier, {
+      ...inheritedEnv,
+      AGENT_ORCH_MAX_EFFORT: lowerEffort(defaults.AGENT_ORCH_MAX_EFFORT, own.effort),
+    });
+  } catch (error) {
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
   const { argv, done, timeout, reused } = commandOf(args, prev);
   if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
@@ -403,8 +448,6 @@ function startCommand(run, id, args, extra) {
     (sameAgent ? prev.why : null) ||
     refuse("--why is required: one line on why this work runs as a command with no model watching it (see SKILL.md, \"Choose the agent and model\")", 2);
   checkSlots(run, id, args, cd, { writes: false });
-  const agentEnv = readAgentEnv();
-
   const attempt = (prev.attempt || 0) + 1;
   const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
   const attemptReason = extra.attemptReason
@@ -427,6 +470,7 @@ function startCommand(run, id, args, extra) {
     // The row's title is the command, unless --title names it.
     title: args.title ?? (sameAgent && reused ? prev.title : null) ?? line,
     command: argv,
+    maxTier,
     doneMarker: done,
     commandTimeout: timeout,
     relay: COMMAND_RELAY,
@@ -453,7 +497,7 @@ function startCommand(run, id, args, extra) {
     resumedBy: null,
     ...extra,
   };
-  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, agentEnv);
+  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
   task.pid = child.pid;
   saveTask(run, task);
   if (startedBy) watchForFinish(run, task);
