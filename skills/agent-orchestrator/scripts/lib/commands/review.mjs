@@ -174,21 +174,21 @@ function parseNumstat(out) {
   return files;
 }
 
-// The lines of a new file, as `git diff` would count them; a binary file has none.
+// The lines of a new file, as `git diff` would count them (a binary file has none), and its size.
 function countLines(file) {
   let buf;
   try {
     const st = fs.lstatSync(file);
-    if (!st.isFile()) return { lines: 1, binary: false }; // a symbolic link's diff is its target
+    if (!st.isFile()) return { lines: 1, binary: false, bytes: 0 }; // a symbolic link's diff is its target
     buf = fs.readFileSync(file);
   } catch {
-    return { lines: 0, binary: false };
+    return { lines: 0, binary: false, bytes: 0 };
   }
-  if (buf.subarray(0, 8000).includes(0)) return { lines: 0, binary: true };
+  if (buf.subarray(0, 8000).includes(0)) return { lines: 0, binary: true, bytes: buf.length };
   let lines = 0;
   for (const byte of buf) if (byte === 10) lines++;
   if (buf.length && buf[buf.length - 1] !== 10) lines++;
-  return { lines, binary: false };
+  return { lines, binary: false, bytes: buf.length };
 }
 
 // The work under review: what changed since the task's work started, in its checkout (committed
@@ -197,7 +197,7 @@ function countLines(file) {
 // text, unshown, commands }. `dir` is where the author worked, null once it is gone; `cwd` the top
 // of its checkout, where every git command runs so that all paths are relative to the same folder,
 // null for a branch; `repo` and `ref` hold the branch, null for a checkout. `unshown` lists the new
-// files left out of `text` to keep the brief short.
+// files left out of `text` to keep the brief short, as { path, bytes }.
 function changeOf(run, task) {
   const base = task.worktree?.from || run.baseCommit || die(`run ${run.id} records no base commit, so ${task.id}'s work has nothing to be compared with`);
   const authorDir = task.cd || task.worktree?.path || null;
@@ -207,20 +207,21 @@ function changeOf(run, task) {
     const mergeBase = gitRun(dir, ["merge-base", base, "HEAD"]).stdout?.trim() || die(`cannot find where the work in ${dir} parts from ${short(base)}`);
     const files = parseNumstat(gitOut(dir, ["diff", "--numstat", "-z", "-M", mergeBase])).map((f) => ({ ...f, isNew: !existsAt(dir, mergeBase, f.from || f.path) }));
     const parts = [gitOut(dir, ["diff", "--no-color", "--no-ext-diff", "-M", mergeBase])];
-    let chars = parts[0].length;
+    let newChars = 0;
     const unshown = [];
     const untracked = gitOut(dir, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter((rel) => rel && !CACHE_PATH.test(rel));
     for (const rel of untracked) {
       const counted = countLines(path.join(dir, rel));
       files.push({ path: rel, from: null, added: counted.lines, deleted: 0, binary: counted.binary, isNew: true });
-      // Past the brief's limit, a new file is listed, not diffed.
-      if (chars > INLINE_MAX_CHARS) {
-        unshown.push(rel);
+      // A new file larger than the brief can hold, or past what the new files can fill, is listed,
+      // not diffed: the brief names it (inlineDiff).
+      if (counted.bytes > INLINE_MAX_CHARS || newChars > INLINE_MAX_CHARS) {
+        unshown.push({ path: rel, bytes: counted.bytes });
         continue;
       }
       const diff = gitOut(dir, ["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", rel], [0, 1]);
       parts.push(diff);
-      chars += diff.length;
+      newChars += diff.length;
     }
     return {
       base, mergeBase, dir: authorDir, cwd: dir, repo: null, ref: null, files, text: parts.join(""), unshown,
@@ -245,8 +246,8 @@ function changeOf(run, task) {
 
 // The tier the diff calls for: standard for at most STANDARD_MAX_LINES changed lines in at most
 // STANDARD_MAX_FILES files, none of them a shared module; complex for anything more. A shared module
-// is a changed file that existed before and that another file imports: a change to it reaches
-// code the diff does not show. New files have no importers yet that could depend on them.
+// is a changed file that another file imports: a change to it reaches code the diff does not show,
+// and a new one, such as a new module under a shared library folder, becomes part of that code.
 function sizeOf(change) {
   const lines = change.files.reduce((n, f) => n + f.added + f.deleted, 0);
   const files = change.files.length;
@@ -256,7 +257,6 @@ function sizeOf(change) {
   }
   const shared = [];
   for (const f of change.files) {
-    if (f.isNew) continue;
     const by = importerOf(change, f.path) || (f.from ? importerOf(change, f.from) : null);
     if (by) shared.push({ path: f.path, importedBy: by });
   }
@@ -418,17 +418,99 @@ function fileList(files) {
   return `${shown.join(", ")}${files.length > shown.length ? `, and ${files.length - shown.length} more` : ""}`;
 }
 
-// The diff for the brief, cut at a file's boundary past INLINE_MAX_CHARS: { text, omitted }.
-function inlineDiff(change) {
-  const omitted = [...change.unshown];
-  let text = change.text;
-  if (text.length > INLINE_MAX_CHARS) {
-    const cut = text.lastIndexOf("\ndiff --git ", INLINE_MAX_CHARS);
-    const rest = text.slice(cut > 0 ? cut + 1 : INLINE_MAX_CHARS);
-    text = text.slice(0, cut > 0 ? cut + 1 : INLINE_MAX_CHARS);
-    for (const m of rest.matchAll(/^diff --git a\/.* b\/(.*)$/gm)) omitted.unshift(m[1]);
+// A path as git prints it in a diff: in double quotes, with C escapes, when it holds unusual characters.
+function unquotePath(text) {
+  if (!text.startsWith('"') || !text.endsWith('"')) return text;
+  const escapes = { a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r" };
+  const bytes = [];
+  for (const m of text.slice(1, -1).matchAll(/\\([0-7]{1,3}|.)|([^\\]+)/gs)) {
+    bytes.push(m[2] !== undefined ? Buffer.from(m[2]) : /^[0-7]+$/.test(m[1]) ? Buffer.from([parseInt(m[1], 8)]) : Buffer.from(escapes[m[1]] ?? m[1]));
   }
-  return { text, omitted };
+  return Buffer.concat(bytes).toString("utf8");
+}
+
+// The path one file's diff is about: its new name, or its old one when it was deleted.
+function diffPath(chunk) {
+  const after = (re) => {
+    const m = re.exec(chunk);
+    return m ? unquotePath(m[1].replace(/\t$/, "")) : null;
+  };
+  const renamed = after(/^rename to (.+)$/m);
+  if (renamed) return renamed;
+  const to = after(/^\+\+\+ (.+)$/m);
+  if (to && to !== "/dev/null") return to.replace(/^b\//, "");
+  const from = after(/^--- (.+)$/m);
+  if (from && from !== "/dev/null") return from.replace(/^a\//, "");
+  // A binary file or a mode change has neither line: its header names the same path twice, `a/P b/P`.
+  const head = /^diff --git (.+)$/m.exec(chunk)?.[1] || "";
+  return !head.startsWith('"') && head.length > 5 ? head.slice(2, 2 + (head.length - 5) / 2) : head;
+}
+
+// A diff split into one part per file, in git's order: [{ path, text }]. A line that starts with
+// `diff --git ` is always a file's header: the lines of a hunk start with a space, `+`, `-` or `\`.
+function fileDiffs(text) {
+  const starts = [...text.matchAll(/^diff --git /gm)].map((m) => m.index);
+  if (!starts.length) return text ? [{ path: null, text }] : [];
+  return starts.map((start, i) => {
+    const part = text.slice(i ? start : 0, starts[i + 1] ?? text.length);
+    return { path: diffPath(part), text: part };
+  });
+}
+
+// The diff for the brief, at most INLINE_MAX_CHARS long, and the files it does not show in full:
+// { text, missing: [{ path, chars, bytes, shown }] }. It never cuts silently: it takes whole files,
+// in git's order, while they fit, and leaves out each one that does not; only when no file fits
+// whole is the first cut short, at the end of a line. `chars` is a file's diff size, `bytes` the
+// size of a new file left undiffed, `shown` how much of it the brief holds.
+function inlineDiff(change) {
+  const shown = [];
+  const missing = [];
+  let room = INLINE_MAX_CHARS;
+  for (const part of fileDiffs(change.text)) {
+    if (part.text.length <= room) {
+      shown.push(part.text);
+      room -= part.text.length;
+    } else {
+      missing.push({ path: part.path, chars: part.text.length, bytes: null, shown: 0, text: part.text });
+    }
+  }
+  if (!shown.length && missing.length) {
+    const first = missing[0];
+    const end = first.text.lastIndexOf("\n", INLINE_MAX_CHARS - 1);
+    const kept = first.text.slice(0, end > 0 ? end + 1 : INLINE_MAX_CHARS);
+    shown.push(kept);
+    first.shown = kept.length;
+  }
+  for (const f of change.unshown) missing.push({ path: f.path, chars: null, bytes: f.bytes, shown: 0 });
+  return { text: shown.join(""), missing: missing.map(({ text: _t, ...m }) => m) };
+}
+
+const kb = (n) => `${Math.max(1, Math.round(n / 1024))} KB`;
+
+// The section at the top of a review brief that names each file the diff leaves out or cuts short,
+// with its size, and tells the reviewer how to read it.
+function missingSection(missing, change, agent) {
+  const items = missing.map((m) => {
+    const f = change.files.find((x) => x.path === m.path);
+    const lines = f ? (f.binary ? "binary" : f.isNew && !f.deleted ? `new, ${plural(f.added, "line")}` : `+${f.added} −${f.deleted}`) : null;
+    const size = m.chars !== null ? `a ${kb(m.chars)} diff` : `${kb(m.bytes || 0)}, not diffed`;
+    const what = m.shown ? `cut short: the brief shows its first ${kb(m.shown)}` : "left out";
+    return `- ${code(m.path)} (${lines ? `${lines}, ` : ""}${size}): ${what}`;
+  });
+  const read = agent === "codex"
+    ? change.cwd
+      ? `Read each of them directly: \`git -C ${quote(change.cwd)} diff ${change.mergeBase} -- <file>\` shows a changed file's diff, and a new file you read in full in ${code(change.cwd)}.`
+      : `Read each of them directly: \`git -C ${quote(change.repo)} diff ${change.mergeBase} ${change.ref} -- <file>\` shows its diff.`
+    : change.cwd
+      ? `Read each of them directly with the Read tool, in ${code(change.cwd)}, which holds the author's version; the paths are relative to that folder.`
+      : "Your directory does not hold the author's version of these files, and you have no shell to see their diff: review what is shown, and list in your report each file you could not see.";
+  return `## Files not shown in full
+
+To keep this brief under about ${kb(INLINE_MAX_CHARS)}, the diff under "The change" leaves out or cuts short ${missing.length === 1 ? "this file" : `these ${missing.length} files`}:
+
+${items.join("\n")}
+
+${read} Review them as fully as the rest of the change.`;
 }
 
 function reviewBrief({ run, author, row, agent, change, focus, root }) {
@@ -437,6 +519,8 @@ function reviewBrief({ run, author, row, agent, change, focus, root }) {
   const s = [];
   s.push("You are a delegated reviewer working in this directory. Do not modify any file, commit, push, open pull requests, or start other agents. Report your findings in your final message.");
   s.push(`## Goal\n\nReview the work of task ${code(id)} (attempt ${row.attempt}, by ${author.agent}${row.model ? ` on ${row.model}` : ""}) against its brief and the code around it, and report its defects: behavior that is wrong, missing, or inconsistent with the brief or with the surrounding code.`);
+  const { text: diff, missing } = inlineDiff(change);
+  if (missing.length) s.push(missingSection(missing, change, agent));
   if (focus) s.push(`## Focus\n\nYour orchestrator asks you to look hardest at:\n\n${q.text(focus)}`);
 
   const briefs = authorBriefs(run, author);
@@ -444,7 +528,6 @@ function reviewBrief({ run, author, row, agent, change, focus, root }) {
   s.push(`## The author's brief\n\nThe brief the author worked from: its goal, its done criteria and its scope are what you review against. Its instructions for the author's report were for the author; yours are under "Report" below.\n\n${first ? demote(q.text(first.text), 2) : "(no brief was recorded)"}`);
   for (const b of later) s.push(`### Later instructions to the author (attempt ${b.attempt}, ${b.reason})\n\n${demote(q.text(b.text), 3)}`);
 
-  const { text: diff, omitted } = inlineDiff(change);
   const lines = change.files.reduce((n, f) => n + f.added + f.deleted, 0);
   const where = change.cwd
     ? `The work is everything that changed in the author's checkout, ${code(change.cwd)}, since commit ${short(change.mergeBase)}: committed and uncommitted changes, and new files.`
@@ -456,8 +539,8 @@ function reviewBrief({ run, author, row, agent, change, focus, root }) {
       ? `Your read-only mode has no shell, so the diff follows. Read the changed files in full in ${code(change.cwd)}, with Read, Glob and Grep, wherever the diff's context is not enough.`
       : `Your read-only mode has no shell, so the diff follows. The files in your directory are not the author's version: rely on the diff.`;
   const fence = fenceFor(diff);
-  const cutNote = omitted.length
-    ? `\n\nThe diff above is cut at about ${Math.round(INLINE_MAX_CHARS / 1000)} KB. It goes on with: ${omitted.slice(0, 50).map(code).join(", ")}${omitted.length > 50 ? `, and ${omitted.length - 50} more` : ""}. ${agent === "codex" ? "Run the command above for the rest." : change.cwd ? `Read those files in ${code(change.cwd)}.` : "Review what is shown, and say what you could not see."}`
+  const cutNote = missing.length
+    ? `\n\nThis diff leaves out or cuts short ${plural(missing.length, "file")}, named under "Files not shown in full" at the top, with how to read them.`
     : "";
   s.push(`## The change\n\n${where} ${amount}\n\n${how}\n\n${fence}diff\n${q.text(diff).replace(/\n?$/, "\n")}${fence}${cutNote}`);
 
@@ -508,17 +591,34 @@ export function verdictIn(message) {
   return verdict;
 }
 
+// A final message's last orch-result block, parsed; null when it has none, or one that does not parse.
+function resultBlock(message) {
+  let last;
+  for (const m of String(message || "").matchAll(ORCH_RESULT)) last = m[1];
+  if (last === undefined) return null;
+  try {
+    const value = JSON.parse(last.trim());
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // The `unresolved` list of a final message's last orch-result block: the reviewer's findings, one
 // line each.
 function unresolvedIn(message) {
-  let last;
-  for (const m of String(message || "").matchAll(ORCH_RESULT)) last = m[1];
-  try {
-    const value = JSON.parse(String(last ?? "").trim());
-    return Array.isArray(value?.unresolved) ? value.unresolved.filter((u) => typeof u === "string" && u.trim()).map((u) => u.trim()) : [];
-  } catch {
-    return [];
-  }
+  const value = resultBlock(message);
+  return Array.isArray(value?.unresolved) ? value.unresolved.filter((u) => typeof u === "string" && u.trim()).map((u) => u.trim()) : [];
+}
+
+// The fields of the block beyond the report every agent gives (and a verdict a reviewer may repeat
+// there): a reviewer's own lists of findings, such as `findings` or `defects`. [[name, value]],
+// without empty ones.
+const REPORT_FIELDS = new Set(["outcome", "changed", "checks", "decisions", "unresolved", "verdict"]);
+function otherFindingsIn(message) {
+  const value = resultBlock(message);
+  const empty = (v) => v === null || v === undefined || v === "" || (Array.isArray(v) ? !v.length : typeof v === "object" && !Object.keys(v).length);
+  return value ? Object.entries(value).filter(([key, v]) => !REPORT_FIELDS.has(key) && !empty(v)) : [];
 }
 
 // What a review round records as its note: the findings, in short.
@@ -614,7 +714,8 @@ export function cmdRework(args) {
   const message = rrow.result.finalMessage || "";
   const verdict = verdictIn(message);
   const unresolved = unresolvedIn(message);
-  if (verdict === "clean" || (!verdict && !unresolved.length)) {
+  const other = otherFindingsIn(message);
+  if (verdict === "clean" || (!verdict && !unresolved.length && !other.length)) {
     const r = verdict === "clean" ? recordRound(run, g, reviewer, id, reviewed, "clean", null) : null;
     if (r) process.stderr.write(`orch: ${recordedText(reviewer.id, id, r)}\n`);
     die(`${reviewer.id} found nothing to fix (${verdict ? "VERDICT: clean" : "no verdict line, and no finding under unresolved"}), so there is nothing to rework. Accept ${id} instead: ${CLI} accept ${run.id} ${id} --note "<why>"`);
@@ -627,13 +728,17 @@ export function cmdRework(args) {
   const attempt = row.attempt + 1;
   const file = path.join(run.dir, "reviews", `${id}-rework-${attempt}.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, reworkBrief({ run, author, reviewer, rrow, reviewed, message, unresolved, note }));
+  fs.writeFileSync(file, reworkBrief({ run, author, reviewer, rrow, reviewed, message, unresolved, other, note }));
 
+  // --tier passes through to `start`. A Codex task names its tier on every start; a Claude one keeps
+  // its own unless told. A new tier needs a reason: --why, or else the facts of this rework.
+  const tier = args.tier || (author.agent === "codex" ? author.tier : undefined);
+  const why = args.why ?? (args.tier && args.tier !== author.tier ? `rework of ${reviewer.id}'s findings on attempt ${reviewed}, which ran the ${author.tier || "default"} tier, at the ${args.tier} tier` : undefined);
   let started;
   try {
     started = startTask(
       {
-        _: [run.dir, id], agent: author.agent, ...(author.agent === "codex" && author.tier ? { tier: author.tier } : {}),
+        _: [run.dir, id], agent: author.agent, ...(tier ? { tier } : {}), ...(why !== undefined ? { why } : {}),
         brief: file, cd: author.cd || undefined, "read-only": false, passthrough: ["--session", row.session],
       },
       { resumedBy: g.actor, reworkFrom: { ...(author.reworkFrom || {}), [attempt]: reviewer.id } },
@@ -683,19 +788,42 @@ function sectionsOf(text, names) {
   return out;
 }
 
-// The findings in the reviewer's own words: its final message before the orch-result block,
-// without its verdict line; its `unresolved` list when it wrote nothing else.
-function findingsText(message, unresolved) {
-  const prose = String(message || "").split(/^[\t ]*```orch-result[\t ]*\r?$/m)[0].replace(VERDICT_LINE, "").trim();
-  return prose || unresolved.map((u) => `- ${u}`).join("\n");
+// The reviewer's final message before its orch-result block, without its verdict line.
+function findingsProse(message) {
+  return String(message || "").split(/^[\t ]*```orch-result[\t ]*\r?$/m)[0].replace(VERDICT_LINE, "").trim();
 }
 
-function reworkBrief({ run, author, reviewer, rrow, reviewed, message, unresolved, note }) {
+// One finding field of the orch-result block, as Markdown: a list stays a list, one item per line.
+function fieldText(value) {
+  const item = (v) => (typeof v === "string" ? v : JSON.stringify(v));
+  if (Array.isArray(value)) return value.map((v) => `- ${item(v)}`).join("\n");
+  if (typeof value !== "object") return String(value);
+  const json = JSON.stringify(value, null, 2);
+  return `${fenceFor(json)}json\n${json}\n${fenceFor(json)}`;
+}
+
+// The findings as the reviewer structured them in its orch-result block: `unresolved`, and any field
+// of its own; "" when it has none. A summary in its prose may leave a finding out, so both go into
+// the rework brief.
+function structuredFindings(unresolved, other) {
+  const parts = [];
+  if (unresolved.length) parts.push(`From \`unresolved\`:\n\n${fieldText(unresolved)}`);
+  for (const [key, value] of other) parts.push(`From \`${key}\`:\n\n${fieldText(value)}`);
+  return parts.join("\n\n");
+}
+
+function reworkBrief({ run, author, reviewer, rrow, reviewed, message, unresolved, other, note }) {
   const q = quoter();
   const id = author.id;
   const s = [];
   s.push(`You are resuming your work on task ${code(id)} in the same session and checkout. ${code(reviewer.id)}${rrow.agent && rrow.agent !== "-" ? ` (${rrow.agent}${rrow.tier ? ` ${rrow.tier}` : ""})` : ""} reviewed attempt ${reviewed} of your work and found the defects below. Fix them.`);
-  s.push(`## Findings\n\n${demote(q.text(findingsText(message, unresolved)), 2)}`);
+  const prose = findingsProse(message);
+  const listed = structuredFindings(unresolved, other);
+  const findings = [
+    prose ? demote(q.text(prose), 2) : "",
+    listed ? `${prose ? "### As the reviewer listed them in its report block\n\n" : ""}${q.text(listed)}` : "",
+  ].filter(Boolean);
+  s.push(`## Findings\n\n${findings.join("\n\n")}`);
   s.push(note
     ? `## Which findings to fix\n\nYour orchestrator decided:\n\n${q.text(note)}\n\nFollow this where it differs from the findings: fix what it says to fix, and leave what it says to leave. Check each finding you fix against the code first.`
     : "## Which findings to fix\n\nAll of them. Check each against the code first: if one is wrong, change nothing for it, and say why in your report.");

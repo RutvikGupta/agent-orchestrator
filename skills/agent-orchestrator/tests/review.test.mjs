@@ -110,6 +110,51 @@ test('a small change to a module that other files import is reviewed at the comp
     assert.match(review.size.text, why);
     await f.git(['checkout', '--', '.']);
   }
+
+  // A new module that another file imports is shared as well.
+  const run = await f.newRun('shared-new');
+  await f.start(run, 'edit');
+  await f.finished(run, 'edit');
+  write(f.repo, 'lib/fresh.mjs', 'export const fresh = 1;\n');
+  fs.appendFileSync(path.join(f.repo, 'main.mjs'), "import { fresh } from './lib/fresh.mjs';\n");
+  const review = await f.json(['review', run.id, 'edit']);
+  assert.equal(review.tier, 'complex');
+  assert.match(review.size.text, /2 changed lines in 2 files, with a shared module \(lib\/fresh\.mjs, imported by main\.mjs\): complex tier/);
+});
+
+test('a diff too large for the brief is cut at file boundaries, and the top of the brief names every file left out or cut short', async (t) => {
+  const f = await fixture(t);
+  // About 207 KB of diff for one file, more than the brief holds (about 195 KB).
+  const big = Array.from({ length: 4000 }, (_, i) => `a long line of text in the big change, number ${String(i + 1).padStart(5, '0')}`).join('\n') + '\n';
+
+  // One file too large on its own: the brief shows its first part, and names it as cut short.
+  const one = await f.newRun('one');
+  await f.start(one, 'huge');
+  await f.finished(one, 'huge');
+  fs.appendFileSync(path.join(f.repo, 'README.md'), big);
+  const brief = briefOf((await f.json(['review', one.id, 'huge'])).started);
+  const top = brief.indexOf('## Files not shown in full');
+  assert.ok(top > 0 && top < brief.indexOf("## The author's brief"), 'named at the top of the brief');
+  assert.match(brief, /^- `README\.md` \(\+4000 −0, a 2\d\d KB diff\): cut short: the brief shows its first 19\d KB$/m);
+  assert.ok(brief.includes(`\`git -C ${f.repo} diff `) && brief.includes(' -- <file>`'), 'Codex is told to read it with git diff');
+  assert.match(brief, /number 00001$/m);
+  assert.doesNotMatch(brief, /number 04000$/m);
+  assert.match(brief, /This diff leaves out or cuts short 1 file, named under "Files not shown in full"/);
+  await f.git(['checkout', '--', '.']);
+
+  // Several files: each that fits is shown whole; one that does not is left out, never cut.
+  const two = await f.newRun('two');
+  await f.start(two, 'mixed', { agent: 'codex' });
+  await f.finished(two, 'mixed');
+  fs.appendFileSync(path.join(f.repo, 'README.md'), big);
+  write(f.repo, 'small.txt', 'a small new file\n');
+  write(f.repo, 'large.txt', big + big);
+  const brief2 = briefOf((await f.json(['review', two.id, 'mixed'])).started);
+  assert.match(brief2, /^- `README\.md` \(\+4000 −0, a 2\d\d KB diff\): left out$/m);
+  assert.match(brief2, /^- `large\.txt` \(new, 8000 lines, 4\d\d KB, not diffed\): left out$/m);
+  assert.match(brief2, /^\+a small new file$/m, 'a file that fits is shown whole');
+  assert.doesNotMatch(brief2, /number 00001$/m, 'a file left out is not cut short');
+  assert.ok(brief2.includes(`Read each of them directly with the Read tool, in \`${f.repo}\`, which holds the author's version`), 'Claude is told to read them');
 });
 
 test('an author that worked in a subfolder has the whole checkout reviewed, with paths from its top', async (t) => {
@@ -204,6 +249,31 @@ test('rework takes the findings of a reviewer started by hand, and refuses one t
   assert.ok(briefOf(saved).includes(finding));
   assert.match(briefOf(saved), /## Which findings to fix\n\nAll of them\./);
   assert.deepEqual(roundsOf(run, 'work').map((r) => [r.verdict, r.reviewer, r.note]), [['changes', 'look', `1 finding: ${finding}`]]);
+});
+
+test('rework passes on the findings of the report block with the prose, and --tier to start', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'work', { agent: 'codex' });
+  await f.finished(run, 'work');
+  const listed = 'x.mjs:3 (medium): parse("") throws; fix: return [] for an empty string.';
+  const detail = { file: 'y.mjs', line: 7, severity: 'low', input: 'parse(null)', fix: 'guard null' };
+  const block2 = JSON.stringify({ outcome: 'done', changed: [], checks: [], decisions: [], unresolved: [listed], findings: [detail] });
+  const message = `Found two defects; the details are in the block.\n\nVERDICT: changes\n\n\`\`\`orch-result\n${block2}\n\`\`\`\n`;
+  await f.start(run, 'look', { flags: ['--read-only'], config: { finalMessage: message } });
+  await f.finished(run, 'look');
+  const rework = await f.json(['rework', run.id, 'work', '--from', 'look', '--tier', 'complex']);
+  assert.equal(rework.started.tier, 'complex');
+  await f.finished(run, 'work');
+  const saved = readJson(f.taskFile(run, 'work'));
+  assert.deepEqual([saved.attempt, saved.attemptReason, saved.agent, saved.tier], [2, 'rework', 'codex', 'complex']);
+  assert.equal(saved.why, "rework of look's findings on attempt 1, which ran the standard tier, at the complex tier");
+  const brief = briefOf(saved);
+  assert.match(brief, /Found two defects; the details are in the block\./);
+  assert.ok(brief.includes(`From \`unresolved\`:\n\n- ${listed}`), 'the findings under unresolved');
+  assert.ok(brief.includes(`From \`findings\`:\n\n- ${JSON.stringify(detail)}`), 'a finding field of its own');
+  assert.doesNotMatch(brief, /VERDICT/);
+  assert.ok(!brief.includes(block2), 'the findings, not the raw block');
 });
 
 test('review refuses a running task, one with no changes, and a second round while the first runs', async (t) => {

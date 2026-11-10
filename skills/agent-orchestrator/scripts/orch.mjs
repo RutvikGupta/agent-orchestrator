@@ -151,18 +151,23 @@ Usage: node orch.mjs <command> [args] [--json]
                                   (uncommitted changes and new files included) and its final report.
                                   A Codex reviewer also gets the git diff command to run. The diff
                                   sets the tier: up to 150 changed lines in up to 3 files, none of
-                                  them an existing module that other files import, is standard;
+                                  them a module that other files import (new or not), is standard;
                                   more is complex. --tier overrides it; --why records the judgment.
+                                  A diff too large for the brief (about 200 KB) is cut at file
+                                  boundaries, and the brief names each file left out or cut short,
+                                  with its size and how to read it.
                                   --focus tells the reviewer what to look at hardest. The reviewer
                                   ends with VERDICT: clean or changes, recorded as a review round of
                                   TASK (as by verdict) when status, wait, result, accept, verdict or
                                   start next runs on the run
-  rework RUN TASK [--from REVIEW_TASK] [--note TEXT]
+  rework RUN TASK [--from REVIEW_TASK] [--note TEXT] [--tier TIER [--why TEXT]]
                                   Resume TASK's own session with the findings of its latest review
-                                  (or REVIEW_TASK's, which may be a reviewer started by hand), with
-                                  its scope and gates restated, as a rework attempt; records the
-                                  review round first. --note adds your decisions on which findings
-                                  to fix. Refuses when the review found nothing: accept TASK instead
+                                  (or REVIEW_TASK's, which may be a reviewer started by hand): its
+                                  prose and the findings of its orch-result block, with TASK's scope
+                                  and gates restated, as a rework attempt; records the review round
+                                  first. --note adds your decisions on which findings to fix. --tier
+                                  passes to start; --why defaults to a line naming the review and
+                                  both tiers. Refuses when the review found nothing: accept TASK instead
   accept RUN TASK [--commit SHA] [--note TEXT]
                                   After reviewing a completed task and committing its work, record
                                   it as accepted (its checkout must be clean); SHA defaults to HEAD.
@@ -275,7 +280,7 @@ const specs = {
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
   review: { value: ["tier", "focus"], bool: ["adopt"] },
-  rework: { value: ["from", "note"], bool: ["adopt"] },
+  rework: { value: ["from", "note", "tier", "why"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
   integrate: { value: ["into"], bool: ["dry-run", "adopt"] },
   recover: { bool: ["all"] },
