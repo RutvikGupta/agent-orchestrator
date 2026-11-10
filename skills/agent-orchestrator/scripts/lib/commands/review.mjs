@@ -611,14 +611,14 @@ function unresolvedIn(message) {
   return Array.isArray(value?.unresolved) ? value.unresolved.filter((u) => typeof u === "string" && u.trim()).map((u) => u.trim()) : [];
 }
 
-// The fields of the block beyond the report every agent gives (and a verdict a reviewer may repeat
-// there): a reviewer's own lists of findings, such as `findings` or `defects`. [[name, value]],
-// without empty ones.
-const REPORT_FIELDS = new Set(["outcome", "changed", "checks", "decisions", "unresolved", "verdict"]);
+// A reviewer's own lists of findings in the block, beyond `unresolved`: only the fields that name
+// findings. Any other extra field, such as a summary, is not a finding, so a clean review that
+// adds one stays clean. [[name, value]], without empty ones.
+const FINDING_FIELDS = new Set(["findings", "defects", "issues", "problems", "bugs"]);
 function otherFindingsIn(message) {
   const value = resultBlock(message);
   const empty = (v) => v === null || v === undefined || v === "" || (Array.isArray(v) ? !v.length : typeof v === "object" && !Object.keys(v).length);
-  return value ? Object.entries(value).filter(([key, v]) => !REPORT_FIELDS.has(key) && !empty(v)) : [];
+  return value ? Object.entries(value).filter(([key, v]) => FINDING_FIELDS.has(key) && !empty(v)) : [];
 }
 
 // What a review round records as its note: the findings, in short.

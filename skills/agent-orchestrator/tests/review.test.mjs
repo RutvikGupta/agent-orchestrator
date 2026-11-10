@@ -237,8 +237,13 @@ test('rework takes the findings of a reviewer started by hand, and refuses one t
   const finding = 'a.mjs:2 (high): crashes on null.';
   await f.start(run, 'look', { flags: ['--read-only'], config: { finalMessage: `1. ${finding}\n\n${block([finding])}` } });
   await f.start(run, 'blank', { flags: ['--read-only'], config: { finalMessage: block() } });
+  // A clean review that adds a field of its own, such as a summary, is still clean.
+  const summary = '```orch-result\n' + JSON.stringify({ outcome: 'done', changed: [], checks: [], decisions: [], unresolved: [], summary: 'No defects found.' }) + '\n```';
+  await f.start(run, 'tidy', { flags: ['--read-only'], config: { finalMessage: summary } });
   await f.finished(run, 'look');
   await f.finished(run, 'blank');
+  await f.finished(run, 'tidy');
+  assert.match((await f.command(['rework', run.id, 'work', '--from', 'tidy'], { code: 1 })).stderr, /no verdict line, and no finding/);
   assert.match((await f.command(['rework', run.id, 'work'], { code: 1 })).stderr, /no review of work/);
   assert.match((await f.command(['rework', run.id, 'work', '--from', 'blank'], { code: 1 })).stderr, /no verdict line, and no finding under unresolved/);
   const rework = await f.json(['rework', run.id, 'work', '--from', 'look']);
