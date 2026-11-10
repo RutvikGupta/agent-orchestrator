@@ -16,7 +16,7 @@ async function task(f, run, id, { agent = 'codex', config = {}, fields = {}, ela
   return { started, file, resultFile };
 }
 
-const counts = (g) => Object.fromEntries(['tasks', 'attempts', 'firstAttemptAccepted', 'accepted', 'integrated', 'failed', 'limitHits', 'transientErrors', 'tokensIn', 'tokensOut', 'medianFirstAttemptMs', 'medianReviewWaitMs'].map((key) => [key, g[key]]));
+const counts = (g) => Object.fromEntries(['tasks', 'attempts', 'firstAttemptAccepted', 'accepted', 'integrated', 'failed', 'limitHits', 'transientErrors', 'tokensIn', 'tokensOut', 'medianFirstAttemptMs', 'medianReviewWaitMs', 'tokensInPerAccepted'].map((key) => [key, g[key]]));
 
 test('stats groups task outcomes and reports every column using all attempts', async (t) => {
   const f = await fixture(t);
@@ -48,12 +48,13 @@ test('stats groups task outcomes and reports every column using all attempts', a
   const codex = stats.byAgent.find((g) => g.agent === 'codex' && g.modelLabel !== '6-astra high');
   assert.deepEqual(counts(codex), { tasks: 8, attempts: 9, firstAttemptAccepted: 1, accepted: 2, integrated: 1,
     failed: 4, limitHits: 1, transientErrors: 2, tokensIn: 1080, tokensOut: 270,
-    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000 });
+    // Every input token of the group's tasks, accepted or not, over its two accepted tasks.
+    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 540 });
   assert.equal(codex.firstAttemptAcceptance, 0.5);
   const implement = stats.byType.find((g) => g.type === 'implement');
   assert.deepEqual(counts(implement), { tasks: 3, attempts: 4, firstAttemptAccepted: 1, accepted: 2, integrated: 1,
     failed: 1, limitHits: 1, transientErrors: 1, tokensIn: 480, tokensOut: 120,
-    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000 });
+    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 240 });
   assert.deepEqual(stats.byType.map((g) => g.type).sort(), ['babysit', 'implement', 'read-only', 'research', 'write']);
   assert.equal(stats.byType.find((g) => g.type === 'research').failed, 0);
   const claude = stats.byAgent.find((g) => g.agent === 'claude');
@@ -61,8 +62,9 @@ test('stats groups task outcomes and reports every column using all attempts', a
   assert.equal(claude.tokensOut, 30);
   assert.equal(claude.firstAttemptAcceptance, null);
   assert.equal(claude.medianReviewWaitMs, null);
+  assert.equal(claude.tokensInPerAccepted, null);
   const text = (await f.command(['stats', run.id])).stdout;
-  for (const heading of ['By agent and model', 'By task type', 'TASKS', 'ATTEMPTS', 'FIRST ACCEPTED', 'ACCEPTED', 'INTEGRATED', 'FAILED', 'LIMIT HITS', 'TRANSIENT', 'FIRST ELAPSED', 'REVIEW WAIT', 'TOKENS IN', 'TOKENS OUT']) assert.ok(text.includes(heading), heading);
+  for (const heading of ['By agent and model', 'By task type', 'TASKS', 'ATTEMPTS', 'FIRST ACCEPTED', 'ACCEPTED', 'INTEGRATED', 'FAILED', 'LIMIT HITS', 'TRANSIENT', 'FIRST ELAPSED', 'REVIEW WAIT', 'TOKENS IN', 'TOKENS OUT', 'TOKENS IN PER ACCEPTED']) assert.ok(text.includes(heading), heading);
   assert.match(text, /codex 6-astra high/);
   assert.match(text, /1\/2/);
 });

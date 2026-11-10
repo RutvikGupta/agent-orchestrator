@@ -16,8 +16,9 @@ export function cmdStats(args) {
     failed: g.failed, "limit hits": g.limitHits, transient: g.transientErrors,
     "first elapsed": formatElapsed(g.medianFirstAttemptMs), "review wait": formatElapsed(g.medianReviewWaitMs),
     "tokens in": compact(g.tokensIn), "tokens out": compact(g.tokensOut),
+    "tokens in per accepted": compact(g.tokensInPerAccepted),
   }));
-  const columns = ["group", "tasks", "attempts", "first accepted", "accepted", "integrated", "failed", "limit hits", "transient", "first elapsed", "review wait", "tokens in", "tokens out"];
+  const columns = ["group", "tasks", "attempts", "first accepted", "accepted", "integrated", "failed", "limit hits", "transient", "first elapsed", "review wait", "tokens in", "tokens out", "tokens in per accepted"];
   const text = groups.byAgent.length ? [
     "By agent and model", table(rows(groups.byAgent, (g) => `${g.agent} ${g.modelLabel}`), columns),
     "By task type", table(rows(groups.byType, (g) => g.type), columns),

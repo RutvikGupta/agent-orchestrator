@@ -42,8 +42,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Print --model and --effort arguments, lowered to the inherited
                                   ceiling. Without --tier use the ceiling, otherwise standard.
                                   Codex effort uses -c model_reasoning_effort="LEVEL".
-  agents [--refresh]              Installed agent CLIs, their relays, login state, model policy,
-                                  and how much of each agent's usage limits is used. --refresh
+  agents [--refresh]              Installed agent CLIs, their relays, login state, model policy
+                                  with each tier's results over the last 30 days (finished tasks,
+                                  share accepted first try, median first attempt, input tokens per
+                                  accepted task: all the tier's input over the accepted ones;
+                                  "too few tasks" under 5), and how much of each
+                                  agent's usage limits is used. --refresh
                                   runs one tiny Claude turn to read Claude's current limits
   new [--repo DIR] [--name S] [--goal TEXT]
                                   Create a run (records the repo, base commit, and the
@@ -85,7 +89,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Counted failures are failed, timeout or aborted attempts and review
                                   changes/reject; owner stops and usage-limit stops do not count.
                                   Legacy Claude tasks resume at complex, and --babysit
-                                  implies complex, so it needs none. "agents" lists each tier's model.
+                                  implies complex, so it needs none. "agents" lists each tier's model and results.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
                                   In a run with a plan, the first start refuses a task whose prerequisites are
@@ -234,7 +238,9 @@ Usage: node orch.mjs <command> [args] [--json]
   cleanup RUN [--force] [--delete-branches]
                                   Remove the run's worktrees (dirty ones only with --force)
   runs                            List runs, newest first
-  stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d)
+  stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d),
+                                  with input tokens per accepted task (all the group's input over
+                                  its accepted tasks)
   skill [--loaded]                Whether the skill's instructions (SKILL.md, references/, policy.json)
                                   changed since this session or task first ran an orch.mjs command:
                                   the fingerprint recorded for the caller, the current one, and the

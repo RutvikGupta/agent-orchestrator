@@ -7,6 +7,7 @@ import { table } from "../format.mjs";
 import { codexLimits, limitsText, probeClaudeLimits } from "../limits.mjs";
 import { relayHasNetworkPatch } from "../permissions.mjs";
 import { loadPolicy } from "../policy.mjs";
+import { evidenceNote, tierEvidence } from "../stats.mjs";
 import { emit, findRelay, readJson, which } from "../util.mjs";
 
 export function cmdAgents(args) {
@@ -43,9 +44,12 @@ export function cmdAgents(args) {
   const known = new Set((readJson(path.join(process.env.CODEX_HOME || path.join(HOME, ".codex"), "models_cache.json"))?.models || []).map((m) => m.slug));
   const flag = (m) => (known.size && !known.has(m) ? "  (not in this account's Codex model list!)" : "");
   const effortText = (v) => (v.effort ? `effort ${v.effort}` : "default effort");
+  // How each tier has done on this machine in the last 30 days, beside the tier it describes. The
+  // numbers are left out when they cannot be read.
+  const evidence = tierEvidence(policy);
   const lines = [
-    ...Object.entries(policy.claude.tiers).map(([t, v]) => `claude --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}: ${v.use || ""}`),
-    ...Object.entries(policy.codex.tiers).map(([t, v]) => `codex --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}: ${v.use || ""}${flag(v.model)}`),
+    ...Object.entries(policy.claude.tiers).map(([t, v]) => `claude --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, "claude", t)}: ${v.use || ""}`),
+    ...Object.entries(policy.codex.tiers).map(([t, v]) => `codex --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, "codex", t)}: ${v.use || ""}${flag(v.model)}`),
   ];
 
   const installed = new Set(rows.filter((r) => r.bin !== "-").map((r) => r.key));
@@ -68,7 +72,7 @@ export function cmdAgents(args) {
     claudeRelay && !networkReady ? `\n\nnote: Claude tasks run without network until references/claude-delegate-network.patch is re-applied to ${claudeRelay}` : "";
   emit(
     args,
-    { agents: rows, policy, policyPath: POLICY_PATH, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },
+    { agents: rows, policy, policyPath: POLICY_PATH, tierEvidence: evidence, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },
     `${table(rows, ["key", "vendor", "version", "auth", "ready"])}\n\nmodels (${POLICY_PATH}):\n  ${lines.join("\n  ")}` +
       `\n\nusage limits (share of each rolling window used; for information only: do not weigh them when choosing an agent; even 100% is not a reached limit, only a task stopped by a usage-limit error is):\n  ${usageLines.join("\n  ")}${githubNote}`,
   );
