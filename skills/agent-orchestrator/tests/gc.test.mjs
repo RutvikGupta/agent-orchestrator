@@ -51,7 +51,7 @@ test('gc removes clean closed folders, preserves branches and unmerged commits, 
   const report = await f.json(['gc', '--older-than', '0s']);
   assert.equal(report.totals.removed, 2);
   assert.ok(report.totals.bytesFreed > 0);
-  assert.deepEqual(report.totals.keptByReason, { 'uncommitted changes': 1, 'task is not explicitly closed or accepted and integrated': 1, 'commits are not reachable from a retained branch': 1 });
+  assert.deepEqual(report.totals.keptByReason, { 'uncommitted changes': 1, 'task is not closed or accepted and integrated': 1, 'commits are not reachable from a retained branch': 1 });
   for (const wt of [merged, unmerged]) assert.equal(fs.existsSync(wt.path), false);
   for (const wt of [dirty, open, detached]) assert.equal(fs.existsSync(wt.path), true);
   assert.equal(await f.git(['rev-parse', unmerged.branch]), tip);
@@ -203,7 +203,7 @@ test('regression: explicit closure applies only to its attempt and reject also p
   const f = await fixture(t), run = await f.newRun();
   const wt = await worktree(f, run, 'resumed');
   finished(f, run, 'resumed', 1, { attempt: 2, closedAt: daysAgo(1), closedBy: 'user (terminal)', closedExplicitlyAttempt: 1 });
-  assert.equal((await f.json(['gc', '--older-than', '0s'])).totals.removed, 0);
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0);
   await f.command(['verdict', run.id, 'resumed', 'reject', '--note', 'This result is no longer needed']);
   assert.equal((await f.json(['cleanup', run.id])).removed.length, 1);
   assert.equal(fs.existsSync(wt.path), false);
@@ -344,4 +344,106 @@ test('regression: dead relays expire by the newest file in their latest attempt 
   assert.deepEqual(report.runs[0].expired, ['expired']);
   assert.equal(readJson(f.taskFile(run, 'expired')).closedBy, 'expired');
   assert.equal(readJson(f.taskFile(run, 'recent')).closedAt, undefined);
+});
+
+function idleRun(f, run, days = 3) {
+  const old = daysAgo(days);
+  const file = path.join(run.dir, 'run.json');
+  const record = readJson(file);
+  writeJson(file, { ...record, createdAt: old, orchestrator: { ...record.orchestrator, lastSeenAt: old } });
+  for (const id of fs.readdirSync(path.join(run.dir, 'tasks'))) {
+    const task = readJson(f.taskFile(run, id));
+    patch(f, run, id, { createdAt: old, ...(task.closedAt ? { closedAt: old } : {}) });
+  }
+  function backdate(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const name = path.join(dir, entry.name);
+      if (entry.isDirectory()) backdate(name);
+      fs.utimesSync(name, new Date(old), new Date(old));
+    }
+  }
+  backdate(path.join(run.dir, 'tasks'));
+}
+
+for (const closure of ['result', 'legacy']) test(`round two: idle gc collects ${closure} closure and worktree restores retained commits`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await f.json(['worktree', run.id, 'restore', '--branch', 'retained-feature', '--path', path.join(f.root, 'custom-folder'), '--no-prep']);
+  const tip = await commit(f, wt);
+  finished(f, run, 'restore', 3);
+  if (closure === 'result') await f.command(['result', run.id, 'restore']);
+  else patch(f, run, 'restore', { closedAt: daysAgo(3), closedBy: 'user (terminal)' });
+  assert.equal(readJson(f.taskFile(run, 'restore')).closedExplicitlyAttempt, undefined);
+  const manual = await f.json(['cleanup', run.id]);
+  assert.match(manual.kept[0].reason, /not explicitly closed/);
+  idleRun(f, run);
+  const preview = await f.json(['gc', '--dry-run']);
+  assert.equal(preview.totals.removed, 1);
+  assert.equal(fs.existsSync(wt.path), true);
+  const collected = await f.command(['gc']);
+  assert.match(collected.stdout, new RegExp(`recreate with: .*orch.mjs worktree ${run.id} restore`));
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.equal(await f.git(['rev-parse', wt.branch]), tip);
+  const recreated = await f.json(['worktree', run.id, 'restore', '--no-prep']);
+  assert.equal(recreated.path, wt.path);
+  assert.equal(recreated.branch, wt.branch);
+  assert.equal(recreated.from, tip);
+  assert.equal(recreated.restored, true);
+  assert.equal(await f.git(['-C', recreated.path, 'rev-parse', 'HEAD']), tip);
+  assert.equal(fs.readFileSync(path.join(recreated.path, 'change.txt'), 'utf8'), 'Unique committed work.\n');
+  await f.command(['accept', run.id, 'restore']);
+});
+
+test('round two: collected branch restoration rejects --from and allows a separately named branch', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'restore', { closedAt: daysAgo(1) });
+  const tip = await commit(f, wt);
+  await f.command(['cleanup', run.id]);
+  const refused = await f.command(['worktree', run.id, 'restore', '--from', run.baseCommit, '--no-prep'], { code: 1 });
+  assert.match(refused.stderr, /cannot use --from while restoring retained branch/);
+  assert.equal(await f.git(['rev-parse', wt.branch]), tip);
+  const different = await f.json(['worktree', run.id, 'restore', '--branch', 'separate-feature', '--from', run.baseCommit, '--no-prep']);
+  assert.equal(different.branch, 'separate-feature');
+  assert.equal(await f.git(['-C', different.path, 'rev-parse', 'HEAD']), run.baseCommit);
+  assert.equal(await f.git(['rev-parse', wt.branch]), tip);
+});
+
+for (const change of ['modified', 'staged', 'added', 'renamed', 'deleted']) test(`round two: ${change} tracked cache files survive all cleanup entry points`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'tracked');
+  const dir = path.join(wt.path, 'node_modules', 'pkg');
+  fs.mkdirSync(dir, { recursive: true });
+  const tip = await commit(f, wt, 'node_modules/pkg/index.js');
+  finished(f, run, 'tracked', 1, { acceptedAt: daysAgo(1), acceptedAttempt: 1, acceptedCommit: tip });
+  const file = path.join(dir, 'index.js');
+  if (change === 'modified' || change === 'staged') {
+    fs.writeFileSync(file, 'Precious dependency patch.\n');
+    if (change === 'staged') await f.git(['-C', wt.path, 'add', 'node_modules/pkg/index.js']);
+  } else if (change === 'added') {
+    fs.writeFileSync(path.join(dir, 'new.js'), 'Precious staged addition.\n');
+    await f.git(['-C', wt.path, 'add', 'node_modules/pkg/new.js']);
+  } else if (change === 'renamed') await f.git(['-C', wt.path, 'mv', 'node_modules/pkg/index.js', 'node_modules/pkg/renamed.js']);
+  else await f.git(['-C', wt.path, 'rm', 'node_modules/pkg/index.js']);
+  const before = await f.git(['-C', wt.path, 'status', '--porcelain']);
+  const closed = await f.json(['close', run.id, 'tracked']);
+  assert.equal(closed.cleanup.kept[0].reason, 'uncommitted changes');
+  assert.equal((await f.json(['cleanup', run.id])).kept[0].reason, 'uncommitted changes');
+  const gc = await f.json(['gc', '--older-than', '0s']);
+  assert.equal(gc.runs[0].kept[0].reason, 'uncommitted changes');
+  const integrated = await f.json(['integrate', run.id, 'tracked']);
+  assert.equal(integrated.cleanup.kept[0].reason, 'uncommitted changes');
+  assert.equal(fs.existsSync(wt.path), true);
+  assert.equal(await f.git(['-C', wt.path, 'status', '--porcelain']), before);
+  if (change === 'modified' || change === 'staged') assert.equal(fs.readFileSync(file, 'utf8'), 'Precious dependency patch.\n');
+});
+
+test('round two: worktree recreates a folder collected by explicit cleanup from the existing branch', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'recreate', { closedAt: daysAgo(1) });
+  const tip = await commit(f, wt);
+  const removed = await f.json(['cleanup', run.id]);
+  const restored = await f.json(['worktree', run.id, 'recreate', '--no-prep']);
+  assert.match(removed.removed[0].recreateCommand, new RegExp(`worktree ${run.id} recreate$`));
+  assert.equal(restored.branch, wt.branch);
+  assert.equal(await f.git(['-C', restored.path, 'rev-parse', 'HEAD']), tip);
+  assert.equal(fs.readFileSync(path.join(restored.path, 'change.txt'), 'utf8'), 'Unique committed work.\n');
 });

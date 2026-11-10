@@ -57,7 +57,7 @@ export async function cmdGc(args) {
         recordChange(run, g, { task: row.id, attempt: task.attempt || null, action: 'expired' });
       }
     }
-    const collected = await collectWorktrees(run, { dryRun, expired });
+    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true });
     reports.push({ ...report, ...collected });
   }
   const totals = { removed: 0, kept: 0, keptByReason: {}, expired: 0, bytesFreed: 0 };

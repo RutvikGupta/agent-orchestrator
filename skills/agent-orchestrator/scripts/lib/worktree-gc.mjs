@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { CACHE_PATH } from './config.mjs';
+import { CACHE_PATH, CLI_PATH } from './config.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
 import { acceptedNow } from './lifecycle.mjs';
 import { guard, recordChange } from './ownership.mjs';
@@ -57,7 +57,7 @@ function registration(run, wt) {
   return { registered: Boolean(record), head: record?.split('\0').find((line) => line.startsWith('HEAD '))?.slice(5) };
 }
 
-export function worktreeSafety(run, task) {
+export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   const wt = task.worktree?.path;
   if (!wt) return 'worktree path missing';
   if (isParked(run, task) || relayAlive(task.pid, task.startedAt)) return 'task still running';
@@ -70,8 +70,9 @@ export function worktreeSafety(run, task) {
   if (registered.error) return registered.error;
   const exists = fs.existsSync(wt);
   if (exists) {
-    const explicitlyClosed = task.closedAt && (task.readOnly || task.closedExplicitlyAttempt === (task.attempt || 0));
-    if (!explicitlyClosed && !(acceptedNow(task) && task.integratedAt)) return 'task is not explicitly closed or accepted and integrated';
+    // Idle-run GC can collect read results; other callers keep them available for review.
+    const closed = task.closedAt && (allowReadClosed || task.readOnly || task.closedExplicitlyAttempt === (task.attempt || 0));
+    if (!closed && !(acceptedNow(task) && task.integratedAt)) return `task is not ${allowReadClosed ? '' : 'explicitly '}closed or accepted and integrated`;
     const top = value(wt, ['rev-parse', '--show-toplevel']);
     const common = value(wt, ['rev-parse', '--git-common-dir']);
     const repoCommon = value(run.repo, ['rev-parse', '--git-common-dir']);
@@ -82,11 +83,9 @@ export function worktreeSafety(run, task) {
     const status = git(wt, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']);
     if (status.status !== 0) return 'git status failed';
     const records = status.stdout.split('\0').filter(Boolean);
-    for (let i = 0; i < records.length; i++) {
-      const entry = records[i];
-      const paths = [entry.slice(3)];
-      if (/[RC]/.test(entry.slice(0, 2))) paths.push(records[++i] || '');
-      if (paths.some((file) => !CACHE_PATH.test(file))) return 'uncommitted changes';
+    for (const entry of records) {
+      // Cache names never exempt tracked modifications, staged additions, deletions or renames.
+      if (!entry.startsWith('?? ') || !CACHE_PATH.test(entry.slice(3))) return 'uncommitted changes';
     }
   }
   // A missing folder may still have a detached HEAD in git's worktree registration.
@@ -106,13 +105,13 @@ function diskBytes(wt) {
   return r.status === 0 && Number.isFinite(kb) ? kb * 1024 : null;
 }
 
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set() } = {}) {
+export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
-    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: 'expired', closedExplicitlyAttempt: task.attempt || 0 } : task);
+    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: 'expired', closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed });
     if (reason) { report.kept.push({ ...entry, reason }); continue; }
     let g;
     if (!dryRun) {
@@ -124,7 +123,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       }
       // Teardown can modify tracked files, and another command may have reopened the task.
       task = loadTask(run, id);
-      reason = task?.worktree ? worktreeSafety(run, task) : 'task worktree changed';
+      reason = task?.worktree ? worktreeSafety(run, task, { allowReadClosed }) : 'task worktree changed';
       if (reason || task.worktree.path !== entry.path) {
         report.kept.push({ ...entry, reason: reason || 'task worktree changed' }); continue;
       }
@@ -133,7 +132,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
     const bytes = missing ? 0 : diskBytes(entry.path);
     if (!dryRun) {
       // Remove this registration only; a repository-wide prune could affect another run.
-      // --force permits ignored output and the same cache paths acceptance ignores.
+      // --force permits ignored output and untracked cache files only.
       const removed = missing && !registration(run, entry.path).registered ? { status: 0 } : git(run.repo, ['worktree', 'remove', '--force', entry.path]);
       if (removed.status !== 0) { report.kept.push({ ...entry, reason: 'git worktree remove failed', detail: removed.stderr.trim() }); continue; }
       task.removedWorktree = { ...task.worktree, removedAt: new Date().toISOString() };
@@ -142,7 +141,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       saveTask(run, task);
       recordChange(run, g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
     }
-    report.removed.push({ ...entry, bytes, dryRun, missing });
+    report.removed.push({ ...entry, bytes, dryRun, missing, recreateCommand: `node ${CLI_PATH} worktree ${run.id} ${id}` });
     report.bytesFreed += bytes || 0;
   }
   return report;
@@ -150,7 +149,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
 
 export function collectionText(report, dryRun = false) {
   return [...[...report.removed, ...report.kept].flatMap((r) => (r.teardownFailures || []).map((f) => `teardown ${r.task} failed (${f.exitCode ?? f.signal}): ${f.command}\n${f.output}`)),
-    ...report.removed.map((r) => `${dryRun ? 'would remove' : 'removed'} worktree ${r.path} (branch kept: ${r.branch || '(none)'})`),
+    ...report.removed.map((r) => `${dryRun ? 'would remove' : 'removed'} worktree ${r.path} (branch kept: ${r.branch || '(none)'})\n  recreate with: ${r.recreateCommand}`),
     ...report.kept.map((r) => `skip ${r.task}: ${r.reason} (${r.path})`),
     `${dryRun ? 'would free' : 'freed'} ${report.bytesFreed} bytes${report.removed.some((r) => r.bytes === null) ? ' (some sizes unavailable)' : ''}`].join('\n');
 }

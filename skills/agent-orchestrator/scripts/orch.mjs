@@ -43,7 +43,9 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Create a run (records the repo, base commit, and the
                                   Claude or Codex session that launched it); prints the run id
   worktree RUN TASK [--from REF] [--branch NAME] [--path DIR] [--no-prep]
-                                  Create and prepare an isolated git worktree + branch for TASK
+                                  Create and prepare an isolated git worktree + branch for TASK.
+                                  Recreates a collected folder from its retained branch; --from
+                                  requires a new --branch when restoring a retained branch.
   brief RUN TASK [--type implement|review|research|debug|babysit] [--read-only]
         [--out FILE] [--force]
                                   Write a draft brief for TASK from references/briefs/<type>.md,
@@ -192,12 +194,14 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
   cleanup RUN                    Remove only explicitly closed (or accepted and integrated),
-                                  clean worktrees; gate caches are ignored as in accept.
+                                  clean worktrees; only untracked gate caches are ignored.
                                   Commits stay on kept branches; running or parked users protect
                                   their worktrees across all runs. Never deletes branches.
   gc [--dry-run] [--older-than DUR] [--json]
                                   Collect owned runs with no running task and no activity for
-                                  24h (override with --older-than, e.g. 7d). Dry runs change nothing.
+                                  24h (override with --older-than, e.g. 7d). Any closed task qualifies
+                                  for gc, including collected results and older closures.
+                                  Dry runs change nothing.
                                   Unread, unaccepted finished tasks expire after AGENT_ORCH_EXPIRE
                                   (default 7d); dead relays expire from their latest attempt activity.
                                   Reports removed/kept worktrees, teardown failures and disk freed.

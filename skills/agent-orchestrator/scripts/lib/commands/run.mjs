@@ -57,13 +57,17 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   if (!run.isGit) die("the run's repo is not a git repository");
   const existing = loadTask(run, id);
   if (existing?.worktree) die(`task ${id} already has a worktree at ${existing.worktree.path}`);
-  from = from || run.baseCommit;
-  branch = branch || `orch/${run.id}/${id}`;
-  const wt = path.resolve(worktreePath || path.join(run.dir, "worktrees", id));
+  const previous = existing?.removedWorktree;
+  branch = branch || previous?.branch || `orch/${run.id}/${id}`;
+  // A collected folder leaves its branch intact. Reuse it without resetting its commits.
+  const retainedHead = previous?.branch === branch ? git(run.repo, ["rev-parse", "--verify", `refs/heads/${branch}`], { allowFail: true }) : null;
+  if (retainedHead && from) die(`cannot use --from while restoring retained branch ${branch}; omit --from, or choose a new --branch`);
+  from = retainedHead || from || run.baseCommit;
+  const wt = path.resolve(worktreePath || (retainedHead && previous.path) || path.join(run.dir, "worktrees", id));
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
-  git(run.repo, ["worktree", "add", "-q", "-b", branch, wt, from]);
-  const task = { ...(existing || { id, createdAt: new Date().toISOString() }), cd: wt, worktree: { path: wt, branch, from } };
+  git(run.repo, retainedHead ? ["worktree", "add", "-q", wt, branch] : ["worktree", "add", "-q", "-b", branch, wt, from]);
+  const task = { ...(existing || { id, createdAt: new Date().toISOString() }), cd: wt, worktree: { path: wt, branch, from, ...(retainedHead ? { restored: true } : {}) } };
   saveTask(run, task);
   if (prep) {
     const controller = new AbortController();
