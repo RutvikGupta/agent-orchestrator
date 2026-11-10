@@ -15,7 +15,7 @@ import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { reviveParked } from "./park.mjs";
-import { modelExceedsCeiling } from "./policy.mjs";
+import { ceilingFor, modelExceedsCeiling, readPolicy } from "./policy.mjs";
 import { isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
@@ -407,7 +407,7 @@ function placeExternal(externals, sections, sectionOf, sessionSection, subAgents
 // agent (of the current attempt, a running one first, then the latest active), the steps and tokens
 // of all of them, and, while the task runs, the lead's activity. `runs` lists each agent for the
 // details. Rows that hung under a folded agent hang under the task.
-export function foldCommandAgents(rows) {
+export function foldCommandAgents(rows, policyReader = readPolicy) {
   const tasks = new Map(rows.filter((t) => t.agent === "command" && !t.native && !t.taskAgent).map((t) => [`${t.run}/${t.id}`, t]));
   if (!tasks.size) return rows;
   const agentsOf = new Map();
@@ -429,8 +429,38 @@ export function foldCommandAgents(rows) {
     const sum = (field) => agents.reduce((n, a) => n + (a[field] || 0), task[field] || 0);
     const labels = [...new Set(agents.map((a) => a.modelLabel).filter(Boolean))];
     for (const a of agents) folded.set(`${a.run}/${a.id}`, task.id);
-    const warnings = agents.filter((a) => modelExceedsCeiling(a.agent, a.model, task.maxTier))
-      .map((a) => `⚠ ${a.id} (${a.agent} ${a.model}) exceeds the ${task.maxTier} ceiling`);
+    const warnings = [];
+    if (task.maxTier) {
+      try {
+        const policy = policyReader();
+        const ceiling = ceilingFor(task.maxTier, policy);
+        const parents = new Set(agents.map((a) => `${a.run}/${a.id}`));
+        const descendants = [];
+        // Native children can occur in any row order, including beneath other native children.
+        let added;
+        do {
+          added = false;
+          for (const row of rows) {
+            const key = `${row.run}/${row.id}`;
+            if (row.native && !parents.has(key) && parents.has(`${row.run}/${row.parent}`)) {
+              parents.add(key);
+              descendants.push(row);
+              added = true;
+            }
+          }
+        } while (added);
+        for (const a of [...agents, ...descendants]) {
+          if (!a.model) continue;
+          const known = Object.values(policy[a.agent]?.tiers || {}).some((tier) => tier.model === a.model);
+          if (!known) warnings.push(`⚠ ${a.id} (${a.agent} ${a.model}) unrecognized model`);
+          else if (modelExceedsCeiling(a.agent, a.model, ceiling, policy)) {
+            warnings.push(`⚠ ${a.id} (${a.agent} ${a.model}) exceeds the ${task.maxTier} ceiling`);
+          }
+        }
+      } catch {
+        // A stale ceiling or invalid policy must not prevent the board from loading.
+      }
+    }
     const activity = task.state === "running" && lead.state === "running" ? lead.now : task.now;
     merged.set(task, {
       ...task,

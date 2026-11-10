@@ -13,7 +13,7 @@ import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
@@ -110,11 +110,26 @@ function callerTier() {
 
 // A delegated agent never starts a stronger model than its own: it was given its task at a tier
 // chosen for that task, and handing the work to a stronger model defeats that choice. A babysitter's
-// tier is fixed by policy, so it is not checked.
-function refuseStronger(key, tier) {
-  const own = callerTier();
-  if (!own || !strongerThan({ agent: key, tier }, own)) return;
-  refuse(`refusing: this command runs in task ${own.run}/${own.task}, on ${tierText(own.agent, own.tier)}, and ${tierText(key, tier)} is stronger. A delegated agent never starts a stronger model than its own. Do the work at your tier, split it into pieces at your tier or lighter, or ask your orchestrator with \`node ${CLI_PATH} ask "<why it needs a stronger model>"\` (or end with NEEDS DECISION:) so it chooses.`, 2);
+// tier is fixed by policy, so only an inherited ceiling is checked for it.
+function refuseStronger(key, tier, ignoreCaller = false) {
+  try {
+    const own = ignoreCaller ? null : callerTier();
+    if (own) callerCeiling(own); // A stale caller must not turn the guard off.
+    const inherited = process.env.AGENT_ORCH_MAX_TIER;
+    const cap = inherited === undefined ? null : ceilingFor(inherited);
+    const bounds = [own, cap && {
+      agent: "claude", tier: cap.tier,
+      run: process.env.AGENT_ORCH_RUN || "environment",
+      task: process.env.AGENT_ORCH_TASK || "ceiling",
+    }].filter(Boolean);
+    for (const bound of bounds) {
+      if (!strongerThan({ agent: key, tier }, bound)) continue;
+      refuse(`refusing: this command runs in task ${bound.run}/${bound.task}, on ${tierText(bound.agent, bound.tier)}, and ${tierText(key, tier)} is stronger. A delegated agent never starts a stronger model than its own. Do the work at your tier, split it into pieces at your tier or lighter, or ask your orchestrator with \`node ${CLI_PATH} ask "<why it needs a stronger model>"\` (or end with NEEDS DECISION:) so it chooses.`, 2);
+    }
+  } catch (error) {
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
 }
 
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
@@ -162,7 +177,7 @@ export function startTask(args, extra = {}) {
     throw error;
   }
   const { tier, model, effort } = choice;
-  if (!babysit) refuseStronger(key, tier);
+  refuseStronger(key, tier, babysit);
   if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
@@ -399,6 +414,7 @@ function startCommand(run, id, args, extra) {
     maxTier = lowerCeiling(args["max-tier"] ?? prev.maxTier, process.env.AGENT_ORCH_MAX_TIER, callerCeiling(own));
     defaults = ceilingEnv(maxTier);
     if (own?.effort) defaults = ceilingEnv(maxTier, {
+      ...process.env,
       AGENT_ORCH_MAX_EFFORT: lowerEffort(defaults.AGENT_ORCH_MAX_EFFORT, own.effort),
     });
   } catch (error) {

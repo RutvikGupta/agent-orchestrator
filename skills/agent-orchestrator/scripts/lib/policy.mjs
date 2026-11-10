@@ -60,12 +60,18 @@ export function policyProblems(policy) {
   return problems;
 }
 
-export function loadPolicy() {
-  const policy = readJson(POLICY_PATH);
-  if (!policy) die(`missing or invalid ${POLICY_PATH}: it is not readable JSON`);
+// Dashboard readers need errors they can catch rather than an exit of the whole worker.
+export function readPolicy(file = POLICY_PATH) {
+  const policy = readJson(file);
+  if (!policy) throw new ModelRefused(`missing or invalid ${file}: it is not readable JSON`);
   const problems = policyProblems(policy);
-  if (problems.length) die(`invalid ${POLICY_PATH}: ${problems.join("; ")}`);
+  if (problems.length) throw new ModelRefused(`invalid ${file}: ${problems.join("; ")}`);
   return policy;
+}
+
+export function loadPolicy() {
+  try { return readPolicy(); }
+  catch (error) { die(error.message); }
 }
 
 // An agent's tier names, lightest first.
@@ -185,8 +191,7 @@ export function tierText(key, name) {
 
 // Ceilings use Claude tier names, with policy ranks selecting the strongest model each agent
 // may use. They are inherited defaults for CLIs, not a security boundary against explicit flags.
-export function ceilingFor(name) {
-  const policy = loadPolicy();
+export function ceilingFor(name, policy = loadPolicy()) {
   const ceiling = tierOf(policy.claude.tiers, name);
   if (!ceiling) refuse(`unknown --max-tier "${name}" (choose: ${Object.keys(policy.claude.tiers).join(", ")})`);
   const rank = rankOf(policy, "claude", name);
@@ -207,13 +212,16 @@ export function callerCeiling(own) {
   if (!own?.tier) return null;
   const policy = loadPolicy();
   const rank = rankOf(policy, own.agent, own.tier);
-  return Object.keys(policy.claude.tiers)
+  if (rank === null) refuse(`caller tier ${own.agent} ${own.tier} is missing from policy; refusing an unbounded command`);
+  const eligible = Object.keys(policy.claude.tiers)
     .filter((tier) => rankOf(policy, "claude", tier) <= rank)
-    .sort((a, b) => rankOf(policy, "claude", b) - rankOf(policy, "claude", a))[0] || null;
+    .sort((a, b) => rankOf(policy, "claude", b) - rankOf(policy, "claude", a));
+  if (!eligible.length) refuse(`no Claude ceiling is at or below caller tier ${own.agent} ${own.tier}`);
+  return eligible[0];
 }
 
 export function lowerCeiling(...names) {
-  return names.filter(Boolean).map(ceilingFor).sort((a, b) => a.rank - b.rank)[0]?.tier || null;
+  return names.filter((name) => name !== undefined && name !== null).map((name) => ceilingFor(name)).sort((a, b) => a.rank - b.rank)[0]?.tier || null;
 }
 
 const effortLevels = ["minimal", "low", "medium", "high", "xhigh", "max"];
@@ -236,32 +244,48 @@ export function boundedModel(key, name, env = process.env) {
   return choice;
 }
 
-export function modelExceedsCeiling(agent, model, maxTier) {
+export function modelExceedsCeiling(agent, model, maxTier, policy = loadPolicy()) {
   if (!maxTier || !model) return false;
-  const policy = loadPolicy();
   if (!policy[agent]) return false;
   const name = Object.keys(policy[agent].tiers).find((tier) => policy[agent].tiers[tier].model === model);
-  return Boolean(name && rankOf(policy, agent, name) > ceilingFor(maxTier).rank);
+  return Boolean(name && rankOf(policy, agent, name) > (typeof maxTier === "object" ? maxTier : ceilingFor(maxTier, policy)).rank);
 }
 
 export function ceilingEnv(name, env = process.env) {
-  if (!name) return {};
-  const cap = ceilingFor(name);
+  if (name === null || name === undefined) return {};
+  const policy = loadPolicy();
+  const cap = ceilingFor(name, policy);
   const effort = lowerEffort(cap.effort, env.AGENT_ORCH_MAX_EFFORT);
+  const rankOfModel = (model) => {
+    const tier = Object.keys(policy.claude.tiers).find((tier) => policy.claude.tiers[tier].model === model);
+    return tier ? rankOf(policy, "claude", tier) : null;
+  };
   const aliases = Object.fromEntries(Object.entries({ HAIKU: "light", SONNET: "standard", OPUS: "complex", FABLE: "frontier" })
-    .filter(([, tier]) => tierOf(loadPolicy().claude.tiers, tier))
-    .map(([family, tier]) => [`ANTHROPIC_DEFAULT_${family}_MODEL`, boundedModel("claude", tier, { AGENT_ORCH_MAX_TIER: name }).model]));
+    .filter(([, tier]) => tierOf(policy.claude.tiers, tier))
+    .map(([family, tier]) => {
+      const key = `ANTHROPIC_DEFAULT_${family}_MODEL`;
+      const pinned = env[key];
+      const rank = rankOfModel(pinned);
+      return [key, rank !== null && rank <= cap.rank ? pinned
+        : boundedModel("claude", tier, { AGENT_ORCH_MAX_TIER: name }).model];
+    }));
+  const lowered = {};
+  // A ceiling does not select a model or effort for a script. Only lower existing choices;
+  // leaving effort unset lets a script's --effort and cheaper model defaults keep working.
+  for (const key of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"]) {
+    if (rankOfModel(env[key]) > cap.rank) lowered[key] = cap.claude.model;
+  }
+  for (const key of ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SUBAGENT_EFFORT"]) {
+    if (env[key] && lowerEffort(env[key], effort) !== env[key]) lowered[key] = effort;
+  }
   return {
     ...aliases,
     AGENT_ORCH_MAX_TIER: name,
     AGENT_ORCH_MAX_MODEL_CLAUDE: cap.claude.model,
     AGENT_ORCH_MAX_MODEL_CODEX: cap.codex.model,
     AGENT_ORCH_MAX_EFFORT: effort || "",
-    ANTHROPIC_MODEL: cap.claude.model,
-    ANTHROPIC_DEFAULT_MODEL: cap.claude.model,
-    CLAUDE_CODE_SUBAGENT_MODEL: cap.claude.model,
+    ...lowered,
+    CLAUDE_CODE_SUBAGENT_MODEL: undefined,
     CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
-    CLAUDE_CODE_SUBAGENT_EFFORT: effort || "",
-    CLAUDE_CODE_EFFORT_LEVEL: effort || "",
   };
 }
