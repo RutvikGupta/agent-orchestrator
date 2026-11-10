@@ -299,7 +299,13 @@ Usage: node orch.mjs <command> [args] [--json]
   pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
                                   Watch pull requests (number, URL, or branch) with gh until one
                                   needs you: a check failed, all checks finished, a new review or
-                                  comment, a changed review decision, a conflict, or it left OPEN.
+                                  comment, a changed review decision, a conflict, a moved base,
+                                  removal from the merge queue, or it left OPEN. Run by a
+                                  babysitter it polls once and returns: its parked watcher waits,
+                                  with no model, and absorbs checks that pass with nothing else open.
+                                  A parked babysitter whose last call sent more than
+                                  AGENT_ORCH_BABYSIT_HANDOFF_TOKENS (default 150000) resumes in a
+                                  fresh session from its handoff note, when that note is current.
                                   Exit 0 = needs you, 3 = timed out (default 9m; 0 waits forever),
                                   4 = the checkout has commits the pull request lacks: push first.
                                   Exit 6 = a new unread message for this agent; read it, then watch again.

@@ -35,7 +35,7 @@ function stateLabel(t) {
 // "(2 attempts, 1 rework round)": the attempts, and the review rounds that asked for changes.
 function attemptsLabel(t) {
   const reworks = (t.reviewRounds || []).filter((r) => r.verdict === "changes").length;
-  const parts = [t.attempt > 1 ? `${t.attempt} attempts` : null, reworks ? `${reworks} rework round${reworks === 1 ? "" : "s"}` : null].filter(Boolean);
+  const parts = [t.attempt > 1 ? `${t.attempt} attempts` : null, t.handoff ? `fresh session from a handoff at ${compact(t.handoff.contextTokens)} tokens` : null, reworks ? `${reworks} rework round${reworks === 1 ? "" : "s"}` : null].filter(Boolean);
   return parts.length ? ` (${parts.join(", ")})` : "";
 }
 

@@ -4,14 +4,20 @@
 // no model tokens while it waits. The last state reported for each pull request is kept in
 // PR_DIR, so the next watch returns only for something new. A pull request seen for the first time
 // with nothing to report is recorded too, as the baseline that later comments and reviews count from.
-// A parked babysitter's watcher (park.mjs) compares with the same records, without changing them.
+// A parked babysitter's watcher (park.mjs) compares with the same records. It records a state only
+// when it deals with it itself: when it resumes the babysitter with what changed, or when the change
+// needs no model at all (quietItems).
+//
+// A babysitter never waits here: its watch polls once and returns, and when nothing is new it parks,
+// so that the waiting is done by its watcher, a shell loop with no model. A model session held open
+// across a watch pays for its whole context again on its next call.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { PR_DIR, RUNS_DIR } from "../config.mjs";
 import { inboxWake } from "../inbox.mjs";
-import { prAttention, prSnapshot, prText } from "../github.mjs";
+import { ghJson, prAttention, prSnapshot, prText } from "../github.mjs";
 import { die, emit, git, parseDuration, readJson, which, writeJson } from "../util.mjs";
 
 const seenPath = (s) => path.join(PR_DIR, `${s.key}.json`);
@@ -23,6 +29,80 @@ export const readSeen = (s) => readJson(seenPath(s));
 export function recordSeen(s) {
   fs.mkdirSync(PR_DIR, { recursive: true });
   writeJson(seenPath(s), { ...s, attention: undefined, seenAt: new Date().toISOString() });
+}
+
+// A pull request's snapshot, plus whether it is in the merge queue: `queued` is true or false, or
+// null when GitHub does not say (no merge queue, an older server, or a failed call).
+export function watchSnapshot(cwd, ref) {
+  const s = prSnapshot(cwd, ref);
+  if (s.error) return s;
+  s.queued = null;
+  const [owner, name] = (s.repo || "").split("/");
+  if (owner && name) {
+    const query = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){mergeQueueEntry{state}}}}";
+    const pr = ghJson(cwd, ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${s.number}`]).value?.data?.repository?.pullRequest;
+    if (pr && "mergeQueueEntry" in pr) s.queued = Boolean(pr.mergeQueueEntry);
+    s.reviewIds = reviewIds(cwd, owner, name, s);
+  }
+  return s;
+}
+
+// The ids of the pull request's reviews, or null when they cannot be told (the call failed, or
+// there is more than one page of them).
+function reviewIds(cwd, owner, name, s) {
+  const query = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviews(last:100){totalCount nodes{id}}}}}";
+  const reviews = ghJson(cwd, ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${s.number}`]).value?.data?.repository?.pullRequest?.reviews;
+  if (!Array.isArray(reviews?.nodes) || reviews.totalCount > reviews.nodes.length || reviews.nodes.some((r) => !r.id)) return null;
+  return reviews.nodes.map((r) => r.id);
+}
+
+// prAttention's count of new reviews, taken from the reviews' ids when both snapshots list them, so
+// that a review counts as new exactly when it was not there before; otherwise the count stays.
+function newReviewsById(why, s, seen) {
+  if (!Array.isArray(s.reviewIds) || !Array.isArray(seen?.reviewIds)) return why;
+  const kept = why.filter((item) => !/^\d+ new review\(s\)$/.test(item));
+  const before = new Set(seen.reviewIds);
+  const fresh = s.reviewIds.filter((id) => !before.has(id)).length;
+  if (fresh > 0) kept.push(`${fresh} new review(s)`);
+  return kept;
+}
+
+// Keep what the last recorded state says about the merge queue up to date when nothing is reported:
+// entering the queue is no event, but leaving it later is one only against a record that says the
+// pull request was in it.
+export function rememberQueue(s, seen) {
+  if (!seen || s.error || s.queued === null || s.queued === undefined || seen.queued === s.queued) return;
+  writeJson(seenPath(s), { ...seen, queued: s.queued });
+}
+
+// What changed since the last reported state: prAttention's items, plus the two that only show
+// between two snapshots: the pull request left the merge queue while still open, and its base moved
+// (another base branch, or the branch fell behind a base that requires it to be up to date).
+export function watchAttention(s, seen) {
+  const why = newReviewsById(prAttention(s, seen), s, seen);
+  if (s.state !== "OPEN") return why;
+  if (seen?.queued === true && s.queued === false) why.push("left the merge queue without merging: find out why it was removed");
+  if (seen?.base && seen.base !== s.base) why.push(`base changed: ${seen.base} → ${s.base}`);
+  if (s.mergeState === "BEHIND" && !(seen?.head === s.head && seen.mergeState === "BEHIND")) why.push(`behind ${s.base}: the base moved`);
+  return why;
+}
+
+// Whether every item of `attention` needs no judgment, so that a parked babysitter's watcher records
+// the state and keeps waiting instead of waking a model: the checks went green and nothing else
+// changed, while GitHub says a required review is still missing, or the pull request already sits in
+// the merge queue. In every other case green checks may be the moment to merge (an approved pull
+// request, or one that needs no review at all), which is the babysitter's to do, so they wake it.
+export function quietItems(s, attention) {
+  if (!attention.length || s.state !== "OPEN") return false;
+  if (!attention.every((item) => item === "every check passed")) return false;
+  return s.queued === true || s.reviewDecision === "REVIEW_REQUIRED";
+}
+
+// One line on a snapshot's state, for the brief that resumes a parked babysitter.
+export function stateLine(s) {
+  const c = s.checks;
+  const checks = c.total ? `${c.passed} passed, ${c.failed.length} failed${c.failed.length ? ` (${c.failed.join(", ")})` : ""}, ${c.pending} pending` : "none reported";
+  return `${s.state.toLowerCase()}, head ${String(s.head).slice(0, 8)} into ${s.base}; checks: ${checks}; review: ${s.reviewDecision || "none"}; unresolved threads: ${s.unresolvedThreads ?? "?"}; comments: ${s.comments}; reviews: ${s.reviews}; mergeable: ${s.mergeable} (${s.mergeState})${s.queued === null || s.queued === undefined ? "" : `; in the merge queue: ${s.queued ? "yes" : "no"}`}`;
 }
 
 // Whether the checkout at `cwd`, on the pull request's branch, holds commits the pull request does
@@ -51,10 +131,12 @@ export async function cmdPrWatch(args) {
   if (!which("gh")) die("gh is not installed or not on PATH");
   const cwd = path.resolve(args.repo || process.cwd());
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
-  const deadline = timeout === 0 ? Infinity : Date.now() + timeout;
+  // A babysitter's watch polls once, whatever --timeout says: its parked watcher does the waiting.
+  const babysits = callerBabysits();
+  const deadline = babysits ? Date.now() : timeout === 0 ? Infinity : Date.now() + timeout;
   const interval = Math.max(15000, parseDuration(args.interval || "60s"));
   for (let poll = 0; ; poll++) {
-    const reports = refs.map((ref) => prSnapshot(cwd, ref));
+    const reports = refs.map((ref) => watchSnapshot(cwd, ref));
     if (poll === 0 && reports.some((s) => s.error)) die(prText(reports.map((s) => ({ ...s, attention: [] }))));
     // Waiting while this checkout holds commits the pull request does not have would leave a fix
     // unpublished, so refuse to watch until they are pushed.
@@ -72,17 +154,18 @@ export async function cmdPrWatch(args) {
         continue;
       }
       const seen = readSeen(s);
-      s.attention = prAttention(s, seen);
+      s.attention = watchAttention(s, seen);
       // Without a record, new comments and reviews have nothing to count from.
       if (!seen && !s.attention.length && !args.once) recordSeen(s);
+      if (!s.attention.length && !args.once) rememberQueue(s, seen);
     }
     const due = reports.filter((s) => s.attention.length);
     const message = wake.check();
     const timedOut = Date.now() >= deadline;
     if (due.length || args.once || message || timedOut) {
       if (!args.once) for (const s of due) recordSeen(s);
-      const idle = callerBabysits()
-        ? "\n(nothing new: the watch timed out. If nothing is unpushed and every item is handled, park: end your turn with a final message whose first line is `PARKED: PR #<n> waits for <what>` and an orch-result outcome `parked`; a watcher resumes you on the next event)"
+      const idle = babysits
+        ? "\n(nothing new, and a babysitter's watch does not wait. If nothing is unpushed and every item is handled, park: end your turn with a final message whose first line is `PARKED: PR #<n> waits for <what>` and an orch-result outcome `parked`; a watcher resumes you on the next event)"
         : "\n(nothing new: the watch timed out; run it again)";
       const tail = due.length || args.once || message ? "" : idle;
       emit(args, { attention: due.length > 0, prs: reports, ...(message ? { message } : {}) }, `${prText(reports)}${tail}${message ? `\n${message.hint}` : ""}`);

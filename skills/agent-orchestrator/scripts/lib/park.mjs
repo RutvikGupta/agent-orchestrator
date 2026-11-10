@@ -7,11 +7,21 @@
 // seconds it compares the size of the task's inbox with the last size it saw; when the inbox grows,
 // and otherwise once per interval (AGENT_ORCH_PARK_INTERVAL, default 60s), it runs this file's
 // `check`, a short Node process (about 50 MB for a second or two) that reads the pull request with
-// the same snapshot and comparison as `pr-watch` without recording anything as seen, reads the
-// unread messages, and resumes the task when either has something. The resumed babysitter runs
-// `pr-watch` first, which reports the same items and records them. The messages go, whole, into
-// park-messages.md in the new attempt's folder (the brief quotes short ones), and only those are
-// marked read.
+// the same snapshot and comparison as `pr-watch`, reads the unread messages, and resumes the task
+// when either has something. All the waiting is done here, with no model: the babysitter's own
+// `pr-watch` returns at once, and a change that needs no judgment (the checks went green and nothing
+// else is open; pr-watch.mjs, quietItems) is recorded as seen without waking anyone. A resume's
+// brief states what changed and the pull request's state now, and the watcher records that state as
+// seen, so the resumed session acts on the items without reading the pull request again. The
+// A session's whole context is sent again on every call, so a babysitter that has fixed several
+// review rounds pays for all of them on each later call. When the parked session's latest call was
+// larger than AGENT_ORCH_BABYSIT_HANDOFF_TOKENS (default 150000) and the babysitter updated its
+// handoff note (handoff.md in the task's folder) in the attempt that parked, the resume starts a
+// fresh session instead: the brief the babysitter first got, then the note, then what changed.
+// Without a current note the same session resumes, told to write one: memory is never dropped
+// without a note. The
+// messages go, whole, into park-messages.md in the new attempt's folder (the brief quotes short
+// ones), and only those are marked read.
 //
 // The finish watcher that `start` runs beside every babysitter's relay (finish-notice.mjs) starts
 // the first watcher once the relay ends parked. Each parked attempt's folder keeps its watchers'
@@ -32,18 +42,21 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { HANDOFF_RULES } from "./briefs.mjs";
 import { CLI_PATH } from "./config.mjs";
-import { prAttention, prSnapshot } from "./github.mjs";
 import { INBOX_FILE, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
 import { PARK_CHECK_FILE, exists, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
-import { aheadOfPr, readSeen, recordSeen } from "./commands/pr-watch.mjs";
+import { aheadOfPr, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const LOG = "park-watcher.log";
 // The messages a resume delivers, in full, in the new attempt's folder.
 export const PARK_MESSAGES_FILE = "park-messages.md";
+// A babysitter's handoff note, and the brief its first session was given, both in the task's folder.
+export const HANDOFF_FILE = "handoff.md";
+export const BABYSIT_BRIEF_FILE = "babysit-brief.md";
 // Messages up to this long are also quoted in the resume brief.
 const INLINE_CHARS = 1500;
 // What `check` exits with to end the watcher's loop: the park is over (resumed, stopped, closed,
@@ -62,6 +75,101 @@ export function parkInterval(value = process.env.AGENT_ORCH_PARK_INTERVAL) {
   const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value ?? "").trim());
   const ms = m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : 60000;
   return Math.max(1, Math.round(ms / 1000));
+}
+
+// The context size above which a parked babysitter resumes in a fresh session:
+// AGENT_ORCH_BABYSIT_HANDOFF_TOKENS, a whole number of tokens, default 150000.
+export function handoffLimit(value = process.env.AGENT_ORCH_BABYSIT_HANDOFF_TOKENS) {
+  const n = Number(String(value ?? "").trim());
+  return Number.isInteger(n) && n > 0 ? n : 150000;
+}
+
+// The size of the latest model call of the session whose events are in `dir`: its input tokens,
+// cached ones included, which is the context every further call would send again. Calls of
+// sub-agents are not the session's. Null when the events show none.
+export function lastCallTokens(dir) {
+  let text;
+  try {
+    const file = path.join(dir, "events.jsonl");
+    const size = fs.statSync(file).size;
+    const tail = Math.min(size, 4 * 1024 * 1024); // the latest call is near the end
+    const buffer = Buffer.alloc(tail);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buffer, 0, tail, size - tail);
+    } finally {
+      fs.closeSync(fd);
+    }
+    text = buffer.toString("utf8");
+  } catch {
+    return null;
+  }
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"usage"')) continue;
+    let event;
+    try {
+      event = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    const usage = event.type === "assistant" && !event.parent_tool_use_id ? event.message?.usage : null;
+    if (usage) return (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+  }
+  return null;
+}
+
+// The brief a babysitter's first session was given: the copy `start` kept, or, for a task started
+// before `start` kept one, its first attempt's whole brief. That one ends with the notes `start`
+// appended, which the fresh session's brief then holds twice: a repeated note costs little, and
+// cutting them off could cut an instruction of the brief itself.
+export function originalBrief(dir) {
+  for (const file of [path.join(dir, BABYSIT_BRIEF_FILE), path.join(dir, "attempt-1", "orch-brief.md")]) {
+    try {
+      return fs.readFileSync(file, "utf8");
+    } catch {}
+  }
+  return "";
+}
+
+// Whether a parked attempt (folder `dir`) should resume in a fresh session: { file, tokens, limit,
+// note: "current" | "stale" | "missing", fresh, original, text }. Fresh only when the session's
+// latest call was above the limit, the note was written or updated since the parked attempt
+// started, and the brief the babysitter first got was kept; `original` and `text` hold that brief
+// and the note then.
+export function handoffOf(run, task, dir) {
+  const file = path.join(taskDir(run, task.id), HANDOFF_FILE);
+  const tokens = lastCallTokens(dir);
+  const limit = handoffLimit();
+  let text = "", note = "missing";
+  try {
+    text = fs.readFileSync(file, "utf8");
+    if (text.trim()) note = fs.statSync(file).mtimeMs >= Date.parse(task.startedAt) ? "current" : "stale";
+  } catch {}
+  const original = originalBrief(taskDir(run, task.id));
+  // A note that holds an unfilled brief marker would make `start` refuse the brief.
+  const fresh = tokens !== null && tokens > limit && note === "current" && Boolean(original.trim()) && !/<fill in:/.test(text);
+  return { file, tokens, limit, note, fresh, original: fresh ? original : null, text: fresh ? text : null };
+}
+
+// The brief of a fresh session that takes over from a parked one: the brief the babysitter first
+// got, then its handoff note, then what changed (resumeBrief's text for a fresh session).
+export function handoffBrief(handoff, changed) {
+  return [
+    handoff.original.trimEnd(),
+    "",
+    "---",
+    "",
+    "## Handoff note from your previous session",
+    "",
+    `You take over from an earlier session of this babysitter. It parked, and its context had grown to ${handoff.tokens} tokens, which every further call would have sent again, so you start fresh. It left the note below: trust it for everything that happened so far, and keep it current at \`${handoff.file}\` as your brief says.`,
+    "",
+    handoff.text.trim(),
+    "",
+    "---",
+    "",
+    changed,
+  ].join("\n");
 }
 
 const attemptDir = (run, id, n) => path.join(taskDir(run, id), `attempt-${n}`);
@@ -341,16 +449,19 @@ export function messagesText(messages) {
 
 // The brief that resumes a parked babysitter: what its watcher saw, and what to do next. Every
 // message is in full in `messagesFile`; short ones are quoted here too.
-export function resumeBrief(run, task, parked, pr, messages, messagesFile = null) {
+// `handoff` (handoffOf) says whether the brief opens a fresh session, and whether the session's note
+// is missing or stale, which the same session is then told to put right.
+export function resumeBrief(run, task, parked, pr, messages, messagesFile = null, handoff = null) {
+  const fresh = Boolean(handoff?.fresh);
   const ref = task.pr?.url || (parked.pr ? `#${parked.pr}` : "its pull request");
   const watch = `node ${CLI_PATH} pr-watch ${task.pr?.number ?? task.pr?.url ?? "<PR>"} --repo .`;
-  const lines = [
-    "## Your parked watcher woke you",
-    "",
-    `You parked on pull request ${ref} (${parked.waitsFor}). Since then:`,
-    "",
-  ];
+  const lines = fresh
+    ? ["## What changed while the previous session was parked", "", `The previous session parked on pull request ${ref} (${parked.waitsFor}). Since then:`, ""]
+    : ["## Your parked watcher woke you", "", `You parked on pull request ${ref} (${parked.waitsFor}). Since then:`, ""];
   if (pr?.attention?.length) lines.push(`- On the pull request: ${pr.attention.join("; ")}.`);
+  // The state the watcher read, so the session need not read the pull request again to find it.
+  if (pr?.now) lines.push(`- The pull request now (read ${pr.at}): ${stateLine(pr.now)}.`);
+  if (pr?.before) lines.push(`- When you last looked: ${stateLine(pr.before)}.`);
   if (messages.length) {
     lines.push(`- ${messages.length === 1 ? "A message arrived" : `${messages.length} messages arrived`}. Read ${messages.length === 1 ? "it" : "every one"} in full in \`${messagesFile}\` before anything else.`, "");
     for (const m of messages) {
@@ -360,10 +471,20 @@ export function resumeBrief(run, task, parked, pr, messages, messagesFile = null
       if (m.from === "user") lines.push(`    ${replyHint(run.id, task.id)}`, "");
     }
   }
+  const acts = pr?.attention?.length
+    ? `The items above are everything that changed on the pull request, and they are recorded as seen: do not run a watch or read the pull request's state again to find them. ${fresh ? 'Do the start checks of your brief, then go straight to step 2 of its loop' : 'Go straight to step 2 of your loop ("Loop" in the babysitter brief you started with)'} and handle each one, reading only what an item needs (a failed check's log, the new comments).`
+    : `Nothing changed on the pull request, so do not read its state again.`;
   lines.push(
     "",
-    `Go back to your loop ("Loop" in the babysitter brief you started with). First run \`${watch}\` with its usual timeout: it prints the pull-request items above and records them as seen. Handle every item and every message, push, and reply as your rules say. ${messages.length ? "The messages are marked read once this brief starts. " : ""}Park again only when a watch finds nothing new, nothing is unpushed, and every item is handled.`,
+    `${acts} Handle every ${messages.length ? "item and every message" : "item"}, push, and reply as your rules say. ${messages.length ? "The messages are marked read once this brief starts. " : ""}Then run \`${watch}\`, which returns at once, and park again when it finds nothing new, nothing is unpushed, and every item is handled.`,
   );
+  // Memory is never dropped without a note: a session that left none, or an old one, is kept.
+  if (handoff && !fresh && handoff.note !== "current") {
+    lines.push(
+      "",
+      `Your handoff note at \`${handoff.file}\` ${handoff.note === "missing" ? "does not exist" : "was not updated in your last attempt"}. Write it before you park again, and update it before every park. Every call you make re-sends your whole context${handoff.tokens ? ` (${handoff.tokens} tokens at your last call)` : ""}; once that is above ${handoff.limit} tokens your watcher resumes you in a fresh session that knows only your brief, that note and what changed, but only when the note was updated in the attempt that parked. ${HANDOFF_RULES}`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -392,14 +513,23 @@ export async function checkPark(dir, generation) {
   const ref = task.pr?.url || (task.pr?.number ? String(task.pr.number) : null);
   if (ref) {
     const cwd = task.cd && fs.existsSync(task.cd) ? task.cd : run.repo;
-    const s = prSnapshot(cwd, ref);
+    const s = watchSnapshot(cwd, ref);
     if (s.error) record.error = s.error;
     else {
       const seen = readSeen(s);
-      const attention = prAttention(s, seen);
+      let attention = watchAttention(s, seen);
       if (!seen && !attention.length) recordSeen(s);
+      // Entering the merge queue is no event, but it is remembered, so that leaving it is one.
+      if (!attention.length) rememberQueue(s, seen);
+      // A change that needs no judgment wakes no model: record it as seen and keep waiting. With a
+      // message to deliver the babysitter wakes anyway, and is told about it.
+      if (!messages.length && quietItems(s, attention)) {
+        recordSeen(s);
+        record.quiet = attention;
+        attention = [];
+      }
       if (aheadOfPr(cwd, s)) attention.push("this checkout has commits the pull request lacks: push them");
-      pr = { number: s.number, state: s.state, attention };
+      pr = { number: s.number, state: s.state, attention, now: s, before: seen, at: record.at };
     }
   }
   record.events = [...(pr?.attention || []), ...messages.map((m) => `message ${m.id}`)];
@@ -408,8 +538,9 @@ export async function checkPark(dir, generation) {
     writeJson(file, record);
     return 0;
   }
+  const handoff = handoffOf(run, task, dir);
   const session = result.sessionId || result.threadId;
-  if (!session) {
+  if (!session && !handoff.fresh) {
     writeJson(file, { ...record, error: "its result has no session id to resume" });
     return 0;
   }
@@ -421,20 +552,25 @@ export async function checkPark(dir, generation) {
   const brief = path.join(dir, "park-resume.md");
   let started;
   try {
-    fs.writeFileSync(brief, resumeBrief(run, task, parked, pr, messages, messagesFile));
+    const changed = resumeBrief(run, task, parked, pr, messages, messagesFile, handoff);
+    fs.writeFileSync(brief, handoff.fresh ? handoffBrief(handoff, changed) : changed);
     ({ task: started } = startTask({
-      _: [run.dir, id], agent: task.agent, brief, passthrough: ["--session", session], parkClaim: claim,
+      _: [run.dir, id], agent: task.agent, brief, passthrough: handoff.fresh ? [] : ["--session", session], parkClaim: claim,
+      fromHandoff: handoff.fresh,
       attemptFiles: messages.length ? { [PARK_MESSAGES_FILE]: messagesText(messages) } : {},
-    }));
+      // The record that this attempt began a fresh session from a handoff, and at what context size.
+    }, handoff.fresh ? { handoffs: { ...(task.handoffs || {}), [n + 1]: { fromAttempt: n, contextTokens: handoff.tokens, limit: handoff.limit, at: record.at } } } : {}));
   } catch (error) {
     claim.release();
     if (!(error instanceof StartRefused)) throw error;
     writeJson(file, { ...record, waiting: error.message });
     return 0;
   }
+  // The brief told the session what changed, so that state is now the last one reported.
+  if (pr?.attention.length) recordSeen(pr.now);
   // Only the messages written in full into the new attempt's folder were delivered.
   markRead(taskDir(run, id), messages.map((m) => m.id), { attempt: started.attempt });
-  writeJson(file, { ...record, resumed: started.attempt });
+  writeJson(file, { ...record, resumed: started.attempt, ...(handoff.fresh ? { freshSession: true, contextTokens: handoff.tokens } : {}) });
   return DONE;
 }
 

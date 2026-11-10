@@ -25,6 +25,22 @@ Each agent's brief keeps every constraint of this brief (the agents you start ne
 `;
 }
 
+// What a babysitter's handoff note holds. A parked babysitter whose context has grown large is
+// resumed in a fresh session from this note (park.mjs), so it must say what the session knows.
+export const HANDOFF_RULES = "At most 60 lines: the pull request, branch and worktree; what each review round asked and the commit that answered it; each open thread and its state; each reviewer and where their review was requested; decisions taken and why; what is pending; and what was tried and failed.";
+
+// Appended to a babysitter's brief: where its handoff note lives, and why it keeps it current.
+export function handoffNote(file) {
+  return `
+
+---
+
+## Handoff note
+
+Keep a handoff note current at \`${file}\`, and update it before every park. Every call you make re-sends your whole context, so once it has grown large your watcher resumes you in a fresh session that knows only your brief, this note, and what changed on the pull request. Without a note updated in the attempt that parks, it has to keep the large session. ${HANDOFF_RULES}
+`;
+}
+
 // Appended when the user asked to review a task's work before it lands (start --no-publish).
 export function publishHoldNote() {
   return `
@@ -51,7 +67,7 @@ Questions reach whoever started you while you work, so never stop to wait for an
 
 - When you are blocked (a gate cannot run here, a credential or service is missing, or the same failure has survived two fix attempts), stop and report it right away in your final message, with the exact command and error. Do not keep retrying or work around it silently.
 - Decide yourself whatever this brief's goal and scope cover, choosing what the brief, the repository's rules, and the existing code point to. List those choices in your final message.${babysit ? " For a reviewer's request: make it when it is within the pull request's scope; otherwise reply that it is a follow-up and list it in the pull request description." : ""}
-- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it${babysit ? ", and keep your loop going" : ""}; when only that is left, wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives.
+- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it${babysit ? ", and keep your loop going" : ""}; when only that is left, ${babysit ? "park as your brief says (the answer is a message, which wakes you) rather than waiting with \`nap\`: a parked wait spends no tokens, and a session held open pays for its whole context again when the wait returns" : `wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives`}.
 - If nothing else is left and no answer has come (or you cannot run \`ask\`), finish${babysit ? " and push" : ""} what you can, then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
 
 ## Keep the final message short

@@ -5,10 +5,10 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
-import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
+import { decisionNote, handoffNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
-import { claimParked, keptEnd, reviveParked } from "../park.mjs";
+import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, keptEnd, reviveParked } from "../park.mjs";
 import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { escalationFor, failureHint } from "../escalation.mjs";
 import { readPlan, runningConflicts } from "../plan.mjs";
@@ -281,6 +281,13 @@ export function startTask(args, extra = {}) {
       fs.appendFileSync(brief, nestingNote(childDepth));
     }
     if (noPublish && !args["read-only"]) fs.appendFileSync(brief, publishHoldNote());
+    if (babysit) {
+      fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
+      // Keep the brief a babysitter's session starts from, as it was given: a fresh session that
+      // takes over from a handoff note starts from it again. A brief that continues a session, or
+      // the one the watcher composes for that fresh session, is not it.
+      if (!args.fromHandoff && !args.passthrough.includes("--session")) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
+    }
     fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key));
     // Files the brief points to, such as the messages a parked task's watcher delivers in full.
     for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
