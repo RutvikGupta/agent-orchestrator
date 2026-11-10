@@ -118,7 +118,7 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
   const parentRun = runById(parent.run);
   const task = parentRun && loadTask(parentRun, parent.task);
   const gone = !parentRun ? "its run is gone" : !task ? "its task is gone"
-    : relayAlive(task.pid, task.startedAt) || isParked(parentRun, task) ? null : "it is not running";
+    : relayAlive(task.pid, task.startedAt, task.outDir) || isParked(parentRun, task) ? null : "it is not running";
   return gone ? user(agent, gone, agentTask) : { to: "agent", agent, agentTask, gone: null };
 }
 
@@ -181,7 +181,7 @@ function anyRelayAlive(run) {
   }
   return ids.some((id) => {
     const task = loadTask(run, id);
-    return Boolean(task?.pid) && (relayAlive(task.pid, task.startedAt) || isParked(run, task));
+    return Boolean(task?.pid) && (relayAlive(task.pid, task.startedAt, task.outDir) || isParked(run, task));
   });
 }
 

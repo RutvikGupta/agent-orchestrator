@@ -161,7 +161,7 @@ function orphanState(links, broken) {
       const task = parent ? loadTask(parent, o.parentTask) : null;
       gone = !parent
         ? { gone: true, why: `its parent run ${broken} is gone` }
-        : !task || (!relayAlive(task.pid, task.startedAt) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
+        : !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
     } else gone = sessionGone(o);
     const seen = Date.parse(o?.lastSeenAt || link.run.createdAt) || 0;
     return { ...gone, seenAt: seen ? new Date(seen).toISOString() : null, stale: Date.now() - seen > after };

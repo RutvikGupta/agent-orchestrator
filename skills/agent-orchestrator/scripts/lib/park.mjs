@@ -379,7 +379,7 @@ export async function checkPark(dir, generation) {
   const task = loadTask(run, id);
   if (!task || task.attempt !== n || parkWatcher(dir).generation !== generation) return DONE;
   const held = parkClaim(dir);
-  if (["live", "done"].includes(held.state) || relayAlive(task.pid, task.startedAt)) return DONE;
+  if (["live", "done"].includes(held.state) || relayAlive(task.pid, task.startedAt, task.outDir)) return DONE;
   // A resume that died after starting its relay: that relay is the task's new attempt.
   if (held.state === "abandoned" && adoptRelay(run, dir, held, "watcher")) return DONE;
   const result = readJson(path.join(dir, "result.json"));

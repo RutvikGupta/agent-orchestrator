@@ -88,10 +88,11 @@ async function stop() {
     if (m) table.set(Number(m[1]), m[2]);
   }
   // As relayAlive() in runs.mjs: the process must still be a relay, or a fresh fork of one.
-  const relayAlive = (pid, startedAt) => {
+  const relayAlive = (pid, startedAt, outDir) => {
     const command = pid ? table.get(Number(pid)) : undefined;
     if (command === undefined) return false;
-    if (command.includes("relay.mjs")) return true;
+    // This task's own relay: one for another attempt folder is a later process with the same PID.
+    if (command.includes("relay.mjs")) return !outDir || `${command} `.includes(`--out-dir ${outDir} `);
     const age = startedAt ? Date.now() - Date.parse(startedAt) : Infinity;
     return age >= 0 && age < 10000;
   };
@@ -119,7 +120,7 @@ async function stop() {
       const attempt = task.attempt || 0;
       if (!attempt || !task.pid) continue;
       const label = `${run.id}/${id}`;
-      const alive = relayAlive(task.pid, task.startedAt);
+      const alive = relayAlive(task.pid, task.startedAt, task.outDir);
       const parked = !alive && isParked(run, task);
       if (alive || parked) {
         running.push(id);

@@ -120,27 +120,37 @@ function processCommand(pid) {
   return rows?.get(pid)?.command ?? null;
 }
 
-export function relayAlive(pid, startedAt = null) {
+// Whether a relay's command line is the one that writes to attempt folder `outDir`: every relay
+// is started with `--out-dir <its attempt folder>`.
+export const relayOf = (command, outDir) => {
+  const at = command.indexOf(`--out-dir ${outDir}`);
+  const next = at < 0 ? null : command[at + `--out-dir ${outDir}`.length];
+  return at >= 0 && (next === undefined || next === " ");
+};
+
+export function relayAlive(pid, startedAt = null, outDir = null) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
   } catch (error) {
     if (error.code !== "EPERM") return false;
   }
-  // Guard against PID reuse: the live process must still be a relay. Right after `start` forks
+  // Guard against PID reuse: the live process must still be a relay, and this task's own: one
+  // started for another task's attempt folder is a later process that was given the same PID, so
+  // the task has ended, and nothing may signal that PID on its behalf. Right after `start` forks
   // it, the child still shows the parent's command until it execs, so a process that exists
   // within a few seconds of the recorded start counts as the relay.
   const command = processCommand(pid);
-  if (command?.includes("relay.mjs")) return true;
+  if (command?.includes("relay.mjs")) return outDir ? relayOf(command, outDir) : true;
   const age = startedAt ? Date.now() - Date.parse(startedAt) : Infinity;
   return command !== null && age >= 0 && age < 10000;
 }
 
 // Wait until a stopped relay has exited, so a following `start` of the same task does not race it.
-export function waitForExit(pid, ms = 15000) {
+export function waitForExit(pid, ms = 15000, outDir = null) {
   const until = Date.now() + ms;
-  while (relayAlive(pid) && Date.now() < until) spawnSync("sleep", ["0.2"]);
-  return !relayAlive(pid);
+  while (relayAlive(pid, null, outDir) && Date.now() < until) spawnSync("sleep", ["0.2"]);
+  return !relayAlive(pid, null, outDir);
 }
 
 // A task may switch agents between attempts, so each attempt is parsed as its own agent's stream.
@@ -513,7 +523,7 @@ function attemptsOf(task, seen, row) {
 export function describe(run, task) {
   const readResult = () => (task.outDir ? readJson(path.join(task.outDir, "result.json")) : null);
   let result = readResult();
-  const running = relayAlive(task.pid, task.startedAt);
+  const running = relayAlive(task.pid, task.startedAt, task.outDir);
   // The relay writes result.json and exits; if it did both between the read above and the check,
   // read again before calling the task aborted.
   if (!running && !result && task.pid) result = readResult();

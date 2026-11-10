@@ -89,8 +89,8 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   if (kinds.some((kind) => !kind)) throw new SendError("attachments must be PNG, JPEG, GIF or WebP images", 400);
   // A message reaches only a running agent; a finished one gets it in the brief that resumes it. A
   // parked babysitter counts as running: its watcher resumes it with the message (park.mjs).
-  const parked = !relayAlive(task.pid, task.startedAt) && isParked(run, task);
-  if (!relayAlive(task.pid, task.startedAt) && !parked) {
+  const parked = !relayAlive(task.pid, task.startedAt, task.outDir) && isParked(run, task);
+  if (!relayAlive(task.pid, task.startedAt, task.outDir) && !parked) {
     const row = describe(run, task);
     if (row.state === "prepared") throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
     throw new SendError(
@@ -135,7 +135,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
 export function steerQueued(run, id, { caller = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
-  if (!relayAlive(task.pid, task.startedAt)) throw new SendError(`task ${id} is not running`, 409);
+  if (!relayAlive(task.pid, task.startedAt, task.outDir)) throw new SendError(`task ${id} is not running`, 409);
   const dir = taskDir(run, id);
   const queued = readInbox(dir).filter((m) => !m.read).map((m) => m.id);
   if (!queued.length) throw new SendError(`task ${id} has no queued messages`, 409);

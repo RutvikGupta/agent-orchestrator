@@ -232,3 +232,24 @@ test('cleanup preserves dirty worktrees, then removes them when forced', async (
   await f.command(['cleanup', run.id, '--force', '--delete-branches']);
   assert.equal(fs.existsSync(wt.path), false);
 });
+
+test('a finished task whose PID another task\'s relay now holds is not running, and stop and close do not signal that relay', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'ended', { flags: ['--read-only'] });
+  await f.finished(run, 'ended');
+  const live = await f.start(run, 'live', { config: { hold: true }, flags: ['--read-only'] });
+  await f.ready(live);
+  // The system gave the ended relay's PID to the other task's relay.
+  const file = f.taskFile(run, 'ended');
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), pid: live.pid }));
+  const states = async () => Object.fromEntries((await f.json(['status', run.id])).tasks.map((row) => [row.id, row.state]));
+  assert.deepEqual(await states(), { ended: 'completed', live: 'running' });
+  const stop = await f.command(['stop', run.id, 'ended'], { code: 1 });
+  assert.match(stop.stderr, /task ended is not running/);
+  await f.command(['close', run.id, 'ended']);
+  assert.doesNotThrow(() => process.kill(live.pid, 0), 'the other task\'s relay still runs');
+  assert.deepEqual(await states(), { ended: 'completed', live: 'running' });
+  f.release(live);
+  await f.finished(run, 'live');
+});

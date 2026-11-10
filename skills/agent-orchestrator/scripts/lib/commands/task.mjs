@@ -144,7 +144,7 @@ export function cmdStop(args) {
     const parked = endPark(run, task, "stop");
     parked?.ended?.();
     const latest = loadTask(run, id) || task;
-    if (latest.attempt === task.attempt || !relayAlive(latest.pid)) {
+    if (latest.attempt === task.attempt || !relayAlive(latest.pid, null, latest.outDir)) {
       const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
       stopped();
       process.stdout.write(`stopped parked ${id}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
@@ -152,7 +152,7 @@ export function cmdStop(args) {
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
-  if (!relayAlive(task.pid)) {
+  if (!relayAlive(task.pid, null, task.outDir)) {
     const left = endCommandGroups(run, task);
     if (!left) die(`task ${id} is not running`);
     if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
@@ -168,7 +168,7 @@ export function cmdStop(args) {
   } catch {
     process.kill(task.pid, "SIGTERM");
   }
-  const gone = waitForExit(task.pid);
+  const gone = waitForExit(task.pid, 15000, task.outDir);
   const left = gone ? endCommandGroups(run, task) : null;
   process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${id} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
 }
@@ -212,16 +212,16 @@ export function closeTask(run, task, extra = {}) {
     else if (parked?.error) note = `closed, though ending its park failed: ${parked.error}`;
     task = loadTask(run, task.id) || task; // a resume may have saved its attempt first: stopped below
   }
-  if (relayAlive(task.pid)) {
+  if (relayAlive(task.pid, null, task.outDir)) {
     try {
       process.kill(-task.pid, "SIGTERM");
     } catch {
       process.kill(task.pid, "SIGTERM");
     }
-    note = waitForExit(task.pid) ? `stopped (pid ${task.pid}) and closed` : `sent SIGTERM to pid ${task.pid}, which has not exited yet; closed`;
+    note = waitForExit(task.pid, 15000, task.outDir) ? `stopped (pid ${task.pid}) and closed` : `sent SIGTERM to pid ${task.pid}, which has not exited yet; closed`;
   }
   // Only once the relay has gone: a live relay ends its own command's group.
-  const left = relayAlive(task.pid) ? null : endCommandGroups(run, task);
+  const left = relayAlive(task.pid, null, task.outDir) ? null : endCommandGroups(run, task);
   if (left) note = `stopped the ${leftText(left)}; ${note}`;
   // Closing a task that handed back a decision means the orchestrator dealt with it without
   // resuming the task, so the decision shows as resolved instead of still waiting.

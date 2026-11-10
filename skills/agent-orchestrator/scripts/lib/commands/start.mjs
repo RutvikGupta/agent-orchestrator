@@ -162,7 +162,7 @@ export function startTask(args, extra = {}) {
   }
   const { tier, model, effort } = choice;
   if (!babysit) refuseStronger(key, tier);
-  if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
   // The orchestrator chooses the agent and tier by assessing the task; record why. A follow-up
@@ -393,7 +393,7 @@ function startCommand(run, id, args, extra) {
     throw error;
   }
   const { argv, done, timeout, reused } = commandOf(args, prev);
-  if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
   const sameAgent = Boolean(prev.attempt && prev.agent === COMMAND_AGENT);
