@@ -11,6 +11,7 @@
 // relay loads it without the rest of the orchestrator.
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { shortText, slug } from "./format.mjs";
@@ -174,8 +175,8 @@ function withExternalLock(file, action) {
   const deadline = Date.now() + 750;
   const pause = new Int32Array(new SharedArrayBuffer(4));
   const start = externalProcessStart ||= processStart(process.pid, 300);
-  fs.writeFileSync(path.join(ready, "owner.json"), JSON.stringify({ pid: process.pid, start }));
-  const identity = fs.statSync(ready).ino;
+  const token = randomUUID();
+  fs.writeFileSync(path.join(ready, "owner.json"), JSON.stringify({ pid: process.pid, start, token }));
   const wait = () => Atomics.wait(pause, 0, 0, Math.min(10, Math.max(0, deadline - Date.now())));
   const guarded = (fn) => {
     try { fs.mkdirSync(guard); } catch (e) {
@@ -194,7 +195,15 @@ function withExternalLock(file, action) {
   // Retire the directory atomically before removing its contents. Removing owner.json in
   // place briefly leaves an empty lock directory that another ready directory could replace.
   const retire = (expected) => {
-    if (fs.statSync(lock).ino !== expected) return;
+    let actual;
+    try { actual = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); } catch {}
+    if (expected.token) {
+      if (actual?.token !== expected.token) return;
+    } else {
+      // Legacy or incomplete owners have no token. Require the same directory and owner
+      // contents, and only retire after the caller has established it is dead or stale.
+      if (fs.statSync(lock).ino !== expected.ino || JSON.stringify(actual) !== expected.owner) return;
+    }
     const retired = `${ready}.retired`;
     fs.renameSync(lock, retired);
     fs.rmSync(retired, { recursive: true, force: true });
@@ -216,14 +225,14 @@ function withExternalLock(file, action) {
           }
           const stale = Date.now() - stat.mtimeMs > 10000;
           const remaining = deadline - Date.now();
-          let current = checkedOwners.get(stat.ino) || (owner?.pid === process.pid ? start : null);
+          let current = checkedOwners.get(owner?.pid) || (owner?.pid === process.pid ? start : null);
           if (!current && !stale && alive && owner.start && remaining > 0) {
             current = processStart(owner.pid, Math.min(300, remaining));
-            if (current) checkedOwners.set(stat.ino, current);
+            if (current) checkedOwners.set(owner.pid, current);
           }
           if (stale || !alive || (current && current !== owner.start)) {
             guarded(() => {
-              try { retire(stat.ino); }
+              try { retire({ token: owner?.token, ino: stat.ino, owner: JSON.stringify(owner) }); }
               catch (e) { if (e.code !== "ENOENT") throw e; }
             });
           }
@@ -238,7 +247,7 @@ function withExternalLock(file, action) {
       // Do not remove a replacement owner's directory, even if this lock expired during action.
       do {
         if (guarded(() => {
-          try { retire(identity); }
+          try { retire({ token }); }
           catch (e) { if (e.code !== "ENOENT") throw e; }
         })) break;
         if (Date.now() >= deadline) break;
@@ -253,7 +262,11 @@ function mergeExternal(previous, next) {
   if (next.pid == null) return previous;
   const merged = { ...previous };
   for (const [key, value] of Object.entries(next)) {
-    if (key === "parent") merged.parent = value;
+    if (key === "parent") {
+      merged.parent = next.pid === previous.pid && previous.parent
+        ? { ...value, run: value?.run ?? previous.parent.run, task: value?.task ?? previous.parent.task }
+        : value;
+    }
     else if (value !== null && value !== undefined && value !== "") merged[key] = value;
   }
   const starts = [previous.startedMs, next.startedMs].filter(Number.isFinite);

@@ -41,6 +41,109 @@ test('external record writers merge duplicate sessions across processes and seri
   for (let i = 0; i < 4; i++) for (let n = 0; n < 20; n++) assert.ok(lines.some((r) => r.key === `${i}:${n}`));
 });
 
+test('same process keeps relay ownership when a dashboard observation lacks it', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-parent-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'external.jsonl');
+  const { appendExternalRecord } = await import('../scripts/lib/command-group.mjs');
+  const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  appendExternalRecord(file, { key: 'agent', pid: 123, parent: { run: 'run', task: 'task', nearest: null } });
+  appendExternalRecord(file, { key: 'agent', pid: 123, parent: { run: null, task: null, nearest: 'claude' } });
+  assert.deepEqual(read().parent, { run: 'run', task: 'task', nearest: 'claude' });
+  appendExternalRecord(file, { key: 'agent', pid: 123, parent: null });
+  assert.deepEqual(read().parent, { run: 'run', task: 'task' });
+  appendExternalRecord(file, { key: 'agent', pid: null, parent: { run: 'wrong', task: 'wrong' } });
+  assert.equal(read().parent.run, 'run');
+  appendExternalRecord(file, { key: 'agent', pid: 124, parent: { run: null, task: null, nearest: null } });
+  assert.deepEqual(read().parent, { run: null, task: null, nearest: null });
+});
+
+test('a replacement lock owner survives a reaper that inspected the old owner', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-replace-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'external.jsonl'), lock = `${file}.lock`, ownerFile = path.join(lock, 'owner.json');
+  const { appendExternalRecord, processStart } = await import('../scripts/lib/command-group.mjs');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(ownerFile, JSON.stringify({ pid: 2147000000, start: 'dead', token: 'old' }));
+  const replacement = { pid: process.pid, start: processStart(process.pid), token: 'new' };
+  const mkdir = fs.mkdirSync;
+  let replaced = false;
+  fs.mkdirSync = (p, ...args) => {
+    if (p === `${lock}.reap` && !replaced) {
+      replaced = true;
+      fs.writeFileSync(ownerFile, JSON.stringify(replacement));
+    }
+    return mkdir(p, ...args);
+  };
+  try { assert.equal(appendExternalRecord(file, { key: 'contender' }), false); }
+  finally { fs.mkdirSync = mkdir; }
+  assert.ok(replaced);
+  assert.deepEqual(JSON.parse(fs.readFileSync(ownerFile, 'utf8')), replacement);
+});
+
+test('process start checks are cached by PID even when directory inodes are reused', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-pid-cache-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'external.jsonl'), lock = `${file}.lock`, ownerFile = path.join(lock, 'owner.json');
+  const log = path.join(dir, 'ps.log');
+  fs.writeFileSync(path.join(dir, 'ps'), `#!/bin/sh\nprintf '%s\\n' "$4" >> "$ORCH_TEST_PS_LOG"\ncase "$4" in 111111) echo first ;; 222222) echo second ;; *) echo self ;; esac\n`, { mode: 0o755 });
+  fs.mkdirSync(lock);
+  fs.writeFileSync(ownerFile, JSON.stringify({ pid: 111111, start: 'first', token: 'one' }));
+  const { appendExternalRecord } = await import('../scripts/lib/command-group.mjs');
+  const read = fs.readFileSync, stat = fs.statSync, kill = process.kill;
+  const oldPath = process.env.PATH, oldLog = process.env.ORCH_TEST_PS_LOG;
+  process.env.PATH = dir; process.env.ORCH_TEST_PS_LOG = log;
+  let observations = 0;
+  fs.readFileSync = (p, ...args) => {
+    if (p === ownerFile && ++observations === 2) fs.writeFileSync(ownerFile, JSON.stringify({ pid: 222222, start: 'second', token: 'two' }));
+    return read(p, ...args);
+  };
+  fs.statSync = (p, ...args) => {
+    const result = stat(p, ...args);
+    if (p === lock) Object.defineProperty(result, 'ino', { value: 42 });
+    return result;
+  };
+  process.kill = (pid, signal) => pid === 111111 || pid === 222222 ? true : kill(pid, signal);
+  try { assert.equal(appendExternalRecord(file, { key: 'contender' }), false); }
+  finally {
+    fs.readFileSync = read; fs.statSync = stat; process.kill = kill;
+    process.env.PATH = oldPath;
+    if (oldLog === undefined) delete process.env.ORCH_TEST_PS_LOG; else process.env.ORCH_TEST_PS_LOG = oldLog;
+  }
+  assert.equal(JSON.parse(fs.readFileSync(ownerFile, 'utf8')).token, 'two');
+  const checked = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.ok(checked.includes('111111') && checked.includes('222222'));
+});
+
+test('dashboard retries initial compaction after a busy lock is released', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-compact-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'external.jsonl'), lock = `${file}.lock`;
+  fs.writeFileSync(file, JSON.stringify({ key: 'expired', seenMs: 1, padding: 'x'.repeat(256 * 1024) }) + '\n');
+  const module = new URL('../scripts/lib/external.mjs', import.meta.url).href;
+  const group = new URL('../scripts/lib/command-group.mjs', import.meta.url).href;
+  const script = `import fs from 'node:fs';
+    import { watchExternalAgents, scanExternalAgents } from ${JSON.stringify(module)};
+    import { processStart } from ${JSON.stringify(group)};
+    const [file, lock] = process.argv.slice(1);
+    fs.mkdirSync(lock);
+    fs.writeFileSync(lock + '/owner.json', JSON.stringify({ pid: process.pid, start: processStart(process.pid), token: 'busy' }));
+    watchExternalAgents();
+    if (!fs.readFileSync(file, 'utf8').includes('expired')) throw Error('initial compaction unexpectedly succeeded');
+    fs.rmSync(lock, { recursive: true });
+    scanExternalAgents(Date.now());
+    if (fs.readFileSync(file, 'utf8').includes('expired')) throw Error('compaction was not retried');`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, file, lock], {
+    env: { ...process.env, AGENT_ORCH_HOME: dir, CLAUDE_CONFIG_DIR: dir, CODEX_HOME: dir, AGENT_ORCH_SKILLS_DIR: dir }, stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  await new Promise((resolve, reject) => {
+    let error = '';
+    child.stderr.on('data', (chunk) => { error += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`fixture exited ${code}: ${error}`)));
+  });
+});
+
 test('external record lock is released on a write exception and abandoned locks are recovered', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-records-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

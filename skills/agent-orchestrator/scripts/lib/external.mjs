@@ -164,6 +164,7 @@ const SCAN_MS = 2000;
 const GIVE_UP = 30; // scans to wait for a new agent's session file or rollout before ignoring it
 const KEEP_MS = 7 * 24 * 3600 * 1000;
 let lastScan = 0;
+let compactPending = false;
 const seen = new Map(); // pid -> { command, done, tries }
 
 export function watchExternalAgents() {
@@ -171,13 +172,16 @@ export function watchExternalAgents() {
   // Keep the record file small: drop agents last seen more than a week ago.
   try {
     if (fs.statSync(EXTERNAL_FILE).size < 256 * 1024) return;
-    compactExternalRecords(EXTERNAL_FILE, Date.now() - KEEP_MS);
+    compactPending = !compactExternalRecords(EXTERNAL_FILE, Date.now() - KEEP_MS);
   } catch {}
 }
 
 export function scanExternalAgents(now = Date.now()) {
   if (!watching || now - lastScan < SCAN_MS) return;
   lastScan = now;
+  if (compactPending) {
+    try { compactPending = !compactExternalRecords(EXTERNAL_FILE, Date.now() - KEEP_MS); } catch {}
+  }
   const table = processSnapshot();
   if (!table) return;
   for (const [pid, s] of seen) if (table.get(pid)?.command !== s.command) seen.delete(pid);
