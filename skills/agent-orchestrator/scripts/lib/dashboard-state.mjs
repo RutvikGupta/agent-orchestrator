@@ -1,7 +1,8 @@
 // The dashboard's state (/api/state): one section per launching session, holding its runs and every
 // session they launched as a tree, plus Claude Code sessions that started sub-agents without this
 // skill, and the headless agents that a skill's script started outside it (external.mjs). The headless
-// agents that a task's own shell started are rows under that task. Each section also lists its
+// agents that a task's own shell started are rows under that task, except a command task's, which
+// its own row shows (foldCommandAgents). Each section also lists its
 // sessions that need attention, and flags the finished rows that the page folds away by default
 // (`older`). Built at most every 250 ms.
 
@@ -400,6 +401,59 @@ function placeExternal(externals, sections, sectionOf, sessionSection, subAgents
   return placedAgents;
 }
 
+// A command task has no model of its own: the agents its command runs are its work. So they are not
+// rows under it. The task's row shows them: the model, session and transcript (`agentLog`) of the lead
+// agent (of the current attempt, a running one first, then the latest active), the steps and tokens
+// of all of them, and, while the task runs, the lead's activity. `runs` lists each agent for the
+// details. Rows that hung under a folded agent hang under the task.
+function foldCommandAgents(rows) {
+  const tasks = new Map(rows.filter((t) => t.agent === "command" && !t.native && !t.taskAgent).map((t) => [`${t.run}/${t.id}`, t]));
+  if (!tasks.size) return rows;
+  const agentsOf = new Map();
+  for (const t of rows) {
+    const task = t.taskAgent && tasks.get(`${t.run}/${t.parent}`);
+    if (task) agentsOf.set(task, [...(agentsOf.get(task) || []), t]);
+  }
+  if (!agentsOf.size) return rows;
+  const folded = new Map(); // "run/agent id" -> task id
+  const merged = new Map();
+  for (const [task, agents] of agentsOf) {
+    const order = (a) => [a.taskAttempt === task.attempt ? 0 : 1, a.state === "running" ? 0 : 1, -(a.lastActiveMs || 0)];
+    const byOrder = (a, b) => {
+      const [x, y] = [order(a), order(b)];
+      const i = x.findIndex((v, n) => v !== y[n]);
+      return i < 0 ? 0 : x[i] - y[i];
+    };
+    const [lead] = [...agents].sort(byOrder);
+    const sum = (field) => agents.reduce((n, a) => n + (a[field] || 0), task[field] || 0);
+    const labels = [...new Set(agents.map((a) => a.modelLabel).filter(Boolean))];
+    for (const a of agents) folded.set(`${a.run}/${a.id}`, task.id);
+    merged.set(task, {
+      ...task,
+      model: lead.model || null,
+      modelLabel: labels.length > 1 ? `${lead.modelLabel || labels[0]} +${labels.length - 1}` : lead.modelLabel || task.modelLabel,
+      session: lead.session || null,
+      agentLog: lead.outDir || null,
+      steps: sum("steps"),
+      tokensIn: sum("tokensIn"),
+      tokensCached: sum("tokensCached"),
+      tokensOut: sum("tokensOut"),
+      tokensExact: agents.every((a) => a.tokensExact !== false) && task.tokensExact !== false,
+      lastActiveMs: Math.max(task.lastActiveMs || 0, ...agents.map((a) => a.lastActiveMs || 0)),
+      now: task.state === "running" && lead.state === "running" ? lead.now : task.now,
+      runs: agents.map((a) => ({ kind: a.kind || a.agent, model: a.model || null, modelLabel: a.modelLabel || null, state: a.state, session: a.session || null, attempt: a.taskAttempt ?? null, transcript: a.outDir || null })),
+    });
+  }
+  const moved = (t) => (t.taskAgent ? null : folded.get(`${t.run}/${t.parent}`));
+  return rows
+    .filter((t) => !(t.taskAgent && folded.has(`${t.run}/${t.id}`)))
+    .map((t) => {
+      if (merged.has(t)) return merged.get(t);
+      const under = t.under && folded.get(`${t.under.run}/${t.under.id}`);
+      return { ...t, ...(moved(t) ? { parent: moved(t) } : {}), ...(under ? { under: { run: t.under.run, id: under } } : {}) };
+    });
+}
+
 export function buildDashboardState() {
   const now = Date.now();
   let commands; // the process table for addresseeOf, read once per build when first needed
@@ -544,6 +598,7 @@ export function buildDashboardState() {
       return { ...t, under: agent ? { run: agent.run, id: agent.id } : { run: t.under.run, id: t.under.id } };
     });
   }
+  for (const sec of sections.values()) sec.rows = foldCommandAgents(sec.rows);
   const shown = [...sections.values()].map(({ id, runs: secRuns, main, rows }) => {
     const newest = secRuns.find((r) => !nestedIn(r)) || secRuns[0];
     const tasks = markOlder(treeOrder([...(main ? [{ ...main, attention: null }] : []), ...rows]), rowIdle, now).map(boardRow);

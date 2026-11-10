@@ -784,6 +784,35 @@ test('an agent a command task runs directly is named for itself, not for the orc
   await f.finished(run, 'live-cmd');
 });
 
+test('a command task shows the agent its command runs in its own row: its model, tokens, activity and log, with no row under it', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  await f.command(['start', run.id, 'review', '--agent', 'command', '--why', 'runs a review script', '--', 'sleep', '60']);
+  transcript(f, 'cmd-agent', false, 'claude-fable-5-2');
+  fakes.start(fakes.session('cmd-shell', 'claude', [
+    fakes.script(`${SKILL}/standards_review.sh`, fakes.claude('inner', 'cmd-agent', { env: innerEnv(run, 'review') })),
+  ]));
+  await fakes.ready('inner');
+  const board = await f.dashboard();
+
+  const { state, row } = await eventually(async () => {
+    const found = await board.json('/api/state');
+    const task = rowOf(found, run, 'review');
+    return task?.session === 'cmd-agent' ? { state: found, row: task } : null;
+  }, 'the command task did not take up its agent', 20_000);
+  const ours = boardRows(state).filter((r) => r.run === run.id && !r.main);
+  assert.deepEqual(ours.map((r) => r.id), ['review'], 'one row: the agent has none of its own');
+  assert.deepEqual([row.agent, row.model, row.modelLabel, row.state, row.kids], ['command', 'claude-fable-5-2', 'fable-5-2', 'running', 0]);
+  assert.deepEqual({ in: row.tokensIn, out: row.tokensOut, steps: row.steps }, { in: 10, out: 5, steps: 1 });
+  assert.equal(row.now, 'Read README.md', 'the agent\'s activity while the command runs');
+  assert.deepEqual(row.runs.map((a) => [a.kind, a.modelLabel, a.state, a.session]), [['claude -p', 'fable-5-2', 'running', 'cmd-agent']]);
+  assert.match(row.agentLog, /cmd-agent\.jsonl$/);
+  assert.deepEqual((await board.json(`/api/transcript?file=${encodeURIComponent(row.agentLog)}`)).events.map((e) => [e.kind, e.text]), [['user', 'Review the change.'], ['tool', 'Read README.md']]);
+  const section = sectionOfRun(state, run);
+  assert.deepEqual([section.totals.tokensIn, section.totals.tokensOut], [10, 5], 'counted once');
+  await f.command(['stop', run.id, 'review']);
+});
+
 test('a finished task still shows the agents its shell ran, finished, with their events', async (t) => {
   const { f, fakes } = await setup(t);
   const run = await f.newRun();

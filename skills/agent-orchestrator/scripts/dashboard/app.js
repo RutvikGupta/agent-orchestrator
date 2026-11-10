@@ -222,7 +222,7 @@ const attemptShown=new Map();
 const shownAttempt=(key,t)=>{const n=attemptShown.get(key);return n&&n<=(t.attempt||0)?n:t.attempt||0};
 const logAttempt=(key,t)=>t&&!t.native&&!t.main?shownAttempt(key,t):0;
 const logKey=(key,t)=>{const n=logAttempt(key,t);return n?key+"@"+n:key};
-const logSource=(t,n)=>t.native||t.main?(t.outDir?"api/transcript?file="+encodeURIComponent(t.outDir):null):"api/events?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id)+(n?"&attempt="+n:"");
+const logSource=(t,n)=>t.agentLog&&n===(t.attempt||0)?"api/transcript?file="+encodeURIComponent(t.agentLog):t.native||t.main?(t.outDir?"api/transcript?file="+encodeURIComponent(t.outDir):null):"api/events?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id)+(n?"&attempt="+n:"");
 // A log's fingerprint for the panel's change check: its length and a hash of every entry, since a
 // log capped at 400 entries keeps its length as new entries push old ones out. Worked out once per log.
 const prints=new WeakMap();
@@ -230,7 +230,7 @@ function logPrint(ev){if(!ev)return"loading";let p=prints.get(ev);if(p!=null)ret
   for(const e of ev){const s=e.kind+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
   p=ev.length+":"+h.toString(36);prints.set(ev,p);return p}
 function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSource(t,n);if(!src)return Promise.resolve([]);if(loading.has(lk))return loading.get(lk);
-  if(t.external)return loadTranscript(lk,t,src);
+  if(t.external||src.startsWith("api/transcript")&&t.agentLog)return loadTranscript(lk,t,src);
   const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(lk)?.ev||[]).then(ev=>{loading.delete(lk);logs.delete(lk);
     logs.set(lk,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
   loading.set(lk,load);return load}
@@ -297,7 +297,7 @@ function paint(key,t,ext,ev,keep){
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
-    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
+    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["runs",t.runs?t.runs.map(a=>a.kind+" · "+(a.modelLabel||"model not known yet")+" · "+a.state+(a.session?" · "+a.session.slice(0,8):"")).join("\n"):null],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
     ...agentsView(key,t),
