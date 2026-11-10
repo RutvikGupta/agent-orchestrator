@@ -216,9 +216,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   first. --note adds your decisions on which findings to fix. --tier
                                   passes to start; --why defaults to a line naming the review and
                                   both tiers. Refuses when the review found nothing: accept TASK instead
-  accept RUN TASK [--commit SHA] [--note TEXT]
+  accept RUN TASK [--commit SHA] [--note TEXT] [--unverified REASON]
                                   After reviewing a completed task and committing its work, record
                                   it as accepted (its checkout must be clean); SHA defaults to HEAD.
+                                  When evidence is available, write tasks with passing checks require
+                                  no matched failed runs; other issues warn. --unverified
+                                  records why the result is accepted anyway.
                                   --note records why; notes when no clean verdict is recorded
   resolve RUN TASK --note TEXT    Mark a handed-back decision as handled, when you answered it
                                   without resuming the agent
@@ -358,7 +361,7 @@ const specs = {
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check", "adopt"] },
   dispatch: { value: ["max"], bool: ["dry-run", "follow", "adopt"] },
-  accept: { value: ["commit", "note"], bool: ["adopt"] },
+  accept: { value: ["commit", "note", "unverified"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
   review: { value: ["tier", "focus"], bool: ["adopt"] },

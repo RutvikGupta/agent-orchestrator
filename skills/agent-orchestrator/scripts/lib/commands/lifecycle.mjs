@@ -5,7 +5,7 @@ import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
 
 import { reclaimTask } from "../reclaim.mjs";
 import { spawnSync } from "node:child_process";
-import { computeEvidence } from "../report.mjs";
+import { computeEvidence, evidenceWarning } from "../report.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, parallelAt } from "../config.mjs";
@@ -405,6 +405,7 @@ export function cmdResolve(args) {
 export function cmdAccept(args) {
   computeEvidence();
   const acceptNote = args.note === undefined ? null : String(args.note).trim() || die("--note needs text: why the result is accepted", 2);
+  const unverifiedReason = args.unverified === undefined ? null : String(args.unverified).trim() || die("--unverified needs a nonblank reason", 2);
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
@@ -418,6 +419,16 @@ export function cmdAccept(args) {
     }[row.state];
     die(`task ${id} is ${row.state}, not completed${why ? `: ${why}` : ": resume it, or give it to the other agent"}; only a completed task can be accepted`);
   }
+  const checks = row.report?.checks || [];
+  const passing = checks.filter((check) => check?.result === "pass");
+  const warnings = checks.map(evidenceWarning).filter(Boolean);
+  if (row.report?.invalid) warnings.unshift(`invalid orch-result report: ${row.report.error}`);
+  else if (row.report && !passing.length) warnings.unshift("report has no passing checks");
+  const failed = passing.some(({ evidence }) => evidence?.ran && evidence.exitCode != null && evidence.exitCode !== 0);
+  if (!task.readOnly && failed && !unverifiedReason) {
+    die(`cannot accept ${id}: a passing check matched a failed run.${warnings.length ? `\n  ${warnings.join("\n  ")}` : ""}\nUse --unverified <reason> to accept anyway.`);
+  }
+  if (warnings.length) process.stderr.write(`${warnings.map((warning) => `WARNING: ${warning}`).join("\n")}\n`);
   const cwd = row.cd || run.repo;
   const inGit = fs.existsSync(cwd) && gitOk(cwd, ["rev-parse", "--is-inside-work-tree"]);
   // The orchestrator commits a write task's work after reviewing it, so nothing may be left over.
@@ -442,7 +453,7 @@ export function cmdAccept(args) {
   const cleanVerdict = rounds.filter((r) => r.attempt === attempt).at(-1)?.verdict === "clean";
   const accepted = {
     ...task, acceptedAt: new Date().toISOString(), acceptedAttempt: attempt, acceptedCommit: commit,
-    acceptedBy: "coordinator", acceptedActor: g.actor, acceptNote, acceptVerifications,
+    acceptedBy: "coordinator", acceptedActor: g.actor, acceptNote, acceptVerifications, unverifiedReason,
     // Accepting overrides an earlier `reject` of this attempt; reviews.jsonl keeps that round.
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
@@ -454,7 +465,7 @@ export function cmdAccept(args) {
   const empty = !task.readOnly && task.worktree && commit === git(cwd, ["rev-parse", `${task.worktree.from}^{commit}`], { allowFail: true });
   emit(
     args,
-    { id, acceptedAt: accepted.acceptedAt, acceptedAttempt: attempt, acceptedCommit: commit, acceptedBy: "coordinator", acceptNote, acceptVerifications, cleanVerdict },
+    { id, acceptedAt: accepted.acceptedAt, acceptedAttempt: attempt, acceptedCommit: commit, acceptedBy: "coordinator", acceptNote, acceptVerifications, cleanVerdict, unverifiedReason },
     `accepted ${id}${commit ? ` at ${short(commit)}` : ""} (attempt ${attempt})${empty ? `\nnote: ${task.worktree.branch} has no commits beyond where it started, so integrating it changes nothing` : ""}` +
       `${cleanVerdict ? "" : `\nnote: no clean verdict is recorded for attempt ${attempt} (${CLI} verdict ${run.id} ${id} clean records one)`}\nnext: ${CLI} integrate ${run.id} ${id}`,
   );

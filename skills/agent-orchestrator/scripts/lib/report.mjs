@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { CACHE_PATH, CLI_PATH } from "./config.mjs";
 import { commandRuns, stuckOf, summarizeEvents } from "./events.mjs";
-import { formatElapsed, unwrapShell } from "./format.mjs";
+import { formatElapsed } from "./format.mjs";
 import { attemptReasonOf } from "./lifecycle.mjs";
 import { readJson, tailText, writeJson } from "./util.mjs";
 
@@ -134,25 +134,148 @@ function collapseSpaces(cmd) {
   return out;
 }
 
-// A leading `cd <dir> && ` whose directory is the task's working directory: `.`, that path, or a
-// path that resolves to it. A directory with shell expansions in it is never taken as one.
-const CD_PREFIX = /^cd (?:'([^']+)'|"([^"\\$`]+)"|([^\s'"\\$`~&;|<>()*?[\]{}]+)) && /;
-function sameDir(dir, cwd) {
-  const target = path.resolve(cwd, dir);
-  if (target === path.resolve(cwd)) return true;
-  try {
-    return fs.realpathSync(target) === fs.realpathSync(cwd);
-  } catch {
-    return false;
+// Tokenize shell words without executing expansions. Quotes around literal arguments do not
+// change their identity; expansions retain their spelling so single-quoted variables stay distinct.
+function shellTokens(text) {
+  const tokens = [];
+  let raw = "", word = "", quote = null;
+  let heredoc = false;
+  const heredocs = [];
+  const end = () => {
+    if (raw) {
+      tokens.push({ word: /[$`]/.test(raw) && raw.includes("'") ? raw : word, value: word, raw });
+      if (heredoc) { heredocs.push(word); heredoc = false; }
+    }
+    raw = ""; word = "";
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && text[i + 1] === "\n" && quote !== "'") { i++; continue; }
+    if (quote) {
+      raw += c;
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"' && /["\\$`]/.test(text[i + 1] || "")) { raw += text[++i]; word += text[i]; }
+      else word += c;
+    } else if (c === "\\" && i + 1 < text.length) {
+      raw += c + text[++i]; word += text[i];
+    } else if (c === "'" || c === '"') { quote = c; raw += c; }
+    else if (c === "\n") {
+      end(); tokens.push({ op: ";" });
+      for (const delimiter of heredocs.splice(0)) {
+        for (;;) {
+          const eol = text.indexOf("\n", i + 1);
+          const line = text.slice(i + 1, eol < 0 ? text.length : eol);
+          i = eol < 0 ? text.length : eol;
+          if (line.replace(/^\t+/, "") === delimiter || eol < 0) break;
+        }
+      }
+    }
+    else if (/\s/.test(c)) end();
+    else if (/[|&;<>]/.test(c)) {
+      // File descriptor numbers belong to the redirection, not the command's arguments.
+      if (/[<>]/.test(c) && /^\d+$/.test(raw)) { raw = ""; word = ""; } else end();
+      const op = /^(?:&&|\|\||<<-|<<|>>|>&|<&|[|&;<>])/.exec(text.slice(i))[0];
+      tokens.push({ op }); i += op.length - 1;
+      if (op === "<<" || op === "<<-") heredoc = true;
+    } else { raw += c; word += c; }
   }
+  end();
+  return quote ? null : tokens;
 }
 
-// A command as the matching compares it: without its shell wrapper, with whitespace outside quotes
-// collapsed, and without a leading `cd` into the task's working directory `cwd`.
-export function normalizeCommand(cmd, cwd = null) {
-  let text = collapseSpaces(unwrapShell(collapseSpaces(String(cmd ?? ""))));
-  for (let m; cwd && (m = CD_PREFIX.exec(text)) && sameDir(m[1] ?? m[2] ?? m[3], cwd); ) text = text.slice(m[0].length);
+// Shell wrappers carry command text as one argument, including multiline heredocs. Decode
+// that argument without evaluation before splitting commands; never search quoted source text.
+function unwrapEvidenceShell(command) {
+  let text = String(command ?? "").trim();
+  for (let depth = 0; depth < 8; depth++) {
+    const tokens = shellTokens(text);
+    if (tokens?.length !== 3 || !/^(?:ba|z)?sh$/.test(path.basename(tokens[0]?.word || "")) || !/^-[a-z]*c[a-z]*$/.test(tokens[1]?.word || "")) break;
+    text = tokens[2].value;
+  }
   return text;
+}
+
+// Resolve existing parents too, so a missing child of a symlink cannot escape the task tree.
+function canonicalDirectory(directory) {
+  let current = path.resolve(directory), suffix = [];
+  for (;;) {
+    try { return path.resolve(fs.realpathSync(current), ...suffix.reverse()); } catch { /* Try its parent. */ }
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(directory);
+    suffix.push(path.basename(current)); current = parent;
+  }
+}
+function insideTask(directory, cwd) {
+  if (!cwd) return false;
+  const relative = path.relative(canonicalDirectory(cwd), canonicalDirectory(directory));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+// Keep command identity separate from shell setup and output presentation. Only a literal cd
+// prefix and pipes to the three display filters are removed; other shell control flow stays.
+export function normalizeCommand(cmd, cwd = null) {
+  const text = unwrapEvidenceShell(cmd);
+  const tokens = shellTokens(text);
+  if (!tokens) return collapseSpaces(text);
+  let directory = cwd;
+  while (tokens[0]?.word === "cd" && tokens[1]?.word && !/[$`~]/.test(tokens[1].word) && tokens[2]?.op === "&&") {
+    const target = path.resolve(directory || ".", tokens[1].word);
+    if (!insideTask(target, cwd)) break;
+    directory = target; tokens.splice(0, 3);
+  }
+  for (;;) {
+    while (/^[A-Za-z_][\w]*=/.test(tokens[0]?.word || "")) tokens.shift();
+    if (tokens[0]?.word === "env") {
+      tokens.shift();
+      while (tokens.length) {
+        if (["-u", "--unset"].includes(tokens[0]?.word) && tokens[1]?.word) tokens.splice(0, 2);
+        else if (/^--unset=/.test(tokens[0]?.word || "") || tokens[0]?.word === "--") tokens.shift();
+        else if (/^[A-Za-z_][\w]*=/.test(tokens[0]?.word || "")) tokens.shift();
+        else break;
+      }
+    } else if (tokens[0]?.word === "timeout") {
+      let i = 1;
+      while (tokens[i]?.word?.startsWith("-")) i += ["-k", "-s", "--kill-after", "--signal"].includes(tokens[i].word) ? 2 : 1;
+      if (!/^\d+(?:\.\d+)?[smhd]?$/.test(tokens[i]?.word || "")) break;
+      tokens.splice(0, i + 1);
+    } else if (path.basename(tokens[0]?.word || "") === "node" && path.basename(tokens[1]?.word || "") === "orch.mjs" && tokens[2]?.word === "heavy") {
+      const separator = tokens.findIndex((t, i) => i > 2 && t.word === "--");
+      if (separator < 0) break;
+      tokens.splice(0, separator + 1);
+    } else break;
+  }
+  const output = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if ([">", ">>", ">&"].includes(token.op) && tokens[i + 1]?.word) { i++; continue; }
+    if (token.op === "|" && ["grep", "tail", "head"].includes(path.basename(tokens[i + 1]?.word || ""))) {
+      // Do not erase an unrelated command after the filter pipeline.
+      const suffix = tokens.slice(i);
+      if (!suffix.some((t) => [";", "&&", "||", "&"].includes(t.op))) break;
+    }
+    // Agents often append a status echo after redirecting a test run into a file.
+    if (token.op === ";" && tokens[i + 1]?.word === "echo" && /^['"]?exit \$\?['"]?$/.test(tokens[i + 2]?.raw || "")) break;
+    output.push(token.op ? { op: token.op } : { word: token.word });
+  }
+  return JSON.stringify(output);
+}
+
+const PROGRAM = /^(?:env|cd|bash|sh|zsh|node|npm|npx|pnpm|yarn|bun|deno|python\d*(?:\.\d+)?|pytest|uv|uvx|pip\d*|git|go|cargo|rustc|make|cmake|ctest|docker|podman|ruby|bundle|rake|java|mvn|gradle|dotnet|php|composer|perl|curl|wget|gh|rg|grep|sed|awk|test|echo|true|false|pre-commit|ruff|black|eslint|tsc|shellcheck|bq|gcloud|pants|gt|orch|cmp|diff|cat|ls|find|wc|jq)(?:\s|$)/;
+function runnable(text) {
+  return /^[\w.-]+\.sh(?:\s|$)/.test(text) || /^[A-Za-z_]\w*_\w+(?:\s|$)/.test(text) || /^[A-Za-z_][\w]*=\S+\s+/.test(text) || PROGRAM.test(text) || /^(?:\.?\.?\/|~\/|\/)[^\s]+/.test(text) || /^[\w.-]+\s+--?[\w]/.test(text);
+}
+// Reports can name a command in backticks or add a short outcome after it. Never use substring
+// matching against the log: a prose description alone must not turn into command evidence.
+function checkCommand(value) {
+  const text = String(value ?? "").trim();
+  for (const match of (runnable(text) ? [] : text.matchAll(/`([^`]+)`/g))) if (runnable(match[1].trim())) return match[1].trim();
+  let command = text.replace(/^(?:ran|run|verified (?:with|using)|checked (?:with|using))\s*:?\s*/i, "");
+  const colon = command.indexOf(": ");
+  if (!runnable(command) && colon >= 0 && runnable(command.slice(colon + 2))) command = command.slice(colon + 2);
+  command = command.replace(/\s+\([^)]*\)\s*$/, "");
+  if (/^git\s+(?:status|rev-parse)\b/.test(command)) command = command.replace(/\s+(?:in|on)\s+(?:both|head|base|the)\b.*$/, "");
+  command = command.replace(/\s+(?:—|–)\s+.*$/, "").replace(/\s+\((?:\d+\/\d+|passed|pass|all pass)[^)]*\)\s*$/i, "");
+  return runnable(command) ? command : null;
 }
 
 // The attempts whose commands back the current attempt's report: the current one, and those an
@@ -191,21 +314,19 @@ export function computeEvidence() {
 }
 function checkEvidence(task, row, report) {
   if (!report || report.invalid || !row.outDir || !task.outDir || ["running", "prepared"].includes(row.state)) return null;
-  const file = path.join(task.outDir, "evidence.json");
-  const saved = savedEvidence(file);
-  if (saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
-  if (!evidenceAllowed) return null;
   const dir = path.dirname(task.outDir);
   const logs = reportAttempts(task).map((n) => ({ agent: task.attemptAgents?.[n] || task.agent, file: path.join(dir, `attempt-${n}`, "events.jsonl") }));
-  const logged = logs.some((log) => fs.existsSync(log.file));
+  if (!logs.some((log) => fs.existsSync(log.file))) return null;
+  const file = path.join(task.outDir, "evidence.json");
+  const saved = savedEvidence(file);
+  if (saved?.version === 5 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
+  if (!evidenceAllowed) return null;
   const runs = logs.flatMap((log) => commandRuns(log.agent, log.file)).map((run) => ({ ...run, key: normalizeCommand(run.cmd, row.cd) }));
-  const checks = report.checks.map((check) => {
-    if (!logged) return null;
-    const cmd = normalizeCommand(check?.cmd, row.cd);
-    const last = cmd ? runs.findLast((run) => run.key === cmd) : null;
-    return last ? { ran: true, exitCode: last.exitCode, atMs: last.atMs } : { ran: false };
-  });
-  const evidence = { attempt: row.attempt, readAt: new Date().toISOString(), ...treeState(row.cd), checks };
+  const checks = report.checks.map((check) => matchCheckEvidence(check, runs, row.cd));
+  const checkout = saved?.attempt === row.attempt
+    ? { readAt: saved.readAt, commit: saved.commit, dirty: saved.dirty }
+    : { readAt: new Date().toISOString(), ...treeState(row.cd) };
+  const evidence = { version: 5, attempt: row.attempt, ...checkout, checks };
   try {
     writeJson(file, evidence);
   } catch {
@@ -214,9 +335,150 @@ function checkEvidence(task, row, report) {
   return evidence;
 }
 
+// Simple commands in a shell call can back separate reported gates. Earlier commands in a
+// sequence have unknown status unless an all-success && chain proves they succeeded. Heredocs
+// and substitutions stay opaque so source code or quoted command text cannot become evidence.
+function matchingRuns(run, cwd) {
+  const text = unwrapEvidenceShell(run.cmd);
+  const tokens = shellTokens(text);
+  const exact = { ...run, key: normalizeCommand(text, cwd) };
+  if (!tokens) return [exact];
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i <= tokens.length; i++) {
+    if (i < tokens.length && ![";", "&&", "||", "&", "|"].includes(tokens[i].op)) continue;
+    const slice = tokens.slice(start, i);
+    if (slice.length) parts.push({ tokens: slice, after: tokens[i]?.op });
+    start = i + 1;
+  }
+  const chainPassed = run.exitCode === 0 && parts.slice(0, -1).every((p) => p.after === "&&");
+  const stopped = parts.findIndex((p) => /^(?:exit|return|exec)$/.test(p.tokens[0]?.word || ""));
+  const candidates = [];
+  let directory = cwd;
+  let directoryKnown = true;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (stopped >= 0 && i > stopped) break;
+    const previous = parts[i - 1];
+    if (previous?.tokens[0]?.word === "cd") {
+      const target = previous.tokens[1]?.word || "";
+      if (/[$`~]/.test(target) || (!directoryKnown && !path.isAbsolute(target))) directoryKnown = false;
+      else { directory = path.resolve(directory || ".", target); directoryKnown = true; }
+    }
+    if (!directoryKnown || (directory && cwd && directory !== cwd && !insideTask(directory, cwd))) continue;
+    // A successful && chain establishes each step's status. In a masked chain, record
+    // the named step with unknown status; a literal false proves the next step was skipped.
+    if (previous?.after === "&&" && previous.tokens[0]?.word === "false") continue;
+    if (previous?.after === "||") continue;
+    const piped = part.tokens.some((t) => t.op === "|");
+    const masked = [";", "||", "&", "|"].includes(part.after) || piped;
+    candidates.push({ ...run, cwd: directory,
+      key: normalizeCommand(part.tokens.map((t) => t.op || t.raw).join(" "), directory),
+      exitCode: masked || (previous?.after === "&&" && !chainPassed && previous.tokens[0]?.word !== "cd") ? null
+        : i === parts.length - 1 || chainPassed ? run.exitCode : null,
+    });
+  }
+  // Whole-shell status is usable only when it describes the whole reported command. Avoid
+  // a normalized pipeline or status echo silently replacing an unknown component status.
+  return [exact, ...candidates];
+}
+
+// Ignore neutral flags, but keep options that select work, validate it, or mutate it.
+const PROOF_FLAGS = new Set(["--lf", "--last-failed", "--sw", "--stepwise", "--collect-only", "--co", "--no-run", "-check", "--cached", "--staged", "--all-files", "-run", "--lib", "--bin", "-k", "-m", "-c", "-e", "--keyword", "--markers", "--check", "--exit-code", "--fix", "--write", "--dry-run", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--exclude-dir", "--include", "--config", "--test", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--filter", "--path", "--paths", "--file", "--files", "--repo", "-R", "--git-dir", "--work-tree", "-C", "-G", "-S", "--version"]);
+const PYTEST_VALUES = new Set(["-k", "-m", "-c", "-p", "-n", "--keyword", "--markers", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--include", "--config", "--tb", "--color", "--capture", "--maxfail", "--durations", "--log-level", "--junitxml", "--basetemp", "--rootdir", "--confcutdir"]);
+const PROGRAM_VALUES = {
+  node: new Set(["-e", "--eval", "-p", "--print", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination", "--test-concurrency"]),
+  gh: new Set(["--jq", "-q", "--json", "--template", "--repo", "-R"]),
+  git: new Set(["-C", "--git-dir", "--work-tree", "--grep", "-G", "-S"]),
+  black: new Set(["--config", "--include", "--exclude"]),
+  ruff: new Set(["--config", "--include", "--exclude", "--output-format"]),
+};
+function flagTakesValue(program, option) {
+  if (/^(?:pytest|py_test|run_.*tests.*\.sh)$/.test(program)) return PYTEST_VALUES.has(option);
+  if (/^python\d*(?:\.\d+)?$/.test(program)) return option === "-m" || option === "-c";
+  return PROGRAM_VALUES[program]?.has(option) || false;
+}
+function identity(key) {
+  let tokens;
+  try { tokens = JSON.parse(key); } catch { return null; }
+  if (!Array.isArray(tokens) || tokens.some((t) => t.op)) return null;
+  const words = tokens.map((t) => t.word), keep = [];
+  const program = path.basename(words[0] === "uv" && words[1] === "run" ? words[2] || words[0] : words[0] || "");
+  let positional = false;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (word === "--") { positional = true; continue; }
+    if (!i || positional || !word.startsWith("-") || word === "-") { keep.push(word); continue; }
+    let option = word.split("=", 1)[0];
+    let attached = word.includes("=") ? word.slice(word.indexOf("=") + 1) : undefined;
+    const short = word.slice(0, 2);
+    if (attached === undefined && word.length > 2 && flagTakesValue(program, short) && (PROOF_FLAGS.has(short) || (program === "node" && short === "-p"))) {
+      option = short; attached = word.slice(2);
+    }
+    const protectedFlag = PROOF_FLAGS.has(option)
+      || (program === "git" && words[1] === "diff" && ["-q", "--quiet"].includes(option))
+      || (program === "git" && words[1] === "apply" && option === "--stat")
+      // gofmt's -l and -d only report, where -w rewrites: none of them stands in for another.
+      || (program === "gofmt" && ["-w", "-l", "-d"].includes(option))
+      || (program === "node" && (["-v", "-p", "--print", "--eval"].includes(option) || (!words.includes("--test") && option === "--test-reporter")));
+    const value = attached !== undefined ? attached
+      : flagTakesValue(program, option) && words[i + 1] !== undefined ? words[++i] : undefined;
+    if (protectedFlag) keep.push(value === undefined ? word : `${option}\0${value}`);
+  }
+  return keep;
+}
+function compatibleCommand(left, right, cwd, runCwd) {
+  const a = identity(left), b = identity(right);
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((word, i) => {
+    if (word === b[i]) return true;
+    if (!i && path.basename(word) === path.basename(b[i]) && (!word.includes(path.sep) || !b[i].includes(path.sep))) return true;
+    if (word.startsWith("-") || b[i].startsWith("-") || !/[/.]/.test(word) || !/[/.]/.test(b[i]) || /[$`]/.test(word + b[i])) return false;
+    const x = path.normalize(word), y = path.normalize(b[i]);
+    const from = path.resolve(cwd || ".", x), to = path.resolve(runCwd || cwd || ".", y);
+    if (from === to) return true;
+    if (!cwd || !insideTask(from, cwd) || !insideTask(to, cwd) || (path.isAbsolute(x) && path.isAbsolute(y))) return false;
+    // A report often uses the path relative to a test subdirectory rather than the task
+    // root. Require the complete relative suffix, never just a shared filename.
+    return (x.includes(path.sep) && y.endsWith(path.sep + x)) || (y.includes(path.sep) && x.endsWith(path.sep + y));
+  });
+}
+
+// Pure matching also lets audits compare historical reports without writing into their state.
+export function matchCheckEvidence(check, runs, cwd = null) {
+  let command = checkCommand(check?.cmd);
+  if (!command) {
+    const text = String(check?.cmd ?? "").trim();
+    const first = shellTokens(text)?.[0]?.word;
+    // A tool need not be in a fixed vocabulary: an observed executable establishes that
+    // a similarly named report entry is a command rather than a prose description.
+    if (first && runs.some((run) => matchingRuns(run, cwd).some((candidate) => identity(candidate.key)?.[0] === first))) command = text;
+  }
+  if (!command) return { ran: false, notCommand: true };
+  const key = normalizeCommand(command, cwd);
+  const candidates = runs.flatMap((run) => matchingRuns(run, cwd));
+  const find = (wanted) => {
+    const last = candidates.findLast((run) => run.key === wanted || compatibleCommand(wanted, run.key, cwd, run.cwd));
+    return last ? { ran: true, exitCode: last.exitCode, atMs: last.atMs } : null;
+  };
+  const direct = find(key);
+  if (direct) return direct;
+  const requirements = matchingRuns({ cmd: command, exitCode: 0, atMs: null }, cwd).slice(1)
+    .filter((run) => identity(run.key)?.[0] !== "cd");
+  if (requirements.length > 1) {
+    const found = requirements.map((required) => find(required.key));
+    if (found.every(Boolean)) {
+      const failed = found.find((run) => run.exitCode != null && run.exitCode !== 0);
+      return { ran: true, exitCode: failed?.exitCode ?? (found.some((run) => run.exitCode == null) ? null : 0), atMs: found.at(-1).atMs };
+    }
+  }
+  return { ran: false };
+}
+
 // A check's evidence in words, for `result`: "ran, exit 0", or "NOT FOUND in the log".
 export function evidenceText(evidence) {
-  if (!evidence) return "";
+  if (!evidence) return "no events log; evidence unavailable";
+  if (evidence.notCommand) return "not a command";
   if (!evidence.ran) return "NOT FOUND in the log";
   return `ran, exit ${evidence.exitCode ?? "unknown"}`;
 }
@@ -224,7 +486,9 @@ export function evidenceText(evidence) {
 // A warning for a check reported as passing without a successful matching run, or null.
 export function evidenceWarning(check) {
   const evidence = check?.evidence;
-  if (check?.result !== "pass" || !evidence || evidence.exitCode === 0) return null;
+  if (check?.result !== "pass" || evidence?.exitCode === 0) return null;
+  if (!evidence) return `check "${check.cmd || "(no command)"}" has no events log; evidence unavailable`;
+  if (evidence.notCommand) return `check "${check.cmd || "(no command)"}" is reported pass, but is not a command`;
   const cmd = check.cmd || "(no command)";
   if (!evidence.ran) return `check "${cmd}" is reported pass, but no matching run is in the log`;
   return evidence.exitCode === null
