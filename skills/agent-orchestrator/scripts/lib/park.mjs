@@ -48,7 +48,7 @@ import { INBOX_FILE, markRead, readInbox, replyHint, senderLabel } from "./inbox
 import { watchForFinish } from "./finish-notice.mjs";
 import { PARK_CHECK_FILE, exists, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
-import { aheadOfPr, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
+import { aheadOfPr, attemptWindows, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const LOG = "park-watcher.log";
@@ -119,6 +119,25 @@ export function lastCallTokens(dir) {
   return null;
 }
 
+// The notes `start` appends to a brief, each after a rule; the first of them ends the brief as given.
+const APPENDED = ["Delegating further", "Publishing", "Handoff note", "Decisions"].map((title) => `\n\n---\n\n## ${title}\n`);
+
+// The brief a babysitter's first session was given: the copy `start` kept, or, for a task started
+// before `start` kept one, its first attempt's brief without the notes `start` appended to it.
+export function originalBrief(dir) {
+  try {
+    return fs.readFileSync(path.join(dir, BABYSIT_BRIEF_FILE), "utf8");
+  } catch {}
+  let text;
+  try {
+    text = fs.readFileSync(path.join(dir, "attempt-1", "orch-brief.md"), "utf8");
+  } catch {
+    return "";
+  }
+  const cuts = APPENDED.map((mark) => text.lastIndexOf(mark)).filter((at) => at >= 0);
+  return cuts.length ? `${text.slice(0, Math.min(...cuts))}\n` : text;
+}
+
 // Whether a parked attempt (folder `dir`) should resume in a fresh session: { file, tokens, limit,
 // note: "current" | "stale" | "missing", fresh, original, text }. Fresh only when the session's
 // latest call was above the limit, the note was written or updated since the parked attempt
@@ -133,10 +152,7 @@ export function handoffOf(run, task, dir) {
     text = fs.readFileSync(file, "utf8");
     if (text.trim()) note = fs.statSync(file).mtimeMs >= Date.parse(task.startedAt) ? "current" : "stale";
   } catch {}
-  let original = "";
-  try {
-    original = fs.readFileSync(path.join(taskDir(run, task.id), BABYSIT_BRIEF_FILE), "utf8");
-  } catch {}
+  const original = originalBrief(taskDir(run, task.id));
   // A note that holds an unfilled brief marker would make `start` refuse the brief.
   const fresh = tokens !== null && tokens > limit && note === "current" && Boolean(original.trim()) && !/<fill in:/.test(text);
   return { file, tokens, limit, note, fresh, original: fresh ? original : null, text: fresh ? text : null };
@@ -503,7 +519,7 @@ export async function checkPark(dir, generation) {
   const ref = task.pr?.url || (task.pr?.number ? String(task.pr.number) : null);
   if (ref) {
     const cwd = task.cd && fs.existsSync(task.cd) ? task.cd : run.repo;
-    const s = watchSnapshot(cwd, ref);
+    const s = watchSnapshot(cwd, ref, attemptWindows(taskDir(run, id), task));
     if (s.error) record.error = s.error;
     else {
       const seen = readSeen(s);
