@@ -26,12 +26,12 @@
 // the same way before the result is written. Exit codes: 2 for a usage error, before result.json;
 // otherwise 0 when completed, else the command's exit code (or 1).
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
+import { appendExternalRecord, headlessKind, externalLauncher, externalAgentLabel, GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
 
 const SCHEMA = "orch-command.result.v1";
 const TAIL_LINES = 40; // lines of output kept as the final message
@@ -91,6 +91,294 @@ const logPath = path.join(outDir, "relay.log");
 const eventsPath = path.join(outDir, "events.jsonl");
 const resultPath = path.join(outDir, "result.json");
 const startedAt = new Date().toISOString();
+
+// Poll the process group for direct evidence and recover short runs from durable session files.
+// Guesses stay within the command folder or an observed agent folder, and never override a known owner. File notifications
+// also find quick resumes whose rollout still lives in an older date folder.
+function commandAgents() {
+  const claude = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  const codex = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const state = process.env.AGENT_ORCH_HOME || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "agent-orchestrator");
+  const file = path.join(state, "external.jsonl");
+  const since = Date.parse(startedAt);
+  const launchedCommand = opts.command.join(" ");
+  const launchedKind = headlessKind(launchedCommand);
+  const directResume = launchedKind === "codex" && opts.command[opts.command.indexOf("exec") + 1] === "resume";
+  const known = new Map(), saved = new Map(), pending = new Map(), headers = new Map();
+  const directories = new Set();
+  const excluded = new Set(), changed = new Set(), watchers = new Map();
+  let live = new Map(), members = new Set(), blockedCodex = new Set();
+  let safeCodex = true, lastFiles = 0, warned = false;
+  function real(dir) { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } }
+  function json(file) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } }
+  function addDirectory(dir) {
+    if (!dir) return;
+    const resolved = real(dir);
+    if (resolved !== path.parse(resolved).root && resolved !== real(os.homedir())) directories.add(resolved);
+  }
+  addDirectory(cwd);
+  const commandRoot = directories.has(real(cwd)) ? real(cwd) : null;
+  function accepts(dir) {
+    if (!dir) return false;
+    const resolved = real(dir);
+    return directories.has(resolved) || Boolean(commandRoot && resolved.startsWith(commandRoot + path.sep));
+  }
+  const roots = [path.join(claude, "projects"), path.join(codex, "sessions")];
+  function watch() {
+    for (const root of roots) {
+      if (watchers.has(root)) continue;
+      try {
+        const watcher = fs.watch(root, { recursive: true, persistent: false }, (_, name) => {
+          if (name && String(name).endsWith(".jsonl")) changed.add(path.join(root, String(name)));
+        });
+        watcher.on("error", () => { watcher.close(); watchers.delete(root); });
+        watchers.set(root, watcher);
+      } catch {} // The first invocation of a CLI may create its session directory later.
+    }
+  }
+  watch();
+  function list(dir) {
+    try { return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.jsonl?$/.test(e.name)).map((e) => path.join(dir, e.name)); }
+    catch { return []; }
+  }
+  // Search each new chunk once and retain partial lines between polls. Once found, a session
+  // header is immutable across appended turns, so later polls need not reread its large prompt.
+  function header(file, agent) {
+    let fd;
+    try {
+      let h = headers.get(file);
+      if (h?.value) return h.value;
+      const stat = fs.statSync(file);
+      if (!h || h.ino !== stat.ino || stat.size < h.offset) {
+        h = { ino: stat.ino, offset: 0, parts: [], value: null };
+        headers.set(file, h);
+      }
+      const initialOffset = h.offset;
+      fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(64 * 1024);
+      const parse = () => {
+        try {
+          const e = JSON.parse(Buffer.concat(h.parts).toString("utf8"));
+          if (agent === "codex" && e.type === "session_meta") h.value = e.payload;
+          if (agent === "claude" && e.cwd && e.timestamp && !e.isSidechain) h.value = e;
+        } catch {}
+      };
+      while (h.offset < Math.min(stat.size, 8 * 1024 * 1024)) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, stat.size - h.offset, 8 * 1024 * 1024 - h.offset), h.offset);
+        if (!n) break;
+        h.offset += n;
+        const chunk = buf.subarray(0, n);
+        let from = 0, end;
+        while ((end = chunk.indexOf(10, from)) !== -1) {
+          h.parts.push(Buffer.from(chunk.subarray(from, end)));
+          parse();
+          if (h.value) { h.parts = []; return h.value; }
+          h.parts = [];
+          from = end + 1;
+        }
+        if (from < n) h.parts.push(Buffer.from(chunk.subarray(from, n)));
+      }
+      // A complete final JSON value can have no newline. Keep an incomplete value for a later append.
+      if (h.parts.length && h.offset === stat.size && h.offset > initialOffset) parse();
+      if (h.value) h.parts = [];
+      return h.value;
+    } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
+    return null;
+  }
+  function recent(file) {
+    try { return fs.statSync(file).mtimeMs >= since; } catch { return false; }
+  }
+  function record(agent, sessionId, meta, transcript, observed = null) {
+    const key = `${agent}:${sessionId}`;
+    const startedMs = Number(meta.startedAt) || Date.parse(meta.timestamp);
+    if (!sessionId || !Number.isFinite(startedMs)) return;
+    if (!observed) {
+      if (excluded.has(key) || !accepts(meta.cwd)) return;
+      if (agent === "codex" && (!safeCodex || blockedCodex.has(real(meta.cwd)))) return;
+      // Resumes retain the first session header. A changed transcript proves activity in this
+      // invocation's window even though the original session started earlier.
+      if (startedMs > Date.now() || startedMs < since && !(transcript && recent(transcript))) return;
+    }
+    if (observed && live.has(observed.pid) && !members.has(observed.pid)) return;
+    const command = observed?.command?.slice(0, 300) || (launchedKind === agent ? launchedCommand.slice(0, 300) : agent === "claude" ? "claude -p" : "codex exec");
+    const r = {
+      key, agent, sessionId, file: transcript, cwd: meta.cwd || observed?.cwd || cwd,
+      // Only a live group observation confers ownership. A leftover PID file is a guess too.
+      pid: observed?.pid || null, command, startedMs, seenMs: Date.now(),
+      ...externalAgentLabel(agent, command, observed?.via || null),
+      parent: { run: process.env.AGENT_ORCH_RUN || null, task: process.env.AGENT_ORCH_TASK || null,
+        claude: process.env.CLAUDE_CODE_SESSION_ID || null, codex: process.env.CODEX_THREAD_ID || null, nearest: null },
+    };
+    const prior = saved.get(key);
+    if (prior && (!observed || prior.pid === r.pid && prior.file === transcript)) return;
+    if (appendExternalRecord(file, r) !== false) { saved.set(key, r); pending.delete(key); }
+    else pending.set(key, r);
+  }
+  const isCodex = (command) => command.split(/\s+/).slice(0, 2).some((w) => /^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(path.basename(w)));
+  function processes(pgid, checkOutside = false) {
+    const r = spawnSync("ps", ["-Aww", "-o", "pid=,ppid=,pgid=,command="], { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 });
+    if (r.error || r.status !== 0) { safeCodex = false; return false; }
+    live = new Map(); members = new Set(); blockedCodex = new Set();
+    for (const line of r.stdout.split("\n")) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+      if (!m) continue;
+      const row = { pid: +m[1], ppid: +m[2], pgid: +m[3], command: m[4] };
+      live.set(row.pid, row);
+      if (row.pgid === pgid) members.add(row.pid);
+    }
+    for (const [pid, row] of known) {
+      const now = live.get(pid);
+      if (now && (!members.has(pid) || now.command !== row.command)) known.delete(pid);
+    }
+    const outside = checkOutside ? [...live.values()].filter((r) => !members.has(r.pid) && isCodex(r.command) && (directResume || headlessKind(r.command) === "codex")) : [];
+    const agents = [...members].filter((pid) => headlessKind(live.get(pid).command));
+    const pids = new Set([...agents, ...outside.map((r) => r.pid)]);
+    for (const row of live.values()) if (agents.includes(row.ppid) || outside.some((p) => p.pid === row.ppid)) pids.add(row.pid);
+    safeCodex = true;
+    if (pids.size) {
+      const open = spawnSync("lsof", ["-nP", "-Fpcfn", "-p", [...pids].join(",")], { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 });
+      safeCodex = !open.error && (open.status === 0 || open.status === 1);
+      if (safeCodex) {
+        let row, descriptor;
+        for (const line of (open.stdout || "").split("\n")) {
+          if (line[0] === "p") row = live.get(Number(line.slice(1)));
+          else if (line[0] === "f") descriptor = line.slice(1);
+          else if (line[0] === "n" && row && pids.has(row.pid)) {
+            if (descriptor === "cwd") row.cwd = line.slice(1);
+            else if (/[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) row.rollout = line.slice(1);
+          }
+        }
+      }
+    }
+    for (const row of live.values()) {
+      if (!pids.has(row.pid)) continue;
+      try { row.cwd ||= fs.readlinkSync(`/proc/${row.pid}/cwd`); } catch {}
+      row.rollout ||= [...live.values()].find((p) => p.ppid === row.pid && p.rollout)?.rollout;
+      if (!members.has(row.pid) && (isCodex(row.command) || outside.some((p) => p.pid === row.ppid))) {
+        // Other Codex homes cannot own a candidate in this relay's sessions folder.
+        if (row.rollout && !real(row.rollout).startsWith(real(path.join(codex, "sessions")) + path.sep)) continue;
+        const meta = row.rollout && header(row.rollout, "codex");
+        if (meta?.id) excluded.add(`codex:${meta.id}`);
+        else if (outside.some((p) => p.pid === row.pid) && row.cwd) blockedCodex.add(real(row.cwd));
+      }
+    }
+    const group = new Map([...live].filter(([pid]) => members.has(pid)));
+    for (const [pid, row] of group) {
+      const agent = headlessKind(row.command);
+      if (!agent) continue;
+      addDirectory(row.cwd);
+      if (headlessKind(live.get(row.ppid)?.command || "") === agent) continue;
+      known.set(pid, { ...known.get(pid), ...row, agent, via: externalLauncher(pid, group) });
+    }
+    return true;
+  }
+  const capture = (pgid, final = false) => {
+    try {
+      watch();
+      if (!processes(pgid)) return;
+      // Inspect all live Claude PID files before any fallback, so a transcript cannot undo an
+      // outside-process or interactive-session exclusion made by its PID record.
+      const sessions = [];
+      for (const f of list(path.join(claude, "sessions"))) {
+        const s = json(f);
+        if (!s?.sessionId) continue;
+        const pid = Number(s.pid || path.basename(f, ".json"));
+        if (s.entrypoint === "cli" || live.has(pid) && !members.has(pid)) excluded.add(`claude:${s.sessionId}`);
+        else sessions.push({ s, pid });
+      }
+      for (const { s, pid } of sessions) {
+        const observed = known.get(pid);
+        if (observed) {
+          excluded.delete(`claude:${s.sessionId}`);
+          record("claude", s.sessionId, s, null, observed);
+        }
+      }
+      for (const row of known.values()) if (row.agent === "codex" && row.rollout) {
+        const m = header(row.rollout, "codex");
+        if (m?.id) { excluded.delete(`codex:${m.id}`); record("codex", m.id, m, row.rollout, row); }
+      }
+      if (!final && Date.now() - lastFiles < 2000) return;
+      lastFiles = Date.now();
+      const projects = new Set([...directories].map((d) => path.join(claude, "projects", d.replace(/[^A-Za-z0-9]/g, "-"))));
+      if (commandRoot) {
+        const prefix = commandRoot.replace(/[^A-Za-z0-9]/g, "-");
+        try {
+          for (const e of fs.readdirSync(path.join(claude, "projects"), { withFileTypes: true })) {
+            if (e.isDirectory() && (e.name === prefix || e.name.startsWith(prefix + "-"))) projects.add(path.join(claude, "projects", e.name));
+          }
+        } catch {}
+      }
+      const candidates = new Set([...projects].flatMap(list));
+      // Codex uses local calendar dates. Include adjacent days for clock and timezone boundaries.
+      const day = new Date(since), until = new Date();
+      day.setHours(0, 0, 0, 0); day.setDate(day.getDate() - 1);
+      until.setHours(0, 0, 0, 0); until.setDate(until.getDate() + 1);
+      for (; day <= until; day.setDate(day.getDate() + 1)) {
+        const date = [String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, "0"), String(day.getDate()).padStart(2, "0")];
+        for (const f of list(path.join(codex, "sessions", ...date))) candidates.add(f);
+      }
+      for (const f of changed) {
+        if (f.startsWith(path.join(codex, "sessions") + path.sep) || projects.has(path.dirname(f))) candidates.add(f);
+      }
+      const recoveries = [];
+      for (const f of candidates) {
+        if (!recent(f)) continue;
+        const agent = f.startsWith(path.join(codex, "sessions") + path.sep) ? "codex" : "claude";
+        const m = header(f, agent);
+        // An explicitly launched exec resume can append to a session that began interactively.
+        const resumedInteractive = directResume && changed.has(f) && m?.source === "cli";
+        if (!m || agent === "codex" && m.originator !== "codex_exec" && m.source !== "exec" && !resumedInteractive) continue;
+        recoveries.push({ agent, id: agent === "claude" ? m.sessionId || path.basename(f, ".jsonl") : m.id, m, f });
+      }
+      // The process snapshot at the start of this sweep predates these files. Check owners
+      // again after reading candidates: an outsider may have started while lsof was running.
+      const pendingPidFiles = sessions.some(({ s, pid }) => !known.has(pid) && accepts(s.cwd) && Number(s.startedAt) >= since);
+      if (!recoveries.length && !pendingPidFiles) return;
+      if (!processes(pgid, true)) return;
+      for (const f of list(path.join(claude, "sessions"))) {
+        const s = json(f);
+        if (!s?.sessionId) continue;
+        const pid = Number(s.pid || path.basename(f, ".json"));
+        if (s.entrypoint === "cli" || live.has(pid) && !members.has(pid)) excluded.add(`claude:${s.sessionId}`);
+        else record("claude", s.sessionId, s, null, known.get(pid));
+      }
+      for (const { agent, id, m, f } of recoveries) record(agent, id, m, f);
+    } catch (error) {
+      warn(error);
+    }
+  };
+  // One line in the relay's log for the first failure; a log that cannot be written is ignored.
+  function warn(error) {
+    if (warned) return;
+    warned = true;
+    try {
+      fs.appendFileSync(logPath, `\ncommand-relay: could not record an agent: ${error.message}\n`);
+    } catch {}
+  }
+  capture.flush = async (pgid) => {
+    const until = Date.now() + 3000;
+    // Old-date resumes depend on file notifications, which can arrive after the child exit.
+    const awaitingResume = () => directResume && !saved.size;
+    while ((pending.size || awaitingResume()) && Date.now() < until) {
+      if (awaitingResume() && changed.size) capture(pgid, true);
+      for (const [key, record] of pending) {
+        if (!record.pid && excluded.has(key)) { pending.delete(key); continue; }
+        // A write error counts like a busy lock: the record stays pending, and the relay goes on.
+        try {
+          if (appendExternalRecord(file, record) !== false) { saved.set(key, record); pending.delete(key); }
+        } catch (error) {
+          warn(error);
+        }
+        if (Date.now() >= until) break;
+      }
+      if ((pending.size || awaitingResume()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (pending.size) fs.appendFileSync(logPath, `\ncommand-relay: could not record ${pending.size} agent(s): external record lock stayed busy\n`);
+  };
+  capture.close = () => { for (const w of watchers.values()) w.close(); };
+  return capture;
+}
+const captureAgents = commandAgents();
 
 function writeEvent(event) {
   fs.appendFileSync(eventsPath, `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}\n`);
@@ -234,6 +522,7 @@ function settle({ code = null, signal = null, error = null, left = null } = {}) 
   clearInterval(poll);
   clearTimeout(timeoutTimer);
   clearTimeout(killTimer);
+  captureAgents.close();
   readOutput(true);
   let exitCode = code ?? (signal ? signalCode(signal) : 1);
   let status = "completed";
@@ -275,14 +564,32 @@ function settle({ code = null, signal = null, error = null, left = null } = {}) 
 }
 
 // The command has exited: end what it left running in its group, record it, then settle.
-function onExit(code, signal) {
+async function onExit(code, signal) {
   exited = true;
+  clearInterval(poll);
+  clearTimeout(timeoutTimer);
   clearTimeout(killTimer);
-  const left = endGroup(child.pid, GRACE_MS);
+  // Recording the command's agents must never keep the relay from clearing its group and writing
+  // the result: whatever fails here, the task still ends with a result.json.
+  let left = { found: 0, killed: 0 };
   try {
-    writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
-  } catch {}
-  settle({ code, signal, left });
+    captureAgents(child.pid);
+    left = endGroup(child.pid, GRACE_MS);
+    // Let pending file notifications identify old-date resumes before the final sweep.
+    await new Promise((resolve) => setImmediate(resolve));
+    captureAgents(child.pid, true);
+    await captureAgents.flush(child.pid);
+    captureAgents.close();
+  } catch (error) {
+    try {
+      fs.appendFileSync(logPath, `\ncommand-relay: ${error.message}\n`);
+    } catch {}
+  } finally {
+    try {
+      writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
+    } catch {}
+    settle({ code, signal, left });
+  }
 }
 
 // Stopping the relay stops the command, which then ends the run as aborted. Once the command has
@@ -311,7 +618,8 @@ child.on("exit", onExit);
 if (child.pid) {
   writeGroup(outDir, { pgid: child.pid, leaderStarted: processStart(child.pid), relay: process.pid, recordedAt: new Date().toISOString() });
   writeEvent({ type: "command.started", command: opts.command, cwd, pid: child.pid, done: opts.done, timeout: opts.timeout });
-  poll = setInterval(() => readOutput(), POLL_MS);
+  captureAgents(child.pid);
+  poll = setInterval(() => { readOutput(); captureAgents(child.pid); }, POLL_MS);
   if (timeoutMs) {
     timeoutTimer = setTimeout(() => {
       timedOut = true;
