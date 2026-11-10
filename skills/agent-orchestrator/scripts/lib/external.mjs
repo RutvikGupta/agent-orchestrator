@@ -15,9 +15,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLAUDE_SESSIONS, CODEX_HOME, EXTERNAL_FILE } from "./config.mjs";
 import { codexMeta } from "./codex.mjs";
-import { appendExternalRecord, compactExternalRecords } from "./command-group.mjs";
+import { appendExternalRecord, compactExternalRecords, externalAgentLabel, externalLauncher, headlessKind } from "./command-group.mjs";
+export { headlessKind } from "./command-group.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
-import { shortText, slug } from "./format.mjs";
 import { codexNativeAgents, nativeRow } from "./native.mjs";
 import { processSnapshot } from "./runs.mjs";
 import { readJson } from "./util.mjs";
@@ -25,26 +25,8 @@ import { readJson } from "./util.mjs";
 const words = (command) => String(command || "").trim().split(/\s+/);
 const base = (word) => path.basename(word || "");
 
-// "claude" for a headless Claude Code process, "codex" for `codex exec`, otherwise null. A Node
-// launcher (`node .../bin/codex exec ...`) counts as the script it runs. For Codex, `exec` must be
-// its first word that is neither an option nor an option's value, so a prompt that merely
-// contains "exec" does not count.
-export function headlessKind(command) {
-  let w = words(command);
-  if (["node", "bun"].includes(base(w[0]))) w = w.slice(1);
-  const name = base(w[0]);
-  if (name === "claude") return w.includes("-p") || w.includes("--print") ? "claude" : null;
-  if (!/^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(name)) return null;
-  for (let i = 1; i < Math.min(w.length, 60); i++) {
-    if (w[i] === "exec") return "codex";
-    if (!w[i].startsWith("-") && !(w[i - 1].startsWith("-") && !w[i - 1].includes("="))) return null;
-  }
-  return null;
-}
-
 // The orchestrator's own headless runs: a relay's agent, and the one-turn limits probe.
 const OWN = /[/\\]scripts[/\\](relay|orch)\.mjs(\s|$)/;
-const isAgent = (command) => words(command).slice(0, 2).map(base).some((n) => /^(claude|codex)(\.js)?$/.test(n));
 
 function nearestAgent(pid, table) {
   for (let p = table.get(pid)?.ppid, hops = 0; p > 1 && hops < 20; hops++) {
@@ -53,25 +35,6 @@ function nearestAgent(pid, table) {
     const names = words(row.command).slice(0, 2).map(base);
     if (names.some((n) => n === "codex" || n === "codex.js")) return "codex";
     if (names.includes("claude")) return "claude";
-    p = row.ppid;
-  }
-  return null;
-}
-
-// The script that started the agent, such as `bash codex_review.sh ...`: the nearest process above
-// it that runs a file, below the session that ran the command. An orchestrator relay is not such a
-// script: an agent a command task runs directly has no launcher, so it is not named after the relay.
-const SCRIPT = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
-const RELAY = /skills\/(agent-orchestrator|claude-delegate|codex-delegate)\/scripts\/(command-relay|relay)\.mjs$/;
-const INTERPRETER = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
-function launcher(pid, table) {
-  for (let p = table.get(pid)?.ppid, hops = 0; p > 1 && hops < 6; hops++) {
-    const row = table.get(p);
-    if (!row || isAgent(row.command)) return null;
-    const w = words(row.command);
-    const file = SCRIPT.test(w[0]) ? w[0] : INTERPRETER.test(base(w[0])) && w[1] && !w[1].startsWith("-") ? w[1] : null;
-    if (file && RELAY.test(file)) return null;
-    if (file) return { name: base(file).replace(/\.[a-z]+$/, ""), command: row.command };
     p = row.ppid;
   }
   return null;
@@ -142,9 +105,7 @@ function describe(pid, kind, row, table) {
   }
   if (!sessionId) return undefined;
   const env = processEnv(pid);
-  const via = launcher(pid, table);
-  const sub = kind === "codex" ? w[w.indexOf("exec") + 1] : null;
-  const fallback = kind === "codex" ? `codex-exec${["review", "resume"].includes(sub) ? `-${sub}` : ""}` : "claude-headless";
+  const via = externalLauncher(pid, table);
   return {
     key: `${kind}:${sessionId}`,
     agent: kind,
@@ -155,8 +116,7 @@ function describe(pid, kind, row, table) {
     command: row.command.slice(0, 300),
     startedMs,
     seenMs: Date.now(),
-    name: slug(via?.name || fallback).slice(0, 28),
-    launcher: via ? shortText(via.command, 160) : null,
+    ...externalAgentLabel(kind, row.command, via),
     parent: {
       run: env.AGENT_ORCH_RUN || null,
       task: env.AGENT_ORCH_TASK || null,
@@ -168,7 +128,7 @@ function describe(pid, kind, row, table) {
 }
 
 function append(record) {
-  appendExternalRecord(EXTERNAL_FILE, record);
+  return appendExternalRecord(EXTERNAL_FILE, record);
 }
 
 // Records by key, the latest line winning; a resumed session (`codex exec resume`) keeps its first
@@ -237,8 +197,7 @@ export function scanExternalAgents(now = Date.now()) {
       entry.done = ++entry.tries >= GIVE_UP;
       continue;
     }
-    entry.done = true;
-    if (record) append(record);
+    entry.done = !record || append(record) !== false;
   }
 }
 

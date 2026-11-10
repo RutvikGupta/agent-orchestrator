@@ -31,7 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { appendExternalRecord, GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
+import { appendExternalRecord, headlessKind, externalLauncher, externalAgentLabel, GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
 
 const SCHEMA = "orch-command.result.v1";
 const TAIL_LINES = 40; // lines of output kept as the final message
@@ -92,172 +92,236 @@ const eventsPath = path.join(outDir, "events.jsonl");
 const resultPath = path.join(outDir, "result.json");
 const startedAt = new Date().toISOString();
 
-// Session files outlive a quick agent. Pair them with process-group observations while the
-// command runs, then sweep once more after it exits; the dashboard need not have been running.
-// Recovery accepts new sessions only in the command's directory tree or a directory actually
-// observed in its group. A live process outside the group is never adopted by directory alone.
+// Poll the process group for direct evidence and recover short runs from durable session files.
+// Guesses use exact working directories, and never override a known owner. File notifications
+// also find quick resumes whose rollout still lives in an older date folder.
 function commandAgents() {
-  const claude = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  const codex = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const state = process.env.AGENT_ORCH_HOME || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'agent-orchestrator');
-  const file = path.join(state, 'external.jsonl');
+  const claude = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  const codex = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const state = process.env.AGENT_ORCH_HOME || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "agent-orchestrator");
+  const file = path.join(state, "external.jsonl");
   const since = Date.parse(startedAt);
-  const known = new Map();
-  const directories = new Set([real(cwd)]);
-  const saved = new Map();
-  const excluded = new Set();
-  let lastFiles = 0;
-  let warned = false;
+  const launchedCommand = opts.command.join(" ");
+  const launchedKind = headlessKind(launchedCommand);
+  const directResume = launchedKind === "codex" && opts.command[opts.command.indexOf("exec") + 1] === "resume";
+  const known = new Map(), saved = new Map();
+  const directories = new Set();
+  const excluded = new Set(), changed = new Set(), watchers = new Map();
+  let live = new Map(), members = new Set(), blockedCodex = new Set();
+  let safeCodex = true, lastFiles = 0, warned = false;
   function real(dir) { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } }
-  function json(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
-  function kind(command) {
-    let w = command.trim().split(/\s+/);
-    if (['node', 'bun'].includes(path.basename(w[0]))) w = w.slice(1);
-    const name = path.basename(w[0] || '');
-    if (name === 'claude' && (w.includes('-p') || w.includes('--print'))) return 'claude';
-    if (/^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(name)) {
-      for (let i = 1; i < Math.min(w.length, 60); i++) {
-        if (w[i] === 'exec') return 'codex';
-        if (!w[i].startsWith('-') && !(w[i - 1].startsWith('-') && !w[i - 1].includes('='))) break;
-      }
+  function json(file) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } }
+  function addDirectory(dir) {
+    if (!dir) return;
+    const resolved = real(dir);
+    if (resolved !== path.parse(resolved).root && resolved !== real(os.homedir())) directories.add(resolved);
+  }
+  addDirectory(cwd);
+  const roots = [path.join(claude, "projects"), path.join(codex, "sessions")];
+  function watch() {
+    for (const root of roots) {
+      if (watchers.has(root)) continue;
+      try {
+        const watcher = fs.watch(root, { recursive: true, persistent: false }, (_, name) => {
+          if (name && String(name).endsWith(".jsonl")) changed.add(path.join(root, String(name)));
+        });
+        watcher.on("error", () => { watcher.close(); watchers.delete(root); });
+        watchers.set(root, watcher);
+      } catch {} // The first invocation of a CLI may create its session directory later.
     }
-    return null;
   }
-  function list(dir, depth) {
-    const files = [];
-    try {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const name = path.join(dir, entry.name);
-        if (entry.isDirectory() && depth > 0) files.push(...list(name, depth - 1));
-        else if (entry.isFile() && /\.jsonl?$/.test(entry.name)) files.push(name);
-      }
-    } catch {}
-    return files;
+  watch();
+  function list(dir) {
+    try { return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.jsonl?$/.test(e.name)).map((e) => path.join(dir, e.name)); }
+    catch { return []; }
   }
+  // A large prompt or session header is one JSON line. Read complete lines, capped like the
+  // dashboard's Codex reader, rather than cutting a valid line at an arbitrary small buffer.
   function header(file, agent) {
     let fd;
     try {
-      if (fs.statSync(file).mtimeMs < since) return null;
-      fd = fs.openSync(file, 'r');
-      const buf = Buffer.alloc(256 * 1024);
-      const n = fs.readSync(fd, buf, 0, buf.length, 0);
-      for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
-        let e;
-        try { e = JSON.parse(line); } catch { continue; }
-        if (agent === 'codex' && e.type === 'session_meta') return e.payload;
-        if (agent === 'claude' && e.cwd && e.timestamp && !e.isSidechain) return e;
+      fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(64 * 1024);
+      const decoder = new StringDecoder("utf8");
+      let pending = "", bytes = 0;
+      while (bytes < 8 * 1024 * 1024) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, 8 * 1024 * 1024 - bytes), null);
+        bytes += n;
+        pending += n ? decoder.write(buf.subarray(0, n)) : decoder.end();
+        let end;
+        while ((end = pending.indexOf("\n")) !== -1 || !n && pending) {
+          if (end === -1) end = pending.length;
+          const line = pending.slice(0, end);
+          pending = pending.slice(end + 1);
+          let e;
+          try { e = JSON.parse(line); } catch { continue; }
+          if (agent === "codex" && e.type === "session_meta") return e.payload;
+          if (agent === "claude" && e.cwd && e.timestamp && !e.isSidechain) return e;
+        }
+        if (!n) break;
       }
     } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
     return null;
   }
-  function accepts(dir) {
-    if (!dir) return false;
-    const resolved = real(dir);
-    return [...directories].some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  function recent(file) {
+    try { return fs.statSync(file).mtimeMs >= since; } catch { return false; }
   }
   function record(agent, sessionId, meta, transcript, observed = null) {
+    const key = `${agent}:${sessionId}`;
     const startedMs = Number(meta.startedAt) || Date.parse(meta.timestamp);
     if (!sessionId || !Number.isFinite(startedMs)) return;
-    if (!observed && (startedMs < since || startedMs > Date.now() || !accepts(meta.cwd))) return;
-    const pid = observed?.pid || meta.pid || null;
-    // A stale PID file can survive its process. Never attach a currently unrelated process.
-    if (pid && live.has(pid) && !members.has(pid)) return;
-    const command = observed?.command?.slice(0, 300) || (agent === 'claude' ? 'claude -p' : 'codex exec');
-    const launcher = observed?.launcher || null;
+    if (!observed) {
+      if (excluded.has(key) || !meta.cwd || !directories.has(real(meta.cwd))) return;
+      if (agent === "codex" && (!safeCodex || blockedCodex.has(real(meta.cwd)))) return;
+      // Resumes retain the first session header. A changed transcript proves activity in this
+      // invocation's window even though the original session started earlier.
+      if (startedMs > Date.now() || startedMs < since && !(transcript && recent(transcript))) return;
+    }
+    if (observed && live.has(observed.pid) && !members.has(observed.pid)) return;
+    const command = observed?.command?.slice(0, 300) || (launchedKind === agent ? launchedCommand.slice(0, 300) : agent === "claude" ? "claude -p" : "codex exec");
     const r = {
-      key: `${agent}:${sessionId}`, agent, sessionId, file: transcript, cwd: meta.cwd || observed?.cwd || cwd,
-      pid, command, startedMs, seenMs: Date.now(),
-      name: launcher ? path.basename(launcher.split(/\s+/).find((w) => /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/.test(w)) || '').replace(/\.[a-z]+$/, '').replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 28) : agent === 'claude' ? 'claude-headless' : 'codex-exec',
-      launcher: launcher?.slice(0, 160) || null,
+      key, agent, sessionId, file: transcript, cwd: meta.cwd || observed?.cwd || cwd,
+      // Only a live group observation confers ownership. A leftover PID file is a guess too.
+      pid: observed?.pid || null, command, startedMs, seenMs: Date.now(),
+      ...externalAgentLabel(agent, command, observed?.via || null),
       parent: { run: process.env.AGENT_ORCH_RUN || null, task: process.env.AGENT_ORCH_TASK || null,
         claude: process.env.CLAUDE_CODE_SESSION_ID || null, codex: process.env.CODEX_THREAD_ID || null, nearest: null },
     };
-    // A final file sweep must not replace a live observation with guessed process metadata.
-    const prior = saved.get(r.key);
-    if (prior && (!observed || prior.pid === pid && prior.file === transcript)) return;
-    appendExternalRecord(file, r);
-    saved.set(r.key, r);
+    const prior = saved.get(key);
+    if (prior && (!observed || prior.pid === r.pid && prior.file === transcript)) return;
+    if (appendExternalRecord(file, r) !== false) saved.set(key, r);
   }
-  let live = new Map(), members = new Set();
-  function processes(pgid) {
-    const r = spawnSync('ps', ['-Aww', '-o', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8', timeout: 5000, maxBuffer: 16 << 20 });
-    if (r.error || r.status !== 0) return;
-    live = new Map();
-    members = new Set();
-    for (const line of r.stdout.split('\n')) {
+  const isCodex = (command) => command.split(/\s+/).slice(0, 2).some((w) => /^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(path.basename(w)));
+  function processes(pgid, checkOutside = false) {
+    const r = spawnSync("ps", ["-Aww", "-o", "pid=,ppid=,pgid=,command="], { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 });
+    if (r.error || r.status !== 0) { safeCodex = false; return false; }
+    live = new Map(); members = new Set(); blockedCodex = new Set();
+    for (const line of r.stdout.split("\n")) {
       const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
       if (!m) continue;
       const row = { pid: +m[1], ppid: +m[2], pgid: +m[3], command: m[4] };
       live.set(row.pid, row);
       if (row.pgid === pgid) members.add(row.pid);
     }
-    if (!members.size) return;
-    const open = spawnSync('lsof', ['-nP', '-Fpcfn', '-p', [...members].join(',')], { encoding: 'utf8', timeout: 5000, maxBuffer: 16 << 20 });
-    if (!open.error) {
-      let row, descriptor;
-      for (const line of (open.stdout || '').split('\n')) {
-        if (line[0] === 'p') row = live.get(Number(line.slice(1)));
-        else if (line[0] === 'f') descriptor = line.slice(1);
-        else if (line[0] === 'n' && row && members.has(row.pid)) {
-          if (descriptor === 'cwd') { row.cwd = line.slice(1); directories.add(real(row.cwd)); }
-          else if (/[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) row.rollout = line.slice(1);
+    for (const [pid, row] of known) {
+      const now = live.get(pid);
+      if (now && (!members.has(pid) || now.command !== row.command)) known.delete(pid);
+    }
+    const outside = checkOutside ? [...live.values()].filter((r) => !members.has(r.pid) && isCodex(r.command)) : [];
+    const agents = [...members].filter((pid) => headlessKind(live.get(pid).command));
+    const pids = new Set([...agents, ...outside.map((r) => r.pid)]);
+    for (const row of live.values()) if (agents.includes(row.ppid) || outside.some((p) => p.pid === row.ppid)) pids.add(row.pid);
+    safeCodex = true;
+    if (pids.size) {
+      const open = spawnSync("lsof", ["-nP", "-Fpcfn", "-p", [...pids].join(",")], { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 });
+      safeCodex = !open.error && (open.status === 0 || open.status === 1);
+      if (safeCodex) {
+        let row, descriptor;
+        for (const line of (open.stdout || "").split("\n")) {
+          if (line[0] === "p") row = live.get(Number(line.slice(1)));
+          else if (line[0] === "f") descriptor = line.slice(1);
+          else if (line[0] === "n" && row && pids.has(row.pid)) {
+            if (descriptor === "cwd") row.cwd = line.slice(1);
+            else if (/[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) row.rollout = line.slice(1);
+          }
         }
       }
     }
-    for (const pid of members) {
-      const row = live.get(pid);
-      // /proc is also useful on hosts without lsof.
-      try { row.cwd ||= fs.readlinkSync(`/proc/${pid}/cwd`); directories.add(real(row.cwd)); } catch {}
-      const agent = kind(row.command);
-      if (!agent || kind(live.get(row.ppid)?.command || '') === agent) continue;
-      for (let p = row.ppid, hops = 0; members.has(p) && hops < 6; hops++) {
-        const parent = live.get(p);
-        if (kind(parent.command)) break;
-        const words = parent.command.split(/\s+/);
-        const script = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
-        const interpreter = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
-        if (script.test(words[0]) || interpreter.test(path.basename(words[0])) && script.test(words[1] || '')) { row.launcher = parent.command; break; }
-        p = parent.ppid;
+    for (const row of live.values()) {
+      if (!pids.has(row.pid)) continue;
+      try { row.cwd ||= fs.readlinkSync(`/proc/${row.pid}/cwd`); } catch {}
+      row.rollout ||= [...live.values()].find((p) => p.ppid === row.pid && p.rollout)?.rollout;
+      if (!members.has(row.pid) && (isCodex(row.command) || outside.some((p) => p.pid === row.ppid))) {
+        // Other Codex homes cannot own a candidate in this relay's sessions folder.
+        if (row.rollout && !real(row.rollout).startsWith(real(path.join(codex, "sessions")) + path.sep)) continue;
+        const meta = row.rollout && header(row.rollout, "codex");
+        if (meta?.id) excluded.add(`codex:${meta.id}`);
+        else if (isCodex(row.command)) {
+          if (row.cwd) blockedCodex.add(real(row.cwd));
+          else safeCodex = false;
+        }
       }
-      if (!row.rollout) row.rollout = [...live.values()].find((p) => p.ppid === pid && p.rollout)?.rollout;
-      known.set(pid, { ...known.get(pid), ...row, agent });
     }
+    const group = new Map([...live].filter(([pid]) => members.has(pid)));
+    for (const [pid, row] of group) {
+      const agent = headlessKind(row.command);
+      if (!agent) continue;
+      addDirectory(row.cwd);
+      if (headlessKind(live.get(row.ppid)?.command || "") === agent) continue;
+      known.set(pid, { ...known.get(pid), ...row, agent, via: externalLauncher(pid, group) });
+    }
+    return true;
   }
-  return (pgid, final = false) => {
+  const capture = (pgid, final = false) => {
     try {
-      processes(pgid);
-      for (const [pid, row] of known) {
-        if (row.agent === 'claude') {
-          const s = json(path.join(claude, 'sessions', `${pid}.json`));
-          if (s?.sessionId && s.entrypoint !== 'cli') record('claude', s.sessionId, s, null, row);
-        } else if (row.rollout) {
-          const m = header(row.rollout, 'codex');
-          if (m?.id) record('codex', m.id, m, row.rollout, row);
+      watch();
+      if (!processes(pgid)) return;
+      // Inspect all live Claude PID files before any fallback, so a transcript cannot undo an
+      // outside-process or interactive-session exclusion made by its PID record.
+      const sessions = [];
+      for (const f of list(path.join(claude, "sessions"))) {
+        const s = json(f);
+        if (!s?.sessionId) continue;
+        const pid = Number(s.pid || path.basename(f, ".json"));
+        if (s.entrypoint === "cli" || live.has(pid) && !members.has(pid)) excluded.add(`claude:${s.sessionId}`);
+        else sessions.push({ s, pid });
+      }
+      for (const { s, pid } of sessions) {
+        const observed = known.get(pid);
+        if (observed) {
+          excluded.delete(`claude:${s.sessionId}`);
+          record("claude", s.sessionId, s, null, observed);
         }
+      }
+      for (const row of known.values()) if (row.agent === "codex" && row.rollout) {
+        const m = header(row.rollout, "codex");
+        if (m?.id) { excluded.delete(`codex:${m.id}`); record("codex", m.id, m, row.rollout, row); }
       }
       if (!final && Date.now() - lastFiles < 2000) return;
       lastFiles = Date.now();
-      for (const f of list(path.join(claude, 'sessions'), 0)) {
+      const projects = new Set([...directories].map((d) => path.join(claude, "projects", d.replace(/[^A-Za-z0-9]/g, "-"))));
+      const candidates = new Set([...projects].flatMap(list));
+      // New rollouts are filed by UTC date. Old-date resumes arrive through file notifications.
+      for (let day = Date.parse(new Date(since).toISOString().slice(0, 10)); day <= Date.now(); day += 86400000) {
+        candidatesForDate(day);
+      }
+      function candidatesForDate(day) {
+        const date = new Date(day).toISOString().slice(0, 10).split("-");
+        for (const f of list(path.join(codex, "sessions", ...date))) candidates.add(f);
+      }
+      for (const f of changed) {
+        if (f.startsWith(path.join(codex, "sessions") + path.sep) || projects.has(path.dirname(f))) candidates.add(f);
+      }
+      const recoveries = [];
+      for (const f of candidates) {
+        if (!recent(f)) continue;
+        const agent = f.startsWith(path.join(codex, "sessions") + path.sep) ? "codex" : "claude";
+        const m = header(f, agent);
+        // An explicitly launched exec resume can append to a session that began interactively.
+        const resumedInteractive = directResume && changed.has(f) && m?.source === "cli";
+        if (!m || agent === "codex" && m.originator !== "codex_exec" && m.source !== "exec" && !resumedInteractive) continue;
+        recoveries.push({ agent, id: agent === "claude" ? m.sessionId || path.basename(f, ".jsonl") : m.id, m, f });
+      }
+      // The process snapshot at the start of this sweep predates these files. Check owners
+      // again after reading candidates: an outsider may have started while lsof was running.
+      const pendingPidFiles = sessions.some(({ s, pid }) => !known.has(pid) && s.cwd && directories.has(real(s.cwd)) && Number(s.startedAt) >= since);
+      if (!recoveries.length && !pendingPidFiles) return;
+      if (!processes(pgid, true)) return;
+      for (const f of list(path.join(claude, "sessions"))) {
         const s = json(f);
         if (!s?.sessionId) continue;
-        const pid = Number(s.pid || path.basename(f, '.json'));
-        if (s.entrypoint === 'cli' || live.has(pid) && !members.has(pid)) { excluded.add(s.sessionId); continue; }
-        record('claude', s.sessionId, { ...s, pid }, null, known.get(pid));
+        const pid = Number(s.pid || path.basename(f, ".json"));
+        if (s.entrypoint === "cli" || live.has(pid) && !members.has(pid)) excluded.add(`claude:${s.sessionId}`);
+        else record("claude", s.sessionId, s, null, known.get(pid));
       }
-      for (const f of list(path.join(claude, 'projects'), 1)) {
-        const m = header(f, 'claude');
-        const id = m?.sessionId || path.basename(f, '.jsonl');
-        if (m && !excluded.has(id)) record('claude', id, m, f);
-      }
-      for (const f of list(path.join(codex, 'sessions'), 3)) {
-        const m = header(f, 'codex');
-        if (m && (m.originator === 'codex_exec' || m.source === 'exec')) record('codex', m.id, m, f);
-      }
+      for (const { agent, id, m, f } of recoveries) record(agent, id, m, f);
     } catch (error) {
       if (!warned) fs.appendFileSync(logPath, `\ncommand-relay: could not record an agent: ${error.message}\n`);
       warned = true;
     }
   };
+  capture.close = () => { for (const w of watchers.values()) w.close(); };
+  return capture;
 }
 const captureAgents = commandAgents();
 
@@ -403,6 +467,7 @@ function settle({ code = null, signal = null, error = null, left = null } = {}) 
   clearInterval(poll);
   clearTimeout(timeoutTimer);
   clearTimeout(killTimer);
+  captureAgents.close();
   readOutput(true);
   let exitCode = code ?? (signal ? signalCode(signal) : 1);
   let status = "completed";
@@ -444,12 +509,17 @@ function settle({ code = null, signal = null, error = null, left = null } = {}) 
 }
 
 // The command has exited: end what it left running in its group, record it, then settle.
-function onExit(code, signal) {
+async function onExit(code, signal) {
   exited = true;
+  clearInterval(poll);
+  clearTimeout(timeoutTimer);
   clearTimeout(killTimer);
   captureAgents(child.pid);
   const left = endGroup(child.pid, GRACE_MS);
+  // Let pending file notifications identify old-date resumes before the final sweep.
+  await new Promise((resolve) => setImmediate(resolve));
   captureAgents(child.pid, true);
+  captureAgents.close();
   try {
     writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
   } catch {}

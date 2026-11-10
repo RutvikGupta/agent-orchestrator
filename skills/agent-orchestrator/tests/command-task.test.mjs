@@ -364,16 +364,21 @@ const sessionId = process.env.QUICK_SESSION;
 const cwd = process.cwd();
 const startedAt = Date.now();
 const timestamp = new Date(startedAt).toISOString();
+const padding = 'x'.repeat(Number(process.env.QUICK_PAYLOAD || 0));
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value) + '\\n'); };
 let liveFile;
 if (agent === 'claude') {
   liveFile = path.join(process.env.CLAUDE_CONFIG_DIR, 'sessions', process.pid + '.json');
   write(liveFile, { sessionId, cwd, startedAt, pid: process.pid, entrypoint: 'sdk-cli' });
-  write(path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), sessionId + '.jsonl'),
-    { type: 'user', sessionId, cwd, timestamp, message: { role: 'user', content: 'Review.' } });
+  const transcript = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), sessionId + '.jsonl');
+  const entry = { type: 'user', sessionId, cwd, timestamp, message: { role: 'user', content: 'Review.' + padding } };
+  if (process.env.QUICK_RESUME) fs.appendFileSync(transcript, JSON.stringify(entry) + '\\n');
+  else write(transcript, entry);
 } else {
-  const file = path.join(process.env.CODEX_HOME, 'sessions', '2026', '11', '10', 'rollout-' + sessionId + '.jsonl');
-  write(file, { type: 'session_meta', timestamp, payload: { id: sessionId, cwd, timestamp, originator: 'codex_exec', source: 'exec' } });
+  const date = timestamp.slice(0, 10).split('-');
+  const file = process.env.QUICK_ROLLOUT || path.join(process.env.CODEX_HOME, 'sessions', ...date, 'rollout-' + sessionId + '.jsonl');
+  if (process.env.QUICK_RESUME) fs.appendFileSync(file, JSON.stringify({ type: 'event_msg', timestamp, payload: { type: 'task_complete' } }) + '\\n');
+  else write(file, { type: 'session_meta', timestamp, payload: { id: sessionId, cwd, timestamp, originator: 'codex_exec', source: 'exec', padding } });
   fs.openSync(file, 'a');
 }
 const finish = () => {
@@ -399,14 +404,14 @@ for (const agent of ['claude', 'codex']) {
     const bin = quickAgent(f, agent);
     const doneFile = path.join(f.root, `${agent}-done.json`);
     const id = agent === 'codex' ? '11111111-2222-4333-8444-555555555555' : 'quick-claude';
-    // A wrapper starts the agent in a child directory, and waits for it, as review scripts do.
+    // A wrapper starts the agent in the command's directory and waits for it.
     const childDir = path.join(f.repo, 'child');
     fs.mkdirSync(childDir);
     const wrapper = path.join(f.root, `run-${agent}.cjs`);
     fs.writeFileSync(wrapper, `require('node:child_process').spawnSync(process.execPath, ${JSON.stringify([bin, agent === 'claude' ? '-p' : 'exec', 'review'])}, { cwd: ${JSON.stringify(childDir)}, env: process.env, stdio: 'inherit' });`);
     await startCommand(f, run, 'quick', [process.execPath, wrapper], { env: {
       QUICK_SESSION: id, QUICK_DONE: doneFile, QUICK_REMOVE_SESSION: '1',
-    } });
+    }, flags: ['--cd', childDir] });
     await f.finished(run, 'quick');
     assert.ok(readJson(doneFile).durationMs < 1000, 'the agent exits in under a second');
     const records = lines(path.join(f.state, 'external.jsonl'));
@@ -420,32 +425,48 @@ for (const agent of ['claude', 'codex']) {
   });
 }
 
-test('the relay ignores a simultaneous unrelated Claude session in another directory', async (t) => {
-  const { spawn } = await import('node:child_process');
-  let outsider, outsideRelease;
-  t.after(async () => {
-    if (!outsider) return;
-    fs.writeFileSync(outsideRelease, '');
-    await eventually(() => outsider.exitCode !== null, 'unrelated fixture did not stop');
+for (const agent of ['claude', 'codex']) {
+  test(`the relay records its own ${agent} and excludes a live outsider in the same directory`, async (t) => {
+    const { spawn } = await import('node:child_process');
+    let outsider, outsideRelease;
+    t.after(async () => {
+      if (!outsider) return;
+      fs.writeFileSync(outsideRelease, '');
+      await eventually(() => outsider.exitCode !== null, 'unrelated fixture did not stop');
+    });
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const bin = quickAgent(f, agent);
+    const control = path.join(f.root, 'control');
+    fs.mkdirSync(control);
+    const ownRelease = path.join(f.root, 'own-release');
+    // Keep the command alive before either session exists, so both are within its time window.
+    const wrapper = path.join(f.root, 'owner.cjs');
+    fs.writeFileSync(wrapper, `const fs = require('node:fs');
+      fs.writeFileSync(${JSON.stringify(path.join(control, 'ready'))}, '');
+      const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(path.join(control, 'release'))})) {
+        clearInterval(timer);
+        require('node:child_process').spawnSync(process.execPath, ${JSON.stringify([bin, agent === 'claude' ? '-p' : 'exec', 'review'])}, { env: process.env, stdio: 'inherit' });
+      } }, 10);`);
+    await startCommand(f, run, 'owner', [process.execPath, wrapper], { env: {
+      QUICK_SESSION: 'own-session', QUICK_DONE: path.join(f.root, 'own-done.json'),
+      QUICK_READY: path.join(f.root, 'own-ready.json'), QUICK_RELEASE: ownRelease,
+    } });
+    await eventually(() => fs.existsSync(path.join(control, 'ready')), 'command was not ready');
+    outsideRelease = path.join(f.root, 'outside-release');
+    outsider = spawn(process.execPath, [bin, agent === 'claude' ? '-p' : 'exec', 'review'], { cwd: f.repo, env: {
+      ...f.env, QUICK_SESSION: 'unrelated', QUICK_DONE: path.join(f.root, 'outside-done.json'),
+      QUICK_READY: path.join(f.root, 'outside-ready.json'), QUICK_RELEASE: outsideRelease,
+    }, stdio: 'ignore' });
+    await eventually(() => fs.existsSync(path.join(f.root, 'outside-ready.json')), 'unrelated agent was not ready');
+    fs.writeFileSync(path.join(control, 'release'), '');
+    const file = path.join(f.state, 'external.jsonl');
+    await eventually(() => fs.existsSync(file) && lines(file).some((r) => r.sessionId === 'own-session' && r.pid), 'relay did not directly record its own agent', 20_000);
+    fs.writeFileSync(ownRelease, '');
+    await f.finished(run, 'owner');
+    assert.deepEqual(lines(file).map((r) => [r.key, r.parent.task]), [[`${agent}:own-session`, 'owner']]);
   });
-  const f = await fixture(t);
-  const run = await f.newRun();
-  const bin = quickAgent(f, 'claude');
-  const control = path.join(f.root, 'control');
-  fs.mkdirSync(control);
-  await startCommand(f, run, 'owner', held(control));
-  await eventually(() => fs.existsSync(path.join(control, 'ready')), 'command was not ready');
-  outsideRelease = path.join(f.root, 'outside-release');
-  outsider = spawn(process.execPath, [bin, '-p', 'review'], { cwd: f.root, env: {
-    ...f.env, QUICK_SESSION: 'unrelated', QUICK_DONE: path.join(f.root, 'outside-done.json'),
-    QUICK_READY: path.join(f.root, 'outside-ready.json'), QUICK_RELEASE: path.join(f.root, 'outside-release'),
-  }, stdio: 'ignore' });
-  await eventually(() => fs.existsSync(path.join(f.root, 'outside-ready.json')), 'unrelated agent was not ready');
-  fs.writeFileSync(path.join(control, 'release'), '');
-  await f.finished(run, 'owner');
-  const file = path.join(f.state, 'external.jsonl');
-  assert.deepEqual(fs.existsSync(file) ? lines(file) : [], []);
-});
+}
 
 test('the relay and dashboard record the same live command agent once', async (t) => {
   const f = await fixture(t);
@@ -468,4 +489,109 @@ test('the relay and dashboard record the same live command agent once', async (t
   fs.writeFileSync(release, '');
   await f.finished(run, 'shared');
   assert.equal(lines(file).filter((r) => r.key === 'claude:shared-agent').length, 1);
+});
+
+// Hide only the relay's broad process snapshot. Group cleanup and the CLI's own process checks
+// still use real ps. These cases must succeed through durable files, never a lucky live poll.
+function withoutLiveCapture(f) {
+  const bin = path.join(f.root, 'capture-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nif [ "$1" = "-Aww" ]; then exit 0; fi\nexec /bin/ps "$@"\n', { mode: 0o755 });
+  return { PATH: `${bin}:${f.env.PATH}` };
+}
+
+for (const agent of ['claude', 'codex']) {
+  test(`durable ${agent} recovery reads a first JSON line longer than 256 KB`, async (t) => {
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const bin = quickAgent(f, agent);
+    await startCommand(f, run, 'large', [process.execPath, bin, agent === 'claude' ? '-p' : 'exec', 'review'], { env: {
+      ...withoutLiveCapture(f), QUICK_SESSION: 'large-first-line', QUICK_PAYLOAD: String(600 * 1024),
+      QUICK_DONE: path.join(f.root, 'large-done.json'), QUICK_REMOVE_SESSION: '1',
+    } });
+    await f.finished(run, 'large');
+    const records = lines(path.join(f.state, 'external.jsonl'));
+    assert.deepEqual(records.map((r) => [r.key, r.pid, r.parent.task]), [[`${agent}:large-first-line`, null, 'large']]);
+  });
+
+  test(`durable ${agent} recovery finds a quick resume with an old original timestamp`, async (t) => {
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const bin = quickAgent(f, agent);
+    const timestamp = '2025-01-02T03:04:05.000Z';
+    const transcript = agent === 'claude'
+      ? path.join(f.claude, 'projects', f.repo.replace(/[^A-Za-z0-9]/g, '-'), 'resumed.jsonl')
+      : path.join(f.codex, 'sessions', '2025', '01', '02', 'rollout-resumed.jsonl');
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    const first = agent === 'claude'
+      ? { type: 'user', sessionId: 'resumed', cwd: f.repo, timestamp, message: { role: 'user', content: 'Earlier request.' } }
+      : { type: 'session_meta', timestamp, payload: { id: 'resumed', cwd: f.repo, timestamp, originator: 'codex_cli_rs', source: 'cli' } };
+    fs.writeFileSync(transcript, JSON.stringify(first) + '\n');
+    fs.utimesSync(transcript, new Date(timestamp), new Date(timestamp));
+    await startCommand(f, run, 'resume', [process.execPath, bin, ...(agent === 'claude' ? ['-p', '--resume'] : ['exec', 'resume']), 'resumed'], { env: {
+      ...withoutLiveCapture(f), QUICK_SESSION: 'resumed', QUICK_RESUME: '1', QUICK_ROLLOUT: transcript,
+      QUICK_DONE: path.join(f.root, 'resume-done.json'), QUICK_REMOVE_SESSION: '1',
+    } });
+    await f.finished(run, 'resume');
+    const records = lines(path.join(f.state, 'external.jsonl'));
+    assert.deepEqual(records.map((r) => [r.key, r.pid, r.parent.task, r.startedMs]), [[`${agent}:resumed`, null, 'resume', Date.parse(timestamp)]]);
+    assert.equal(records[0].name, agent === 'codex' ? 'codex-exec-resume' : 'claude-headless');
+  });
+}
+
+for (const broad of ['root', 'home']) {
+  test(`a non-agent shell in ${broad} does not widen recovery`, async (t) => {
+    const { spawn } = await import('node:child_process');
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const bin = quickAgent(f, 'claude');
+    const release = path.join(f.root, 'broad-release');
+    const wrapper = path.join(f.root, 'broad.cjs');
+    const broadDir = broad === 'root' ? path.parse(f.repo).root : f.env.HOME;
+    fs.writeFileSync(wrapper, `const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ${JSON.stringify([bin, '-p', 'review'])}, { cwd: ${JSON.stringify(f.repo)}, env: process.env, stdio: 'inherit' });
+      process.chdir(${JSON.stringify(broadDir)});
+      child.on('exit', () => process.exit(0));`);
+    await startCommand(f, run, 'broad', [process.execPath, wrapper], { env: {
+      QUICK_SESSION: 'own-broad', QUICK_READY: path.join(f.root, 'broad-ready.json'),
+      QUICK_RELEASE: release, QUICK_DONE: path.join(f.root, 'broad-done.json'),
+    } });
+    const file = path.join(f.state, 'external.jsonl');
+    await eventually(() => fs.existsSync(file) && lines(file).some((r) => r.sessionId === 'own-broad' && r.pid), 'own agent was not observed', 20_000);
+    // Finished metadata has no live PID left to exclude it. Only exact directory matching
+    // can keep it out, after the shell's broad cwd was visible during the own-agent poll.
+    const elsewhere = broad === 'root' ? broadDir : path.join(f.env.HOME, 'unrelated');
+    fs.mkdirSync(elsewhere, { recursive: true });
+    const outsider = spawn(process.execPath, [bin, '-p', 'review'], { cwd: elsewhere, env: {
+      ...f.env, QUICK_SESSION: 'finished-outsider', QUICK_REMOVE_SESSION: '1', QUICK_DONE: path.join(f.root, 'outsider-done.json'),
+    }, stdio: 'ignore' });
+    await new Promise((resolve, reject) => { outsider.on('error', reject); outsider.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`fake exit ${code}`))); });
+    fs.writeFileSync(release, '');
+    await f.finished(run, 'broad');
+    assert.deepEqual(lines(file).map((r) => r.sessionId), ['own-broad']);
+  });
+}
+
+test('recovery sweeps only matching projects and current dates', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const bin = quickAgent(f, 'claude');
+  const foreignProject = path.join(f.claude, 'projects', 'unrelated-project');
+  const oldDates = path.join(f.codex, 'sessions', '2024');
+  fs.mkdirSync(foreignProject, { recursive: true });
+  fs.mkdirSync(path.join(oldDates, '01', '01'), { recursive: true });
+  const audit = path.join(f.root, 'scanned.txt');
+  const preload = path.join(f.root, 'audit.cjs');
+  fs.writeFileSync(preload, `const fs = require('node:fs'); const original = fs.readdirSync;
+    fs.readdirSync = function(dir, ...args) {
+      if (${JSON.stringify([foreignProject, oldDates])}.some((p) => String(dir) === p || String(dir).startsWith(p + '/'))) fs.appendFileSync(${JSON.stringify(audit)}, String(dir) + '\\n');
+      return original.call(this, dir, ...args);
+    };`);
+  await startCommand(f, run, 'bounded', [process.execPath, bin, '-p', 'review'], { env: {
+    ...withoutLiveCapture(f), NODE_OPTIONS: `--require=${preload}`, QUICK_SESSION: 'bounded',
+    QUICK_DONE: path.join(f.root, 'bounded-done.json'), QUICK_REMOVE_SESSION: '1',
+  } });
+  await f.finished(run, 'bounded');
+  assert.equal(fs.existsSync(audit) ? fs.readFileSync(audit, 'utf8') : '', '', 'unrelated project and historical date folders are not traversed');
+  assert.deepEqual(lines(path.join(f.state, 'external.jsonl')).map((r) => r.sessionId), ['bounded']);
 });

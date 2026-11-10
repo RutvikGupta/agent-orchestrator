@@ -15,13 +15,16 @@ test('external record writers merge duplicate sessions across processes and seri
   const module = new URL('../scripts/lib/command-group.mjs', import.meta.url).href;
   const { appendExternalRecord } = await import(module);
   appendExternalRecord(file, { key: 'old', startedMs: 1, seenMs: 1 });
-  appendExternalRecord(file, { key: 'shared', startedMs: 10, seenMs: 100, pid: 123, command: 'claude -p fixture', name: 'review', launcher: 'review.sh', parent: { run: 'fixture', task: 'review' } });
+  appendExternalRecord(file, { key: 'shared', startedMs: 10, seenMs: 90, pid: null, parent: { run: 'wrong', task: 'guess' } });
+  appendExternalRecord(file, { key: 'shared', startedMs: 20, seenMs: 100, pid: 123, command: 'claude -p fixture', name: 'review', launcher: 'review.sh', parent: { run: null, task: null, nearest: null } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').trim().split('\n').at(-1)).parent, { run: null, task: null, nearest: null });
+  appendExternalRecord(file, { key: 'shared', startedMs: 30, seenMs: 105, pid: 124, parent: { run: 'resumed', task: 'review', nearest: 'codex' } });
   const script = `import { appendExternalRecord, compactExternalRecords } from ${JSON.stringify(module)};
     const [file, index] = process.argv.slice(1);
-    compactExternalRecords(file, 50);
+    while (!compactExternalRecords(file, 50)) {}
     for (let n = 0; n < 20; n++) {
-      appendExternalRecord(file, { key: index + ':' + n, startedMs: 100, seenMs: 100 });
-      appendExternalRecord(file, { key: 'shared', startedMs: 20, seenMs: 110, pid: null, command: 'claude -p', name: 'claude-headless', launcher: null, file: '/fixture/transcript', cwd: '/fixture', parent: { run: null, task: null, nearest: 'claude' } });
+      while (!appendExternalRecord(file, { key: index + ':' + n, startedMs: 100, seenMs: 100 })) {}
+      appendExternalRecord(file, { key: 'shared', startedMs: 20, seenMs: 110, pid: null, command: 'claude -p', name: 'claude-headless', launcher: null, file: '/fixture/transcript', cwd: '/fixture', parent: { run: 'wrong-owner', task: 'wrong-task', nearest: 'claude' } });
     }`;
   const children = Array.from({ length: 4 }, (_, i) => spawn(process.execPath, ['--input-type=module', '-e', script, file, String(i)], { stdio: ['ignore', 'ignore', 'pipe'] }));
   await Promise.all(children.map((child) => new Promise((resolve, reject) => {
@@ -34,7 +37,7 @@ test('external record writers merge duplicate sessions across processes and seri
   assert.equal(lines.length, 81);
   assert.equal(new Set(lines.map((r) => r.key)).size, 81);
   const shared = lines.find((r) => r.key === 'shared');
-  assert.deepEqual(shared, { key: 'shared', startedMs: 10, seenMs: 110, pid: 123, command: 'claude -p fixture', name: 'review', launcher: 'review.sh', parent: { run: 'fixture', task: 'review', nearest: 'claude' }, file: '/fixture/transcript', cwd: '/fixture' });
+  assert.deepEqual(shared, { key: 'shared', startedMs: 10, seenMs: 105, pid: 124, command: 'claude -p fixture', name: 'review', launcher: 'review.sh', parent: { run: 'resumed', task: 'review', nearest: 'codex' } });
   for (let i = 0; i < 4; i++) for (let n = 0; n < 20; n++) assert.ok(lines.some((r) => r.key === `${i}:${n}`));
 });
 
@@ -52,6 +55,43 @@ test('external record lock is released on a write exception and abandoned locks 
   fs.utimesSync(`${file}.lock`, past, past);
   appendExternalRecord(file, { key: 'recovered', seenMs: 100 });
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).key, 'recovered');
+});
+
+test('external locks recover dead, replaced and stale owners and bound live contention', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-lock-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'external.jsonl'), lock = `${file}.lock`;
+  const { appendExternalRecord, compactExternalRecords, processStart } = await import('../scripts/lib/command-group.mjs');
+  const setOwner = (owner, stale = false) => {
+    fs.mkdirSync(lock);
+    fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(owner));
+    if (stale) { const ago = new Date(Date.now() - 11_000); fs.utimesSync(lock, ago, ago); }
+  };
+  setOwner({ pid: 2147000000, start: 'dead' });
+  assert.equal(appendExternalRecord(file, { key: 'dead' }), true);
+  setOwner({ pid: process.pid, start: 'reused' });
+  assert.equal(appendExternalRecord(file, { key: 'replaced' }), true);
+  setOwner({ pid: process.pid, start: processStart(process.pid) }, true);
+  assert.equal(appendExternalRecord(file, { key: 'stale' }), true);
+  setOwner({ pid: process.pid, start: processStart(process.pid) });
+  const before = Date.now();
+  assert.equal(appendExternalRecord(file, { key: 'busy' }), false);
+  assert.ok(Date.now() - before < 1000);
+  const compactBefore = Date.now();
+  assert.equal(compactExternalRecords(file, 0), false);
+  assert.ok(Date.now() - compactBefore < 1000);
+  assert.ok(fs.existsSync(path.join(lock, 'owner.json')));
+});
+
+test('shared external naming handles codex subcommands and script launchers', async () => {
+  const { externalAgentLabel, externalLauncher } = await import('../scripts/lib/command-group.mjs');
+  assert.deepEqual(externalAgentLabel('codex', 'codex exec review', null), { name: 'codex-exec-review', launcher: null });
+  assert.deepEqual(externalAgentLabel('codex', 'codex exec resume abc', null), { name: 'codex-exec-resume', launcher: null });
+  const table = new Map([[10, { ppid: 11 }], [11, { ppid: 1, command: 'bash /tmp/My_Review.sh' }]]);
+  const via = externalLauncher(10, table);
+  assert.deepEqual(externalAgentLabel('claude', 'claude -p x', via), { name: 'my-review', launcher: 'bash /tmp/My_Review.sh' });
+  table.set(11, { ppid: 1, command: 'node /tmp/skills/agent-orchestrator/scripts/command-relay.mjs' });
+  assert.equal(externalLauncher(10, table), null);
 });
 
 // Agents that a command started outside the orchestrator, found by the dashboard in the process

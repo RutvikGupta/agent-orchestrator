@@ -13,6 +13,54 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { shortText, slug } from "./format.mjs";
+
+const words = (command) => String(command || "").trim().split(/\s+/);
+const base = (word) => path.basename(word || "");
+const isAgent = (command) => words(command).slice(0, 2).map(base).some((n) => /^(claude|codex)(\.js)?$/.test(n));
+
+// "claude" for a headless Claude Code process, "codex" for `codex exec`, otherwise null. A Node
+// launcher (`node .../bin/codex exec ...`) counts as the script it runs. For Codex, `exec` must be
+// its first word that is neither an option nor an option's value, so a prompt that merely
+// contains "exec" does not count.
+export function headlessKind(command) {
+  let w = words(command);
+  if (["node", "bun"].includes(base(w[0]))) w = w.slice(1);
+  const name = base(w[0]);
+  if (name === "claude") return w.includes("-p") || w.includes("--print") ? "claude" : null;
+  if (!/^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(name)) return null;
+  for (let i = 1; i < Math.min(w.length, 60); i++) {
+    if (w[i] === "exec") return "codex";
+    if (!w[i].startsWith("-") && !(w[i - 1].startsWith("-") && !w[i - 1].includes("="))) return null;
+  }
+  return null;
+}
+
+// The script that started the agent, such as `bash codex_review.sh ...`: the nearest process above
+// it that runs a file, below the session that ran the command. An orchestrator relay is not such a
+// script: an agent a command task runs directly has no launcher, so it is not named after the relay.
+const SCRIPT = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
+const RELAY = /skills\/(agent-orchestrator|claude-delegate|codex-delegate)\/scripts\/(command-relay|relay)\.mjs$/;
+const INTERPRETER = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
+export function externalLauncher(pid, table) {
+  for (let p = table.get(pid)?.ppid, hops = 0; p > 1 && hops < 6; hops++) {
+    const row = table.get(p);
+    if (!row || isAgent(row.command)) return null;
+    const w = words(row.command);
+    const file = SCRIPT.test(w[0]) ? w[0] : INTERPRETER.test(base(w[0])) && w[1] && !w[1].startsWith("-") ? w[1] : null;
+    if (file && RELAY.test(file)) return null;
+    if (file) return { name: base(file).replace(/\.[a-z]+$/, ""), command: row.command };
+    p = row.ppid;
+  }
+  return null;
+}
+
+export function externalAgentLabel(agent, command, via) {
+  const w = words(command);
+  const sub = agent === "codex" ? w[w.indexOf("exec") + 1] : null;
+  const fallback = agent === "codex" ? `codex-exec${["review", "resume"].includes(sub) ? `-${sub}` : ""}` : "claude-headless";
+  return { name: slug(via?.name || fallback).slice(0, 28), launcher: via ? shortText(via.command, 160) : null };
+}
 
 export const GROUP_FILE = "command-group.json";
 export const GRACE_MS = 5000;
@@ -21,15 +69,15 @@ export const GRACE_MS = 5000;
 const PS_ENV = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
 const ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s*$/;
 
-function ps(args) {
-  const r = spawnSync("ps", args, { encoding: "utf8", env: PS_ENV(), maxBuffer: 16 * 1024 * 1024, timeout: 5000 });
+function ps(args, timeout = 5000) {
+  const r = spawnSync("ps", args, { encoding: "utf8", env: PS_ENV(), maxBuffer: 16 * 1024 * 1024, timeout });
   return r.error ? null : r.stdout || "";
 }
 
 // "Tue Nov 10 18:47:48 2026": a process's start time, which tells it apart from a later process
 // with the same PID; null when it is gone or `ps` cannot read it.
-export function processStart(pid) {
-  const out = ps(["-o", "lstart=", "-p", String(pid)]);
+export function processStart(pid, timeout = 5000) {
+  const out = ps(["-o", "lstart=", "-p", String(pid)], timeout);
   return out?.replace(/\s+/g, " ").trim() || null;
 }
 
@@ -114,70 +162,103 @@ export function endRecordedGroup(dir) {
   return { pgid, ...ended };
 }
 
-// Serialize external record read-modify-write operations across the dashboard and relays.
-// A dead owner's lock is reclaimed; the age guard also covers a crash before owner.json exists.
+// Our process identity is stable for its lifetime; caching it avoids a ps subprocess per write.
+let externalProcessStart = null;
+
+// Serialize record updates. A prepared nonempty directory makes rename an exclusive acquisition.
+// The reaper guard serializes removal with release; a crashed guard expires after ten seconds.
 function withExternalLock(file, action) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const lock = `${file}.lock`;
+  const lock = `${file}.lock`, guard = `${lock}.reap`;
+  const ready = fs.mkdtempSync(`${lock}.${process.pid}.`);
+  const deadline = Date.now() + 750;
   const pause = new Int32Array(new SharedArrayBuffer(4));
-  const deadline = Date.now() + 30000;
-  for (;;) {
-    try {
-      fs.mkdirSync(lock);
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      // Only one contender may reclaim a dead lock. Recheck after claiming the guard,
-      // so a second contender cannot rename a newly acquired lock.
-      const guard = `${lock}.reap`;
-      let guarding = false;
-      try {
-        try { fs.mkdirSync(guard); guarding = true; } catch (e) {
-          if (e.code !== "EEXIST") throw e;
-          // A crashed reaper cannot block writers forever.
-          try { if (Date.now() - fs.statSync(guard).mtimeMs > 30000) fs.rmSync(guard, { recursive: true, force: true }); }
-          catch (err) { if (err.code !== "ENOENT") throw err; }
-        }
-        if (guarding) {
-          const stat = fs.statSync(lock);
-          if (Date.now() - stat.mtimeMs > 2000) {
-            let owner;
-            try { owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); } catch {}
-            let alive = false;
-            if (Number.isInteger(owner?.pid) && owner.pid > 0) {
-              try { process.kill(owner.pid, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; }
-            }
-            if (!alive) fs.rmSync(lock, { recursive: true, force: true });
-          }
-        }
-      } catch (e) { if (e.code !== "ENOENT") throw e; }
-      finally { if (guarding) fs.rmSync(guard, { recursive: true, force: true }); }
-      if (Date.now() >= deadline) throw new Error(`Timed out waiting for external record lock: ${lock}`);
-      Atomics.wait(pause, 0, 0, 10);
+  const start = externalProcessStart ||= processStart(process.pid, 300);
+  fs.writeFileSync(path.join(ready, "owner.json"), JSON.stringify({ pid: process.pid, start }));
+  const identity = fs.statSync(ready).ino;
+  const wait = () => Atomics.wait(pause, 0, 0, Math.min(10, Math.max(0, deadline - Date.now())));
+  const guarded = (fn) => {
+    try { fs.mkdirSync(guard); } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try { if (Date.now() - fs.statSync(guard).mtimeMs > 10000) fs.rmSync(guard, { recursive: true, force: true }); }
+      catch (err) { if (err.code !== "ENOENT") throw err; }
+      return false;
     }
-  }
+    const guardIdentity = fs.statSync(guard).ino;
+    try { fn(); } finally {
+      try { if (fs.statSync(guard).ino === guardIdentity) fs.rmSync(guard, { recursive: true, force: true }); }
+      catch (e) { if (e.code !== "ENOENT") throw e; }
+    }
+    return true;
+  };
+  // Retire the directory atomically before removing its contents. Removing owner.json in
+  // place briefly leaves an empty lock directory that another ready directory could replace.
+  const retire = (expected) => {
+    if (fs.statSync(lock).ino !== expected) return;
+    const retired = `${ready}.retired`;
+    fs.renameSync(lock, retired);
+    fs.rmSync(retired, { recursive: true, force: true });
+  };
+  const checkedOwners = new Map();
+  let acquired = false;
   try {
-    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
-    return action();
+    while (Date.now() < deadline) {
+      try { fs.renameSync(ready, lock); acquired = true; break; }
+      catch (e) { if (!["EEXIST", "ENOTEMPTY"].includes(e.code)) throw e; }
+      // Inspect the owner without holding the guard, so its writer can release promptly.
+      try {
+          const stat = fs.statSync(lock);
+          let owner;
+          try { owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); } catch {}
+          let alive = false;
+          if (Number.isInteger(owner?.pid) && owner.pid > 0) {
+            try { process.kill(owner.pid, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; }
+          }
+          const stale = Date.now() - stat.mtimeMs > 10000;
+          const remaining = deadline - Date.now();
+          let current = checkedOwners.get(stat.ino) || (owner?.pid === process.pid ? start : null);
+          if (!current && !stale && alive && owner.start && remaining > 0) {
+            current = processStart(owner.pid, Math.min(300, remaining));
+            if (current) checkedOwners.set(stat.ino, current);
+          }
+          if (stale || !alive || (current && current !== owner.start)) {
+            guarded(() => {
+              try { retire(stat.ino); }
+              catch (e) { if (e.code !== "ENOENT") throw e; }
+            });
+          }
+      } catch (e) { if (e.code !== "ENOENT") throw e; }
+      if (Date.now() < deadline) wait();
+    }
+    if (!acquired) return false;
+    action();
+    return true;
   } finally {
-    fs.rmSync(lock, { recursive: true, force: true });
+    if (acquired) {
+      // Do not remove a replacement owner's directory, even if this lock expired during action.
+      do {
+        if (guarded(() => {
+          try { retire(identity); }
+          catch (e) { if (e.code !== "ENOENT") throw e; }
+        })) break;
+        if (Date.now() >= deadline) break;
+        wait();
+      } while (true);
+    } else fs.rmSync(ready, { recursive: true, force: true });
   }
 }
 
 function mergeExternal(previous, next) {
   if (!previous) return next;
+  if (next.pid == null) return previous;
   const merged = { ...previous };
-  const recovery = previous.pid != null && next.pid == null;
   for (const [key, value] of Object.entries(next)) {
-    if (recovery && ["pid", "command", "name", "launcher"].includes(key)) continue;
-    if (value === null || value === undefined || value === "") continue;
-    if (key === "parent" && typeof value === "object" && !Array.isArray(value)) {
-      merged.parent = mergeExternal(previous.parent || {}, value);
-    } else merged[key] = value;
+    if (key === "parent") merged.parent = value;
+    else if (value !== null && value !== undefined && value !== "") merged[key] = value;
   }
-  const starts = [previous.startedMs, next.startedMs].filter((n) => Number.isFinite(n));
+  const starts = [previous.startedMs, next.startedMs].filter(Number.isFinite);
   if (starts.length) merged.startedMs = Math.min(...starts);
-  const seen = [previous.seenMs, next.seenMs].filter((n) => Number.isFinite(n));
+  const seen = [previous.seenMs, next.seenMs].filter(Number.isFinite);
   if (seen.length) merged.seenMs = Math.max(...seen);
   return merged;
 }
@@ -209,6 +290,7 @@ export function appendExternalRecord(file, record) {
   if (!record || typeof record.key !== "string" || !record.key) throw new TypeError("external record needs a key");
   return withExternalLock(file, () => {
     const records = readExternal(file);
+    if (records.has(record.key) && record.pid == null) return;
     records.set(record.key, mergeExternal(records.get(record.key), record));
     writeExternal(file, records);
   });
