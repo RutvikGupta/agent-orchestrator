@@ -10,10 +10,14 @@ import path from "node:path";
 import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, parallelAt } from "../config.mjs";
 import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
-import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
+import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
 import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
+import { retryTask } from "../retry.mjs";
+import { reviveParked } from "../park.mjs";
+import { taskAttention } from "../escalate.mjs";
+import { inboxWake } from "../inbox.mjs";
 import { StartRefused, startTask } from "./start.mjs";
 
 const CLI = `node ${CLI_PATH}`;
@@ -103,21 +107,20 @@ export function cmdPlan(args) {
 }
 
 // Where a write task's worktree starts. A task without prerequisites starts from the run's base
-// commit; one with prerequisites from the base branch's head, which holds their integrated work.
+// commit; one with prerequisites from a recorded integration branch containing all their work.
 function startPoint(run, entry) {
   if (!(entry.dependsOn || []).length) return { sha: run.baseCommit, label: `the run's base commit ${short(run.baseCommit)}` };
-  if (!run.baseBranch) {
-    throw new StartRefused(`${entry.id} depends on other tasks, but the run started on a detached HEAD, so no base branch holds their work; create its worktree with: ${CLI} worktree ${run.id} ${entry.id} --from <ref>`);
-  }
-  const head = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${run.baseBranch}`], { allowFail: true });
-  if (!head) throw new StartRefused(`the run's base branch ${run.baseBranch} no longer exists in ${run.repo}`);
-  for (const dep of entry.dependsOn) {
-    const done = loadTask(run, dep)?.integratedCommit;
-    if (done && !isAncestor(run.repo, done, head)) {
-      throw new StartRefused(`${dep} was integrated at ${short(done)}, which is not on ${run.baseBranch}; merge it there, or create ${entry.id}'s worktree with: ${CLI} worktree ${run.id} ${entry.id} --from <ref>`);
+  const dependencies = entry.dependsOn.map((id) => loadTask(run, id));
+  const targets = [...new Set(dependencies.map((task) => task?.integratedInto).filter(Boolean))];
+  // Several targets are allowed only when one contains all prerequisite commits.
+  const branches = [...new Set([...targets, run.baseBranch].filter(Boolean))];
+  for (const branch of branches) {
+    const head = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { allowFail: true });
+    if (head && dependencies.every((task) => !task?.integratedCommit || isAncestor(run.repo, task.integratedCommit, head))) {
+      return { sha: head, label: `${branch} @ ${short(head)}` };
     }
   }
-  return { sha: head, label: `${run.baseBranch} @ ${short(head)}` };
+  throw new StartRefused(`${entry.id} needs its prerequisites' integrated commits on one branch; none of ${branches.join(", ") || "the recorded branches"} contains them all; merge their integration branches together, then dispatch again`);
 }
 
 // The prerequisites whose integrated commit the checkout at `cd` does not contain.
@@ -189,18 +192,20 @@ function briefRefusal(run, entry) {
   return why && `${why}; write it (${CLI} brief ${run.id} ${entry.id} drafts it from the plan), then dispatch again`;
 }
 
-export function cmdDispatch(args) {
+function dispatchWave(args) {
   const run = loadRun(args._[0]);
   const dryRun = Boolean(args["dry-run"]);
   // A dry run changes nothing, so anyone may look.
   if (!dryRun) guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
   const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
-  if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
   const rows = listTasks(run);
   const progress = planProgress(plan, phaseMap(run, rows, plan));
   const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
   const limit = parallelAt(DEPTH);
-  const slots = Math.max(0, Math.min(limit - running, args.max === undefined ? Infinity : Number(args.max)));
+  const planned = new Set(plan.tasks.map((task) => task.id));
+  const plannedRunning = rows.filter((r) => r.state === "running" && r.phase !== "parked" && planned.has(r.id)).length;
+  const maxSlots = args.max === undefined ? Infinity : Number(args.max) - (args.follow ? plannedRunning : 0);
+  const slots = Math.max(0, Math.min(limit - running, maxSlots));
   if (progress.ready.length && slots && !dryRun && DEPTH >= MAX_NEST_DEPTH) {
     die(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
   }
@@ -210,6 +215,15 @@ export function cmdDispatch(args) {
   const started = [];
   const failed = [];
   const waiting = [];
+  const conflicts = [];
+  const reserved = rows.filter((r) => r.state === "running" && r.phase !== "parked").map((r) => {
+    const task = loadTask(run, r.id);
+    const current = plan.tasks.find((t) => t.id === r.id);
+    const original = task?.plan || current || { id: r.id, owns: task?.readOnly ? [] : ["."] };
+    return { ...original, agent: task?.agent || original.agent, readOnly: Boolean(task?.readOnly || task?.agent === "command"), babysit: Boolean(task?.babysit),
+      owns: [...new Set([...(original.owns || []), ...(current?.owns || [])])],
+      resources: [...new Set([...(original.resources || []), ...(current?.resources || [])])] };
+  });
   const lines = [];
   for (const entry of progress.ready) {
     try {
@@ -222,9 +236,16 @@ export function cmdDispatch(args) {
         waiting.push(entry.id);
         continue;
       }
+      const overlap = runningConflicts(entry, reserved.filter((t) => t.id !== entry.id));
+      if (overlap.length) {
+        conflicts.push({ id: entry.id, conflicts: overlap });
+        lines.push(`waiting ${entry.id}: conflicts with running tasks ${overlap.map((c) => c.b).join(", ")}`);
+        continue;
+      }
       const how = prepare(run, entry, dryRun);
       if (dryRun) {
         started.push({ id: entry.id, where: how.where });
+        reserved.push(entry);
         lines.push(`would start ${entry.id} → ${entry.agent}${entry.tier ? ` (${entry.tier} tier)` : ""}, ${how.where}`);
         continue;
       }
@@ -242,6 +263,7 @@ export function cmdDispatch(args) {
         { plan: entry },
       );
       started.push({ id: entry.id, pid: task.pid, cd: task.cd, branch: task.worktree?.branch || null });
+      reserved.push(entry);
       lines.push(text.split("\n").filter((l) => !l.startsWith("next:")).join("\n"));
     } catch (error) {
       if (!(error instanceof StartRefused)) throw error;
@@ -259,22 +281,100 @@ export function cmdDispatch(args) {
   }
   if (!lines.length) lines.push(`nothing to dispatch: all ${plural(plan.tasks.length, "planned task")} have started`);
   if (started.length && !dryRun) lines.push(`next: ${CLI} wait ${run.id}`);
-  emit(
-    args,
-    {
-      run: run.id,
-      dryRun,
-      limit,
-      running,
+  return {
+    data: {
+      run: run.id, dryRun, limit, running,
       [dryRun ? "wouldStart" : "started"]: started,
-      failed,
-      waitingForSlot: waiting,
+      failed, waitingForSlot: waiting, waitingForConflict: conflicts,
       blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
       manual: progress.manual.map((t) => t.id),
     },
-    lines.join("\n"),
-  );
-  if (failed.length) process.exit(1);
+    text: lines.join("\n"),
+  };
+}
+
+export async function cmdDispatch(args) {
+  // Before anything revives a watcher, retries a task or writes state: a bad --max changes nothing.
+  if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
+  const follow = Boolean(args.follow && !args["dry-run"]);
+  const wake = follow ? inboxWake() : null;
+  const started = [];
+  const run = loadRun(args._[0]);
+  const snapshot = () => {
+    let rows = listTasks(run);
+    if (reviveParked(run, rows).length) rows = listTasks(run);
+    return rows.some((r) => r.state === "aborted" && !r.result && r.health === "ok") ? listTasks(run) : rows;
+  };
+  const maintain = () => {
+    let rows = snapshot();
+    let changed = false;
+    const planned = new Set((readPlan(run.dir)?.tasks || []).map((task) => task.id));
+    let running = rows.filter((row) => planned.has(row.id) && row.state === "running" && row.phase !== "parked").length;
+    for (const row of rows) {
+      // A resumed planned task occupies the same slot as a newly dispatched one.
+      if (planned.has(row.id) && args.max !== undefined && running >= Number(args.max)) continue;
+      const retried = retryTask(run, row);
+      if (retried) {
+        (args.json ? process.stderr : process.stdout).write(`${retried}\n`);
+        changed = true;
+        if (planned.has(row.id)) running++;
+      }
+    }
+    return changed ? snapshot() : rows;
+  };
+  const needing = (plan, rows) => {
+    const planned = new Set(plan.tasks.map((task) => task.id));
+    return rows.flatMap((row) => {
+      if (!planned.has(row.id) && loadTask(run, row.id)?.closedAt) return [];
+      if (row.phase === "integrated" || row.phase === "prepared") return [];
+      const phase = ["awaiting-review", "accepted", "needs-decision", "failed"].includes(row.phase) ? row.phase : null;
+      const item = taskAttention(row, false);
+      return phase || item ? [{ id: row.id, attempt: row.attempt, phase: phase || item.kind, reason: item?.reason || phase,
+        next: `${CLI} ${phase === "accepted" ? "integrate" : "result"} ${run.id} ${row.id}` }] : [];
+    });
+  };
+  const attentionKey = (item) => JSON.stringify([item.id, item.attempt, item.phase]);
+  let previous;
+  if (follow) {
+    guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
+    const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
+    previous = new Set(needing(plan, snapshot()).map(attentionKey));
+  }
+  for (;;) {
+    if (follow) {
+      guard(loadRun(run.dir), `dispatch run ${run.id}`, { adopt: args.adopt });
+      maintain();
+    }
+    const wave = dispatchWave(args);
+    if (!follow) {
+      emit(args, wave.data, wave.text);
+      if (wave.data.failed.length) process.exitCode = 1;
+      return;
+    }
+    started.push(...wave.data.started);
+    if (wave.data.started.length && !args.json) process.stdout.write(`${wave.text}\n`);
+    const plan = readPlan(run.dir);
+    const rows = maintain();
+    const phases = phaseMap(run, rows, plan);
+    const complete = plan.tasks.every((t) => phases.get(t.id) === "integrated");
+    const attention = needing(plan, rows);
+    const newAttention = attention.some((item) => !previous.has(attentionKey(item)));
+    previous = new Set(attention.map(attentionKey));
+    const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id);
+    const active = rows.some((row) => row.state === "running" && row.phase !== "parked");
+    if (complete || newAttention || message || wave.data.failed.length || !active) {
+      const reason = complete ? "complete" : message ? "message" : attention.length ? "attention" : wave.data.failed.length ? "failed" : "blocked";
+      const text = [wave.data.started.length ? null : wave.text,
+        complete ? "plan complete: every task is integrated" : `dispatch stopped: ${reason}`,
+        ...attention.map((a) => `${a.id}: ${a.phase}; next: ${a.next}`),
+        message ? `new message: ${message.text || message.id}; read your inbox` : null,
+      ].filter(Boolean).join("\n");
+      emit(args, { ...wave.data, started, follow: true, reason, complete, attention, ...(message ? { message } : {}) }, text);
+      if (wave.data.failed.length || attention.some((a) => a.phase === "failed")) process.exitCode = 1;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 export function cmdResolve(args) {
@@ -389,12 +489,17 @@ export function cmdIntegrate(args) {
     return;
   }
   if (row.phase !== "accepted") die(`task ${id} is ${row.phase}, not accepted: review its result, commit its work on its branch, then run: ${CLI} accept ${run.id} ${id}`);
+  const plan = readPlan(run.dir);
+  const entry = plan?.tasks.find((t) => t.id === id) || task.plan;
+  const phases = phaseMap(run, listTasks(run), plan);
+  const waiting = (entry?.dependsOn || []).filter((dep) => phases.get(dep) !== "integrated");
+  if (waiting.length) die(`cannot integrate ${id}: waits on ${waiting.join(", ")} (not integrated)`);
   if (!run.isGit) die("the run's repository is not a git repository");
   const target = args.into || run.baseBranch || die("the run started on a detached HEAD, so it has no base branch; pass --into BRANCH", 2);
   const targetHead = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
   const record = (commit, text) => {
     if (!dryRun) {
-      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedBy: g.actor });
+      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedInto: target, integratedBy: g.actor });
       recordChange(run, g, { task: id, attempt: task.attempt || null, action: "integrated" });
       reclaimTask(run, task);
     }
@@ -419,6 +524,10 @@ export function cmdIntegrate(args) {
   const tip = git(run.repo, ["rev-parse", `refs/heads/${branch}`]);
   if (task.acceptedCommit && tip !== task.acceptedCommit) {
     die(`${branch} is at ${short(tip)}, but ${id} was accepted at ${short(task.acceptedCommit)}: review the newer commits, then run: ${CLI} accept ${run.id} ${id}`);
+  }
+  if (args["already-merged"]) {
+    if (!isAncestor(run.repo, tip, targetHead)) die(`${target} does not contain ${branch}; --already-merged records only commits already reachable from the target`);
+    return record(targetHead, `${target} already contains ${branch}; ${dryRun ? "would record" : "recorded"} ${id} as integrated at ${short(targetHead)}`);
   }
   // The merge happens in the user's checkout, so it must be on the target and hold no uncommitted
   // work. Never switch, stash, or reset it on the user's behalf.
@@ -674,7 +783,11 @@ function recoverRun(run, rows, own) {
   const integrated = phase("integrated");
   const closedFailed = phase("failed").filter(closed);
 
-  const warnings = [];
+  const manualMerges = rows.flatMap((r) => {
+    const merged = manualMerge(run, records.get(r.id));
+    return merged ? [{ id: r.id, ...merged }] : [];
+  });
+  const warnings = manualMerges.map((m) => `${m.id}: branch ${m.branch} was merged into ${m.into} without integrate; review and accept it, then record it with: ${CLI} integrate ${run.id} ${m.id} --already-merged`);
   for (const r of rows) {
     const wt = records.get(r.id)?.worktree?.path;
     if (r.state === "running" || !wt || !fs.existsSync(wt)) continue;
@@ -720,6 +833,7 @@ function recoverRun(run, rows, own) {
         closedFailed: ids(closedFailed),
       },
       warnings,
+      manualMerges,
     },
   };
 }

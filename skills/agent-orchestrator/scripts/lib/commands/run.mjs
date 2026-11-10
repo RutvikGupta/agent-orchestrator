@@ -57,7 +57,11 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   if (!run.isGit) die("the run's repo is not a git repository");
   const existing = loadTask(run, id);
   if (existing?.worktree) die(`task ${id} already has a worktree at ${existing.worktree.path}`);
-  from = from || run.baseCommit;
+  // Record the commit the branch starts at, never a branch name: `--from main` moves when main does,
+  // and a moving start would make later work merged by hand look as if it predated the worktree.
+  const start = from || run.baseCommit;
+  from = git(run.repo, ["rev-parse", "--verify", `${start}^{commit}`], { allowFail: true });
+  if (!from) die(`--from is not a commit in ${run.repo}: ${start}`);
   branch = branch || `orch/${run.id}/${id}`;
   const wt = path.resolve(worktreePath || path.join(run.dir, "worktrees", id));
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);

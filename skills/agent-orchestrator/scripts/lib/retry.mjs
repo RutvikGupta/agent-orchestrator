@@ -5,6 +5,10 @@ import { summarizeEvents } from "./events.mjs";
 import { loadTask, taskDir } from "./runs.mjs";
 import { startTask, StartRefused } from "./commands/start.mjs";
 
+// How long an uncounted retry claim may stand before another caller takes it over. A live claim
+// lasts only until its caller saves the new attempt, well under this.
+const CLAIM_GRACE_MS = 60_000;
+
 export function retryLimit(value = process.env.AGENT_ORCH_MAX_RETRIES) {
   return /^\d+$/.test(value ?? "") && Number.isSafeInteger(Number(value)) ? Number(value) : 1;
 }
@@ -12,14 +16,37 @@ export function retryLimit(value = process.env.AGENT_ORCH_MAX_RETRIES) {
 export function retryTask(run, row, limit = retryLimit()) {
   if (row.health !== "transient-error" || row.limitHit || row.closed || !row.session || ["running", "prepared"].includes(row.state)) return null;
   const task = loadTask(run, row.id);
-  if (!task || task.closedAt || (task.retries || 0) >= limit) return null;
+  if (!task || task.closedAt || task.attempt !== row.attempt || (task.retries || 0) >= limit) return null;
   const eventError = task.outDir ? summarizeEvents(task.agent, path.join(task.outDir, "events.jsonl"), task.cd).error : null;
   const error = [row.result?.error, row.result?.stderrTail, eventError, row.result?.finalMessage]
     .find((value) => value && (typeof value !== "string" || value.trim())) || "Transient provider or network error";
   const errorLine = (typeof error === "string" ? error : JSON.stringify(error)).split(/\r?\n/)[0];
   const retries = (task.retries || 0) + 1;
   const brief = path.join(taskDir(run, row.id), `retry-${retries}.md`);
-  fs.writeFileSync(brief, `Your previous turn ended with a transient provider or network error: ${errorLine}. Continue the task from where you left off; do not redo work that is already done. End with the same final report.\n`);
+  // The brief is also the claim: concurrent wait and dispatch callers cannot launch the same retry.
+  // A claim whose retry was never counted and that is older than the grace was abandoned (its
+  // caller was killed, or an older version left it behind): it is taken over, so the task does not
+  // lose its automatic retries for good.
+  const text = `Your previous turn ended with a transient provider or network error: ${errorLine}. Continue the task from where you left off; do not redo work that is already done. End with the same final report.\n`;
+  const claim = () => fs.writeFileSync(brief, text, { flag: "wx" });
+  try {
+    claim();
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    let age = 0;
+    try {
+      age = Date.now() - fs.statSync(brief).mtimeMs;
+    } catch {
+      return null; // released since: the next poll claims it
+    }
+    if (age < CLAIM_GRACE_MS) return null;
+    try {
+      fs.rmSync(brief, { force: true });
+      claim();
+    } catch {
+      return null; // another caller took it over first
+    }
+  }
   try {
     startTask({
       _: [run.dir, row.id], agent: row.agent, tier: row.tier, why: row.why, brief,
@@ -31,7 +58,9 @@ export function retryTask(run, row, limit = retryLimit()) {
       retryLog: [...(task.retryLog || []), { time: new Date().toISOString(), attempt: (task.attempt || 0) + 1, error: errorLine }],
     });
   } catch (error) {
-    // Keep the normal resume hint if safety checks (for example parallel writers) refuse it.
+    // No attempt started, so release the claim whatever went wrong. A refusal by a safety check
+    // (for example a parallel writer) keeps the normal resume hint; anything else is reported.
+    fs.rmSync(brief, { force: true });
     if (error instanceof StartRefused) return null;
     throw error;
   }

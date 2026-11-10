@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { NOTES_FILE, markNotesRead, noteMainWait, noteText, reviewRemindMs, unreadNotes } from "../addressee.mjs";
 import { callerTask } from "../finish-notice.mjs";
-import { agoText } from "../format.mjs";
+import { agoText, shortText, table } from "../format.mjs";
 import { INBOX_FILE, QUESTIONS_FILE, inboxWake } from "../inbox.mjs";
-import { acceptedNow, lifecycleHints } from "../lifecycle.mjs";
+import { acceptedNow, lifecycleHints, phaseMap } from "../lifecycle.mjs";
+import { manualMerge, planProgress, readPlan, waitsOnText } from "../plan.mjs";
 import { reviveParked } from "../park.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
@@ -18,13 +19,101 @@ import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
 
+const short = (sha) => String(sha || "").slice(0, 12);
+
+// Every task of the run's plan, in plan order, started or not, for `status`. `status` is `waiting`
+// (not started, and a prerequisite is not integrated yet: `waitsOn` names each one and its phase),
+// `ready` (not started, every prerequisite integrated; `briefProblem` says when its brief is not
+// ready, `manual` when it is a babysitter that `dispatch` leaves to be started by hand), or the
+// phase of a started task: running, needs-decision, awaiting-review, accepted, integrated, failed.
+// An integrated task also carries `integratedCommit` and `integratedInto` (null when none was recorded).
+function plannedTasksOf(run, plan, rows) {
+  const phases = phaseMap(run, rows, plan);
+  const progress = planProgress(plan, phases, run.dir);
+  const waiting = new Map(progress.blocked.map((b) => [b.task.id, b.waitsOn]));
+  const unbriefed = new Map(progress.unbriefed.map((u) => [u.task.id, u.problem]));
+  const manual = new Set(progress.manual.map((t) => t.id));
+  return plan.tasks.map((t) => {
+    const base = { id: t.id, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
+    if (waiting.has(t.id)) return { ...base, status: "waiting", waitsOn: waiting.get(t.id) };
+    if (unbriefed.has(t.id)) return { ...base, status: "ready", briefProblem: unbriefed.get(t.id) };
+    if (manual.has(t.id)) return { ...base, status: "ready", manual: true };
+    const phase = phases.get(t.id);
+    if (phase !== "integrated") return { ...base, status: phase && phase !== "prepared" ? phase : "ready" };
+    // The receipt `integrate` recorded; a read-only task is integrated by collecting its result, and has none.
+    const record = loadTask(run, t.id);
+    return { ...base, status: "integrated", integratedCommit: record?.integratedCommit ?? null, integratedInto: record?.integratedInto ?? null };
+  });
+}
+
+const STATUS_ORDER = ["waiting", "ready", "running", "needs-decision", "awaiting-review", "accepted", "integrated", "failed"];
+
+function planLines(plan, planned, unplanned) {
+  if (!plan) return [];
+  const counts = new Map();
+  for (const t of planned) counts.set(t.status, (counts.get(t.status) || 0) + 1);
+  const order = [...STATUS_ORDER, ...[...counts.keys()].filter((s) => !STATUS_ORDER.includes(s))].filter((s) => counts.has(s));
+  const note = (t) => (t.waitsOn
+    ? `waits on ${waitsOnText(t.waitsOn)}`
+    : t.briefProblem ? `brief ${t.briefProblem}`
+      : t.manual ? "start by hand: it babysits a pull request"
+        : t.integratedCommit ? `at ${short(t.integratedCommit)}${t.integratedInto ? ` in ${t.integratedInto}` : ""}`
+          : "");
+  return [
+    `plan: ${shortText(plan.goal, 100)} (${planned.length} task${planned.length === 1 ? "" : "s"}: ${order.map((s) => `${counts.get(s)} ${s}`).join(", ")})`,
+    table(planned.map((t) => ({ id: t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
+    ...(unplanned.length ? [`recorded outside the plan: ${unplanned.join(", ")}`] : []),
+  ];
+}
+
+// Tasks whose branch is already in the branch they would merge into (someone merged it by hand, or
+// from another checkout), though the run does not record them as integrated. manualMerge leaves out
+// read-only tasks, integrated ones and branches with no commits of their own, so any phase may show.
+// Reading a repository must never make `status` fail: a task whose check errors is left out.
+function manualMergesOf(run, rows) {
+  const found = [];
+  for (const row of rows) {
+    try {
+      const task = loadTask(run, row.id);
+      const merged = task && manualMerge(run, task);
+      if (merged) found.push({ id: row.id, phase: row.phase, ...merged });
+    } catch {}
+  }
+  return found;
+}
+
+// `integrate --already-merged` takes an accepted task only, so the line names what is left to do.
+function manualMergeLines(run, merges) {
+  const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
+  const record = (id) => cmd(`integrate ${run.id} ${id} --already-merged`);
+  return merges.flatMap((m) => [
+    `warning: ${m.id}'s branch ${m.branch} (${short(m.commit)}) is already in ${m.into}, but ${m.id} is not recorded as integrated (${m.phase}).`,
+    m.phase === "accepted"
+      ? `  record it: ${record(m.id)}`
+      : m.phase === "awaiting-review"
+        ? `  review it and accept it (${cmd(`accept ${run.id} ${m.id}`)}), then record it: ${record(m.id)}`
+        : `  once it is finished, reviewed and accepted, record it: ${record(m.id)}`,
+  ]);
+}
+
 export function cmdStatus(args) {
   const run = loadRun(args._[0]);
   const tasks = listTasks(run);
   const own = ownershipOf(run);
   const notices = unseenNotices(run);
   const ownership = { owner: launcherLabel(own.direct), mine: own.mine, readOnly: !mayAct(own), orphaned: own.orphaned };
-  emit(args, { run: run.id, dir: run.dir, tasks, ownership, ...(notices.length ? { changedByOthers: notices.map((n) => ({ ...n, text: noticeText(n) })) } : {}) }, statusText(run, tasks, notices));
+  // `plannedTasks` lists the whole plan, including tasks that never started; `unplannedTasks` the
+  // recorded tasks that no plan entry names; `manualMerges` the tasks whose branch was merged by hand.
+  // Each is an empty list when nothing applies. `tasks` is unchanged.
+  const plan = readPlan(run.dir);
+  const plannedTasks = plan ? plannedTasksOf(run, plan, tasks) : [];
+  const unplannedTasks = plan ? tasks.filter((t) => !plan.tasks.some((p) => p.id === t.id)).map((t) => t.id) : [];
+  const manualMerges = manualMergesOf(run, tasks);
+  emit(
+    args,
+    { run: run.id, dir: run.dir, tasks, plannedTasks, unplannedTasks, manualMerges, ownership, ...(notices.length ? { changedByOthers: notices.map((n) => ({ ...n, text: noticeText(n) })) } : {}) },
+    [statusText(run, tasks, notices), ...planLines(plan, plannedTasks, unplannedTasks), ...manualMergeLines(run, manualMerges)].join("\n"),
+  );
 }
 
 // Replace the waiting Node process with a small shell, then resume the same command and PID.
