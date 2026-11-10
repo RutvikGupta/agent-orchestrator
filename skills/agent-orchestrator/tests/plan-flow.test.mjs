@@ -242,3 +242,16 @@ test('a prior integration receipt does not hide later commits merged by hand', a
   assert.equal((await f.json(['recover', run.id])).runs[0].manualMerges[0].commit, tip);
   assert.equal((await f.json(['status', run.id])).manualMerges[0].commit, tip);
 });
+
+test('review starts its reviewer in a run with a plan, though the reviewer is not a plan entry', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await plan(f, run, [entry(f, 'writer')]);
+  await f.command(['dispatch', run.id]);
+  await f.finished(run, 'writer');
+  await commit(f, readJson(f.taskFile(run, 'writer')).cd);
+  const started = await f.json(['review', run.id, 'writer']);
+  assert.equal(started.started.id, 'review-writer');
+  await f.finished(run, 'review-writer');
+  assert.equal(readJson(f.taskFile(run, 'review-writer')).unplanned, true);
+});

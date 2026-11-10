@@ -81,7 +81,8 @@ export function cmdReview(args) {
     started = startTask(
       {
         // The reviewer works where the author worked, or in the run's repository once that is gone.
-        _: [run.dir, name], agent, tier, why, brief: file, cd: change.dir || run.repo, "read-only": true,
+        // A reviewer is never a plan entry: it reads one task's work and reserves nothing.
+        _: [run.dir, name], agent, tier, why, brief: file, cd: change.dir || run.repo, "read-only": true, unplanned: true,
         title: `review of ${id}${round > 1 ? ` (round ${round})` : ""}`, passthrough: [],
       },
       { reviews: { task: id, attempt: row.attempt, round } },
