@@ -255,3 +255,16 @@ test('review starts its reviewer in a run with a plan, though the reviewer is no
   await f.finished(run, 'review-writer');
   assert.equal(readJson(f.taskFile(run, 'review-writer')).unplanned, true);
 });
+
+test('dispatch --follow --timeout stops with exit 3 while its task still runs, and --timeout needs --follow', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await plan(f, run, [entry(f, 'slow', {}, { hold: true })]);
+  const out = await f.command(['dispatch', run.id, '--follow', '--timeout', '2s', '--json'], { code: 3 });
+  const data = JSON.parse(out.stdout);
+  assert.deepEqual([data.reason, data.complete, data.started.map((s) => s.id ?? s)], ['timeout', false, ['slow']]);
+  assert.equal((await f.json(['status', run.id])).tasks.find((r) => r.id === 'slow').state, 'running', 'the task goes on');
+  assert.match((await f.command(['dispatch', run.id, '--timeout', '2s'], { code: 2 })).stderr, /--timeout applies to dispatch --follow only/);
+  f.release({ outDir: readJson(f.taskFile(run, 'slow')).outDir });
+  await f.finished(run, 'slow');
+});

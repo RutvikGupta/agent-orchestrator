@@ -6,7 +6,7 @@ Read this before your first `dispatch` or `start` in a session. Per-agent modes 
 ## `dispatch`
 
 ```bash
-$ORCH dispatch <run> [--max N] [--dry-run] [--follow]
+$ORCH dispatch <run> [--max N] [--dry-run] [--follow [--timeout DUR]]
 ```
 
 - It starts, in plan order, every planned task whose `dependsOn` tasks are all integrated (a
@@ -32,10 +32,10 @@ $ORCH dispatch <run> [--max N] [--dry-run] [--follow]
 ### `dispatch --follow`
 
 `--follow` stays after the first start. It waits for the running planned tasks and starts each
-next task as its prerequisites are integrated. It has no timeout and blocks, so in Claude Code run
-it in the background as you run `wait` (`SKILL.md`, "Setup"). The `Stop` hook still wants a live
-`wait` on the run. A Codex orchestrator, whose shell calls time out, runs plain `dispatch` and waits
-with `wait --timeout 9m` instead.
+next task as its prerequisites are integrated. It blocks, so in Claude Code run it in the
+background as you run `wait` (`SKILL.md`, "Setup"). The `Stop` hook still wants a live `wait` on
+the run. A Codex orchestrator, whose shell calls time out, runs `dispatch --follow --timeout 9m`
+and repeats the call while it exits 3, as it does with `wait`.
 
 - It returns when one of these happens:
   - the plan is complete: every planned task is integrated;
@@ -44,6 +44,8 @@ with `wait --timeout 9m` instead.
     (`references/monitor.md`, "What wakes `wait`");
   - a planned task could not be started (brief, tier or start point), which exits 1;
   - nothing runs and nothing it can start is left;
+  - `--timeout DUR` passed, which exits 3 with tasks still running: run it again to keep following
+    (`0` or no `--timeout` stays);
   - in a delegated agent, a finish notice about one of the run's tasks reaches its inbox.
 - It prints each task that needs you with the command to run next. A failure exits 1.
 - Problems that were there when it began are listed, but do not stop it while work runs.

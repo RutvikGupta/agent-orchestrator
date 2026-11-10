@@ -14,7 +14,7 @@ import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from
 import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
 import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
-import { die, emit, git, writeJson } from "../util.mjs";
+import { die, emit, git, parseDuration, writeJson } from "../util.mjs";
 import { retryTask } from "../retry.mjs";
 import { reviveParked } from "../park.mjs";
 import { taskAttention } from "../escalate.mjs";
@@ -298,6 +298,11 @@ export async function cmdDispatch(args) {
   // Before anything revives a watcher, retries a task or writes state: a bad --max changes nothing.
   if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
   const follow = Boolean(args.follow && !args["dry-run"]);
+  // With --follow, --timeout bounds the stay, as for `wait`: 0 or none stays until something needs
+  // the orchestrator; past it, the command exits 3 and is safe to run again.
+  if (args.timeout !== undefined && !args.follow) die("--timeout applies to dispatch --follow only", 2);
+  const limit = parseDuration(args.timeout) || 0;
+  const until = follow && limit ? Date.now() + limit : null;
   const wake = follow ? inboxWake() : null;
   const started = [];
   const run = loadRun(args._[0]);
@@ -372,6 +377,13 @@ export async function cmdDispatch(args) {
       ].filter(Boolean).join("\n");
       emit(args, { ...wave.data, started, follow: true, reason, complete, attention, ...(message ? { message } : {}) }, text);
       if (wave.data.failed.length || attention.some((a) => a.phase === "failed")) process.exitCode = 1;
+      return;
+    }
+    if (until && Date.now() >= until) {
+      const text = [wave.data.started.length ? null : wave.text, `dispatch timed out: tasks are still running; run it again to keep following`,
+        ...attention.map((a) => `${a.id}: ${a.phase}; next: ${a.next}`)].filter(Boolean).join("\n");
+      emit(args, { ...wave.data, started, follow: true, reason: "timeout", complete: false, attention }, text);
+      process.exitCode = 3;
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));

@@ -165,7 +165,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   shared by tasks that can run at once) and record it as plan.json.
                                   --check only validates. A new plan replaces the old one; started
                                   tasks keep their records, and a running task cannot be dropped
-  dispatch RUN [--max N] [--dry-run] [--follow]
+  dispatch RUN [--max N] [--dry-run] [--follow [--timeout DUR]]
                                   Start, in plan order and up to the free slots (and N), every
                                   planned task whose prerequisites are integrated: a write task in a
                                   new worktree (from the base commit, or, once it has prerequisites,
@@ -177,6 +177,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   tasks and starts each next wave as its prerequisites land, until
                                   the whole plan is complete or a new task problem needs you (ready for review,
                                   to accept or integrate, a decision handed back, or a failure).
+                                  --timeout DUR (with --follow) stops the stay after DUR with exit 3,
+                                  as wait does; run it again to keep following. 0 or none stays.
                                   Existing problems are listed without interrupting running work;
                                   transient failures retry and parked watchers revive as in wait.
                                   With --follow, --max N caps planned tasks running at once.
@@ -366,7 +368,7 @@ const specs = {
   tell: { value: ["file"] },
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check", "adopt"] },
-  dispatch: { value: ["max"], bool: ["dry-run", "follow", "adopt"] },
+  dispatch: { value: ["max", "timeout"], bool: ["dry-run", "follow", "adopt"] },
   accept: { value: ["commit", "note", "unverified"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
