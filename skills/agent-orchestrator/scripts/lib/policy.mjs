@@ -1,10 +1,10 @@
 // Model policy (policy.json): each agent's tiers, lightest first, and the model and effort each
 // tier runs. The orchestrating agent picks a task's tier from its own assessment of the task
-// (SKILL.md, "Choose the agent and model"); no rule picks it. Every new task, Claude or Codex,
+// (SKILL.md, "Choose the agent and model"). Every new task, Claude or Codex,
 // names its tier with --tier, so that the choice is explicit and leans to the lightest tier that
 // does the task as well as the top one. Two things run `complex` without it: every pull-request
 // babysitter, and a Claude task recorded before Claude had tiers when it gets a follow-up attempt.
-// A follow-up attempt keeps its earlier tier unless --tier names another.
+// start escalates repeated follow-up failures unless --tier or --no-escalate overrides it.
 
 import { POLICY_PATH } from "./config.mjs";
 import { die, readJson } from "./util.mjs";
@@ -181,4 +181,15 @@ export function strongerThan(wanted, own) {
 export function tierText(key, name) {
   const tier = tierOf(loadPolicy()[key]?.tiers || {}, name);
   return `${key} ${name}${tier ? ` (${tier.model})` : ""}`;
+}
+
+// The other agent's tier with the same rank; when ranks differ, the closest lower tier.
+export function peerTier(key, name) {
+  const policy = loadPolicy();
+  const agent = key === "claude" ? "codex" : "claude";
+  const rank = rankOf(policy, key, name);
+  const tiers = Object.keys(policy[agent].tiers);
+  const tier = tiers.find((t) => rankOf(policy, agent, t) === rank)
+    || tiers.filter((t) => rankOf(policy, agent, t) <= rank).at(-1) || tiers[0];
+  return { agent, tier, equalRank: rankOf(policy, agent, tier) === rank };
 }

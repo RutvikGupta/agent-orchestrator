@@ -9,11 +9,12 @@ import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
 import { claimParked, keptEnd, reviveParked } from "../park.mjs";
-import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
+import { reviewRoundsOf } from "../lifecycle.mjs";
+import { escalationFor, failureHistory } from "../escalation.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, strongerThan, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
@@ -27,30 +28,6 @@ export class StartRefused extends Error {
 
 function refuse(message, code) {
   throw new StartRefused(message, code);
-}
-
-// Whether a task's latest attempt failed its review or its gates: its last review round says
-// `changes` or `reject`, the coordinator's last `verify` run of a gate failed, or the agent
-// reported a failing check.
-function attemptFailed(run, task) {
-  const n = task.attempt;
-  const rounds = reviewRoundsOf(run, task.id).filter((r) => r.attempt === n);
-  if (["changes", "reject"].includes(rounds.at(-1)?.verdict)) return true;
-  const lastRun = new Map();
-  for (const v of verificationsOf(run, task.id)) if (v.attempt === n) lastRun.set(v.cmd, v);
-  if ([...lastRun.values()].some((v) => v.passed === false)) return true;
-  return Boolean(describe(run, task).report?.checks?.some((check) => check?.result === "fail"));
-}
-
-// A lighter-tier result that failed is redone one tier up, never at the same tier (SKILL.md,
-// "Choose the agent and model"). A hint naming the next tier, when this start does not go above
-// the failed attempt's tier; otherwise null.
-function escalationNote(run, prev, key, prevTier, tier) {
-  if (!prevTier) return null;
-  const order = tierOrder(key);
-  const at = order.indexOf(prevTier);
-  if (at < 0 || at === order.length - 1 || order.indexOf(tier) > at || !attemptFailed(run, prev)) return null;
-  return `attempt ${prev.attempt} at the ${prevTier} tier failed its review or gates; redo it one tier up, with --tier ${order[at + 1]} and a new --why`;
 }
 
 // `start` from the command line, where only the run's owner may start or resume its tasks; the park
@@ -148,13 +125,18 @@ export function startTask(args, extra = {}) {
   const sameAgent = Boolean(prev.attempt && prev.agent === key);
   const babysit = Boolean(args.babysit || (sameAgent && prev.babysit));
   // A new task needs --tier (modelFor refuses it without). A Claude follow-up keeps the earlier
-  // attempt's tier unless --tier is given; Claude tasks recorded before Claude had tiers ran
+  // attempt's tier until repeated failures escalate it; Claude tasks recorded before tiers ran
   // `complex`. A babysitter always runs `complex`, and --babysit implies it.
   const prevTier = sameAgent ? prev.tier || (key === "claude" ? CLAUDE_DEFAULT_TIER : null) : null;
-  const tierArgs = babysit && key === "claude" ? { ...args, tier: args.tier || CLAUDE_DEFAULT_TIER } : args;
+  const automatic = !babysit && sameAgent && !args.tier && !args["no-escalate"]
+    ? escalationFor(run, prev, describe(run, prev).state) : null;
+  if (automatic?.refusal) refuse(automatic.refusal, 2);
+  const escalation = automatic?.note || null;
+  const effectiveArgs = automatic?.tier ? { ...args, tier: automatic.tier } : args;
+  const tierArgs = babysit && key === "claude" ? { ...args, tier: args.tier || CLAUDE_DEFAULT_TIER } : effectiveArgs;
   let choice;
   try {
-    choice = modelFor(key, tierArgs, babysit ? null : prevTier);
+    choice = modelFor(key, !tierArgs.tier && prevTier ? { ...tierArgs, tier: prevTier } : tierArgs, babysit ? null : prevTier);
   } catch (error) {
     // A refused start, not an exit: `dispatch` goes on with its other tasks.
     if (error instanceof ModelRefused) refuse(error.message, error.code);
@@ -193,7 +175,7 @@ export function startTask(args, extra = {}) {
   const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish });
   const why =
     String(args.why ?? "").replace(/\s+/g, " ").trim() ||
-    (keepsChoice ? prev.why : null) ||
+    (automatic?.tier ? `${prev.why || "Follow-up"}; ${escalation}` : keepsChoice ? prev.why : null) ||
     refuse(`--why is required: one line on why your assessment of this task picked ${key}${tier ? ` at the ${tier} tier` : ""} (see SKILL.md, "Choose the agent and model")`, 2);
   const sharesRepo = !prev.worktree && path.resolve(cd) === path.resolve(run.repo);
 
@@ -211,8 +193,6 @@ export function startTask(args, extra = {}) {
   const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
   const attemptReason = extra.attemptReason
     || (!prev.attempt ? "first" : lastRound?.verdict === "changes" && lastRound.attempt === prev.attempt ? "rework" : "resume");
-  // An automatic retry continues a turn cut off by a transient error: not a failed result.
-  const escalation = attemptReason === "retry" ? null : escalationNote(run, prev, key, prevTier, tier);
   const outDir = path.join(taskDir(run, id), `attempt-${attempt}`);
   const brief = path.join(outDir, "orch-brief.md");
   // A task that can start agents (it writes, reaches the network, and runs outside the sandbox) is
@@ -239,6 +219,10 @@ export function startTask(args, extra = {}) {
   // A tier without an effort runs at the CLI's default for its model.
   relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
   relayArgs.push(...net.args);
+  if (automatic?.tier && !args.passthrough.some((arg) => arg === "--session" || arg.startsWith("--session=") || arg === "--resume-last")) {
+    const session = describe(run, prev).session;
+    if (session) relayArgs.push("--session", session);
+  }
   relayArgs.push(...args.passthrough);
 
   // The orch task that runs this `start` is the parent this attempt reports to (finish-notice.mjs).
@@ -252,6 +236,9 @@ export function startTask(args, extra = {}) {
     effort,
     why,
     attemptAgents: { ...(prev.attemptAgents || {}), [attempt]: key },
+    attemptTiers: { ...Object.fromEntries(failureHistory(run, prev).attempts.map((a) => [a.n, a.tier])), [attempt]: tier },
+    attemptStops: { ...(prev.attemptStops || {}), ...(prev.stoppedAt ? { [prev.attempt]: prev.stoppedAt } : {}) },
+    automaticEscalations: { ...(prev.automaticEscalations || {}), ...(automatic?.tier ? { [attempt]: { from: prevTier, to: tier } } : {}) },
     attemptReason,
     attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
     title: args.title ?? prev.title ?? null,

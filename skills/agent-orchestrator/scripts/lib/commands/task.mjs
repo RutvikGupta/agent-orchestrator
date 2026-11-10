@@ -100,6 +100,7 @@ export function cmdResult(args) {
   const session = d.session;
   const lines = [
     `task ${id} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
+    `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
     `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,

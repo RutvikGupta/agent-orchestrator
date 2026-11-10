@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { decisionsIn } from "./briefs.mjs";
+import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
 import { attemptReasonOf, lifecycleFields } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
@@ -632,7 +633,9 @@ export function describe(run, task) {
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
   if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };
-  described.attempts = attemptsOf(task, seen, described);
+  const history = failureHistory(run, task, described.state);
+  described.failureCount = history.failureCount;
+  described.attempts = attemptsOf(task, seen, described).map((a) => ({ ...a, tier: history.attempts.find((h) => h.n === a.n)?.tier || null }));
   return described;
 }
 
