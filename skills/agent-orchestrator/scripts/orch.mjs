@@ -38,7 +38,8 @@ Usage: node orch.mjs <command> [args] [--json]
   agents [--refresh]              Installed agent CLIs, their relays, login state, model policy
                                   with each tier's results over the last 30 days (finished tasks,
                                   share accepted first try, median first attempt, input tokens per
-                                  accepted task; "too few tasks" under 5), and how much of each
+                                  accepted task: all the tier's input over the accepted ones;
+                                  "too few tasks" under 5), and how much of each
                                   agent's usage limits is used. --refresh
                                   runs one tiny Claude turn to read Claude's current limits
   new [--repo DIR] [--name S] [--goal TEXT]
@@ -197,7 +198,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Remove the run's worktrees (dirty ones only with --force)
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d),
-                                  with the input tokens of an accepted task
+                                  with input tokens per accepted task (all the group's input over
+                                  its accepted tasks)
   pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
                                   Watch pull requests (number, URL, or branch) with gh until one
                                   needs you: a check failed, all checks finished, a new review or

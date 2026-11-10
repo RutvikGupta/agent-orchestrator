@@ -48,12 +48,13 @@ test('stats groups task outcomes and reports every column using all attempts', a
   const codex = stats.byAgent.find((g) => g.agent === 'codex' && g.modelLabel !== '6-astra high');
   assert.deepEqual(counts(codex), { tasks: 8, attempts: 9, firstAttemptAccepted: 1, accepted: 2, integrated: 1,
     failed: 4, limitHits: 1, transientErrors: 2, tokensIn: 1080, tokensOut: 270,
-    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 180 });
+    // Every input token of the group's tasks, accepted or not, over its two accepted tasks.
+    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 540 });
   assert.equal(codex.firstAttemptAcceptance, 0.5);
   const implement = stats.byType.find((g) => g.type === 'implement');
   assert.deepEqual(counts(implement), { tasks: 3, attempts: 4, firstAttemptAccepted: 1, accepted: 2, integrated: 1,
     failed: 1, limitHits: 1, transientErrors: 1, tokensIn: 480, tokensOut: 120,
-    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 180 });
+    medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 240 });
   assert.deepEqual(stats.byType.map((g) => g.type).sort(), ['babysit', 'implement', 'read-only', 'research', 'write']);
   assert.equal(stats.byType.find((g) => g.type === 'research').failed, 0);
   const claude = stats.byAgent.find((g) => g.agent === 'claude');
