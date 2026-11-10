@@ -240,6 +240,24 @@ test('a refused retry releases its claim so a later wait can start it', async (t
   assert.equal(fs.existsSync(brief), true, 'a successful retry keeps its claim');
 });
 
+test('an abandoned retry claim is taken over once it is old, and a fresh one is left alone', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'retry', { flags: ['--read-only'], config: { status: 'failed', error: 'HTTP 503' } });
+  await f.finished(run, 'retry');
+  // A claim left behind by a caller that never started the retry: the retry was not counted.
+  const brief = path.join(run.dir, 'tasks', 'retry', 'retry-1.md');
+  fs.writeFileSync(brief, 'left behind\n');
+  const fresh = await f.command(['wait', run.id, 'retry', '--timeout', '1s']);
+  assert.doesNotMatch(fresh.stdout, /retried retry/, 'a fresh claim belongs to another caller');
+  assert.equal(readJson(f.taskFile(run, 'retry')).attempt, 1);
+  const old = new Date(Date.now() - 5 * 60_000);
+  fs.utimesSync(brief, old, old);
+  assert.match((await f.command(['wait', run.id, 'retry', '--timeout', '10s'])).stdout, /retried retry/);
+  assert.equal(readJson(f.taskFile(run, 'retry')).attempt, 2);
+  assert.match(fs.readFileSync(brief, 'utf8'), /transient provider or network error/, 'the claim is the new brief');
+});
+
 test('a stale failure snapshot cannot retry a newer completed attempt', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();

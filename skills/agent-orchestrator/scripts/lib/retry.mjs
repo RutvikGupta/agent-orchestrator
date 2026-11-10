@@ -5,6 +5,10 @@ import { summarizeEvents } from "./events.mjs";
 import { loadTask, taskDir } from "./runs.mjs";
 import { startTask, StartRefused } from "./commands/start.mjs";
 
+// How long an uncounted retry claim may stand before another caller takes it over. A live claim
+// lasts only until its caller saves the new attempt, well under this.
+const CLAIM_GRACE_MS = 60_000;
+
 export function retryLimit(value = process.env.AGENT_ORCH_MAX_RETRIES) {
   return /^\d+$/.test(value ?? "") && Number.isSafeInteger(Number(value)) ? Number(value) : 1;
 }
@@ -20,11 +24,28 @@ export function retryTask(run, row, limit = retryLimit()) {
   const retries = (task.retries || 0) + 1;
   const brief = path.join(taskDir(run, row.id), `retry-${retries}.md`);
   // The brief is also the claim: concurrent wait and dispatch callers cannot launch the same retry.
+  // A claim whose retry was never counted and that is older than the grace was abandoned (its
+  // caller was killed, or an older version left it behind): it is taken over, so the task does not
+  // lose its automatic retries for good.
+  const text = `Your previous turn ended with a transient provider or network error: ${errorLine}. Continue the task from where you left off; do not redo work that is already done. End with the same final report.\n`;
+  const claim = () => fs.writeFileSync(brief, text, { flag: "wx" });
   try {
-    fs.writeFileSync(brief, `Your previous turn ended with a transient provider or network error: ${errorLine}. Continue the task from where you left off; do not redo work that is already done. End with the same final report.\n`, { flag: "wx" });
+    claim();
   } catch (error) {
-    if (error.code === "EEXIST") return null;
-    throw error;
+    if (error.code !== "EEXIST") throw error;
+    let age = 0;
+    try {
+      age = Date.now() - fs.statSync(brief).mtimeMs;
+    } catch {
+      return null; // released since: the next poll claims it
+    }
+    if (age < CLAIM_GRACE_MS) return null;
+    try {
+      fs.rmSync(brief, { force: true });
+      claim();
+    } catch {
+      return null; // another caller took it over first
+    }
   }
   try {
     startTask({
@@ -37,11 +58,10 @@ export function retryTask(run, row, limit = retryLimit()) {
       retryLog: [...(task.retryLog || []), { time: new Date().toISOString(), attempt: (task.attempt || 0) + 1, error: errorLine }],
     });
   } catch (error) {
-    // Keep the normal resume hint if safety checks (for example parallel writers) refuse it.
-    if (error instanceof StartRefused) {
-      fs.unlinkSync(brief);
-      return null;
-    }
+    // No attempt started, so release the claim whatever went wrong. A refusal by a safety check
+    // (for example a parallel writer) keeps the normal resume hint; anything else is reported.
+    fs.rmSync(brief, { force: true });
+    if (error instanceof StartRefused) return null;
     throw error;
   }
   return `retried ${row.id} after a transient error (${retries}/${limit})`;
