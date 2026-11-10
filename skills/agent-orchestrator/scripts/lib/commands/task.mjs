@@ -100,6 +100,7 @@ export function cmdResult(args) {
   const session = d.session;
   const lines = [
     `task ${id} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
+    `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
     `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,
@@ -213,6 +214,11 @@ export function closeTask(run, task, extra = {}) {
     task = loadTask(run, task.id) || task; // a resume may have saved its attempt first: stopped below
   }
   if (relayAlive(task.pid, null, task.outDir)) {
+    const latest = loadTask(run, task.id) || task;
+    const stop = latest.attempt === task.attempt
+      ? { stoppedAt: latest.stoppedAt || now, stoppedBy: latest.stoppedBy || extra.closedBy }
+      : { attemptStops: { ...(latest.attemptStops || {}), [task.attempt]: now } };
+    saveTask(run, { ...latest, ...stop });
     try {
       process.kill(-task.pid, "SIGTERM");
     } catch {

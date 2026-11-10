@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, readJson, writeJson } from './helpers.mjs';
+import { failureHistory, failureHint } from '../scripts/lib/escalation.mjs';
 
 const policy = readJson(new URL('../policy.json', import.meta.url));
 const tiersOf = (agent) => Object.entries(policy[agent].tiers);
@@ -137,42 +138,116 @@ test('a babysitter refuses a lighter Claude tier before reading the pull request
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 });
 
-test('a Claude follow-up keeps its tier, and a failed lighter attempt names the next tier', async (t) => {
+test('a same-tier follow-up keeps its choice until two failures, then escalates in the same session', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
-  const first = await f.start(run, 'lookup', { flags: ['--tier', 'light'] });
-  await f.finished(run, 'lookup');
-  // A follow-up without --tier or --why keeps the tier and the earlier reason; nothing failed yet.
-  const kept = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--brief', f.brief('resume'), '--', '--session', 'fixture-claude']);
-  assert.doesNotMatch(kept.stdout, /one tier up/);
-  let task = readJson(f.taskFile(run, 'lookup'));
-  assert.deepEqual([task.attempt, task.tier, task.model, task.why], [2, 'light', policy.claude.tiers.light.model, first.why]);
-  await f.finished(run, 'lookup');
+  for (const agent of ['claude', 'codex']) {
+    const id = `retry-${agent}`;
+    const first = await f.start(run, id, { agent, flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, id);
+    const second = await f.json(['start', run.id, id, '--agent', agent, '--brief', f.brief('second', { status: 'timeout' })]);
+    assert.equal(second.tier, 'light');
+    assert.deepEqual([second.why, second.model], [first.why, first.model]);
+    await f.finished(run, id);
+    const third = await f.command(['start', run.id, id, '--agent', agent, '--brief', f.brief('third')]);
+    assert.match(third.stdout, /automatically escalated .* from light to standard: 2 counted failures at the light tier; continuing the same session/);
+    const task = readJson(f.taskFile(run, id));
+    assert.equal(task.tier, 'standard');
+    const row = await f.finished(run, id);
+    const { argv } = readJson(path.join(task.outDir, 'invocation.json'));
+    assert.equal(argv[argv.indexOf('--session') + 1], `fixture-${agent}`);
+    assert.equal(row.failureCount, 2);
+    assert.deepEqual(row.attempts.map((a) => a.tier), ['standard', 'light', 'light']);
+    const result = await f.json(['result', run.id, id]);
+    assert.equal(result.failureCount, 2);
+    assert.deepEqual(result.attempts.map((a) => a.tier), ['standard', 'light', 'light']);
+    const resultText = await f.command(['result', run.id, id]);
+    assert.match(resultText.stdout, /2 counted failures; attempts: 1 .* light, 2 .* light, 3 .* standard/);
+    const status = await f.command(['status', run.id]);
+    assert.match(status.stdout, /2 counted failures; attempts: 1 .* light, 2 .* light, 3 .* standard/);
+  }
+});
 
-  // A `changes` verdict on a light attempt: starting it at the same tier again prints the next tier.
-  await f.command(['verdict', run.id, 'lookup', 'changes', '--note', 'missed a caller']);
-  const failingCheck = '```orch-result\n{"outcome":"done","changed":[],"checks":[{"cmd":"npm test","result":"fail","note":"1 failure"}],"decisions":[],"unresolved":[]}\n```';
-  const same = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--brief', f.brief('rework', { finalMessage: failingCheck })]);
-  assert.match(same.stdout, /^note: attempt 2 at the light tier failed its review or gates; redo it one tier up, with --tier standard and a new --why$/m);
-  await f.finished(run, 'lookup');
+test('review changes and reject count once per attempt, while usage limits and owner stops do not', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'review', { flags: ['--tier', 'light'] });
+  await f.finished(run, 'review');
+  await f.command(['verdict', run.id, 'review', 'changes', '--note', 'missed a caller']);
+  await f.command(['verdict', run.id, 'review', 'reject', '--note', 'same attempt']);
+  let row = (await f.json(['status', run.id])).tasks[0];
+  assert.equal(row.failureCount, 1);
+  await f.command(['start', run.id, 'review', '--agent', 'claude', '--brief', f.brief('failed', { status: 'failed' })]);
+  await f.finished(run, 'review');
+  const up = await f.json(['start', run.id, 'review', '--agent', 'claude', '--brief', f.brief('up')]);
+  assert.equal(up.tier, 'standard');
+  await f.finished(run, 'review');
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'limit', { flags: ['--tier', 'light'], config: { status: 'failed', error: 'usage limit reached' } });
+    row = await f.finished(run, 'limit');
+    assert.equal(row.failureCount, 0);
+  }
+  const kept = await f.json(['start', run.id, 'limit', '--agent', 'claude', '--brief', f.brief('limit-again')]);
+  assert.equal(kept.tier, 'light');
+  await f.finished(run, 'limit');
+  const held = await f.start(run, 'stopped', { flags: ['--tier', 'light'], config: { hold: true } });
+  await f.ready(held);
+  await f.command(['stop', run.id, 'stopped']);
+  // Historical owner stop remains excluded even if its relay recorded an aborted result.
+  writeJson(path.join(held.outDir, 'result.json'), { status: 'aborted', model: held.model });
+  await f.command(['start', run.id, 'stopped', '--agent', 'claude', '--brief', f.brief('after-stop')]);
+  row = await f.finished(run, 'stopped');
+  assert.equal(row.failureCount, 0);
+});
 
-  // Attempt 3 reported a failing check. Moving up a tier needs a new --why, and then gives no hint.
-  const refused = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--tier', 'standard', '--brief', f.brief('up')], { code: 2 });
-  assert.match(refused.stderr, /--why is required: .* picked claude at the standard tier/);
-  const up = await f.command(['start', run.id, 'lookup', '--agent', 'claude', '--tier', 'standard',
-    '--why', 'standard: the light attempt missed a caller', '--brief', f.brief('up')]);
-  assert.doesNotMatch(up.stdout, /one tier up/);
-  task = readJson(f.taskFile(run, 'lookup'));
-  assert.deepEqual([task.attempt, task.tier, task.model], [4, 'standard', policy.claude.tiers.standard.model]);
-  await f.finished(run, 'lookup');
+test('top-tier failures and two failures after escalation refuse with the other agent tier', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (const [agent, tier, peer, peerTier] of [['codex', 'complex', 'claude', 'complex'], ['claude', 'frontier', 'codex', 'complex']]) {
+    const id = `top-${agent}`;
+    for (let n = 0; n < 2; n++) {
+      await f.start(run, id, { agent, flags: ['--tier', tier], config: { status: 'failed' } });
+      await f.finished(run, id);
+    }
+    const refused = await f.command(['start', run.id, id, '--agent', agent, '--brief', f.brief('top-again')], { code: 2 });
+    assert.match(refused.stderr, new RegExp(`fresh brief: --agent ${peer} --tier ${peerTier}`));
+    assert.equal(readJson(f.taskFile(run, id)).attempt, 2);
+    const switched = await f.json(['start', run.id, id, '--agent', peer, '--tier', peerTier, '--why', 'Different approach', '--brief', f.brief('switch')]);
+    assert.equal(switched.agent, peer);
+    await f.finished(run, id);
+  }
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'ladder', { flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'ladder');
+  }
+  for (let n = 0; n < 2; n++) {
+    const task = await f.json(['start', run.id, 'ladder', '--agent', 'claude', '--brief', f.brief(`up-${n}`, { status: 'failed' })]);
+    assert.equal(task.tier, 'standard');
+    await f.finished(run, 'ladder');
+  }
+  const refused = await f.command(['start', run.id, 'ladder', '--agent', 'claude', '--brief', f.brief('too-many')], { code: 2 });
+  assert.match(refused.stderr, /after automatic escalation.*--agent codex --tier standard/);
+});
 
-  // A check the agent itself reported as failing counts too, and Codex `standard` names `strong`.
-  const failing = { finalMessage: failingCheck };
-  await f.start(run, 'scan', { agent: 'codex', config: failing });
-  await f.finished(run, 'scan');
-  const codex = await f.command(['start', run.id, 'scan', '--agent', 'codex', '--tier', 'standard', '--brief', f.brief('scan-again')]);
-  assert.match(codex.stdout, /^note: attempt 1 at the standard tier failed its review or gates; redo it one tier up, with --tier strong and a new --why$/m);
-  await f.finished(run, 'scan');
+test('explicit tier and no-escalate override automatic escalation, and the delegated guard still applies', async (t) => {
+  const f = await fixture(t);
+  const parent = await f.newRun('parent');
+  await f.start(parent, 'owner', { flags: ['--tier', 'light'] });
+  await f.finished(parent, 'owner');
+  const env = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: parent.id, AGENT_ORCH_TASK: 'owner' };
+  const run = await f.newRun('child', env);
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'child', { env, flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'child');
+  }
+  const refused = await f.command(['start', run.id, 'child', '--agent', 'claude', '--brief', f.brief('guard')], { code: 2, env });
+  assert.match(refused.stderr, /stronger.*delegated agent never starts a stronger.*ask/s);
+  assert.equal(readJson(f.taskFile(run, 'child')).attempt, 2);
+  for (const flags of [['--tier', 'light'], ['--no-escalate']]) {
+    const kept = await f.json(['start', run.id, 'child', '--agent', 'claude', '--brief', f.brief('override'), ...flags], { env });
+    assert.equal(kept.tier, 'light');
+    await f.finished(run, 'child');
+  }
 });
 
 test('a Claude task recorded before tiers resumes at complex with its earlier reason', async (t) => {
@@ -283,4 +358,151 @@ test('a delegated task never starts a stronger tier than its own, on either agen
       await f.finished(run, id);
     }
   }
+});
+
+test('failure receipts count aborted attempts and optional refused accepts without double counting', async (t) => {
+  const f = await fixture(t);
+  const run = { dir: f.root };
+  const task = { id: 'receipts', agent: 'codex', tier: 'standard', attempt: 7,
+    attemptStops: { 4: 'owner stopped' },
+    acceptRefusals: [{ attempt: 5, reason: 'missing-gates' }, { attempt: 6, reason: 'failed-gates' }] };
+  const results = new Map([
+    [2, { state: 'aborted', limitHit: true }],
+    [3, { state: 'timeout' }], [4, { state: 'aborted' }],
+    [5, { state: 'completed' }], [6, { state: 'failed' }],
+  ]);
+  const facts = Array.from({ length: task.attempt }, (_, i) => ({ n: i + 1, agent: 'codex', state: 'aborted', ...results.get(i + 1) }));
+  const history = failureHistory(task, facts);
+  assert.equal(history.failureCount, 5);
+  assert.deepEqual(history.attempts.filter((a) => a.failed).map((a) => a.n), [1, 3, 5, 6, 7]);
+  facts.at(-1).state = 'running';
+  assert.equal(failureHistory(task, facts).failureCount, 4);
+});
+
+const failedReport = '```orch-result\n{"outcome":"done","changed":[],"checks":[{"cmd":"npm test","result":"fail"}],"decisions":[],"unresolved":[]}\n```';
+
+test('failed verify gates and reported checks drive hints without counting or automatic escalation', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (const source of ['verify', 'report']) {
+    const first = await f.start(run, source, { flags: ['--tier', 'light'], config: source === 'report' ? { finalMessage: failedReport } : {} });
+    await f.finished(run, source);
+    if (source === 'verify') await f.command(['verify', run.id, source, '--', 'node', '-e', 'process.exit(1)'], { code: 1 });
+    await f.command(['accept', run.id, source, '--note', 'Known check failure accepted for this fixture']);
+    assert.equal((await f.json(['result', run.id, source])).failureCount, 0);
+    const second = await f.command(['start', run.id, source, '--agent', 'claude', '--brief', f.brief(`${source}-again`, { finalMessage: failedReport })]);
+    const reason = source === 'verify' ? 'failed a verify gate' : 'reported a failing check';
+    assert.ok(second.stdout.includes(`attempt 1 at the light tier ${reason}; redo it one tier up, with --tier standard`), second.stdout);
+    const kept = readJson(f.taskFile(run, source));
+    assert.deepEqual([kept.why, kept.model], [first.why, first.model]);
+    const row = await f.finished(run, source);
+    assert.equal(row.failureCount, 0);
+    const third = await f.json(['start', run.id, source, '--agent', 'claude', '--brief', f.brief(`${source}-kept`)]);
+    assert.equal(third.tier, 'light');
+    await f.finished(run, source);
+  }
+});
+
+test('runtime failure hints name the result status instead of claiming failed review or gates', () => {
+  const task = { attempt: 1, agent: 'claude', tier: 'light' };
+  for (const [state, reason] of [['failed', 'failed'], ['timeout', 'timed out'], ['aborted', 'was aborted']]) {
+    const history = failureHistory(task, [{ n: 1, agent: 'claude', state }]);
+    assert.equal(history.failureCount, 1);
+    const hint = failureHint(task, history.attempts, 'claude', 'light');
+    assert.equal(hint, `attempt 1 at the light tier ${reason}; redo it one tier up, with --tier standard and a new --why`);
+  }
+});
+
+test('event-only usage-limit stops stay excluded after later Codex attempts start', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'event-limit', { agent: 'codex', flags: ['--tier', 'light'], config: {
+    finalMessage: '', extraEvents: [{ type: 'turn.failed', error: { message: 'usage limit reached' } }],
+  } });
+  await f.finished(run, 'event-limit');
+  // The fixture completes after its extra event; model the real relay's failed receipt without
+  // adding a second synthetic turn.failed event that would overwrite the event-only error.
+  const file = path.join(first.outDir, 'result.json');
+  writeJson(file, { ...readJson(file), status: 'failed', exitCode: 1 });
+  const before = await f.json(['result', run.id, 'event-limit']);
+  assert.equal(before.limitHit, true);
+  assert.equal(before.failureCount, 0);
+  assert.equal(before.result.error, null);
+  assert.equal(before.result.finalMessage, '');
+  await f.command(['start', run.id, 'event-limit', '--agent', 'codex', '--brief', f.brief('after-limit')]);
+  const after = await f.finished(run, 'event-limit');
+  assert.equal(after.failureCount, 0);
+  assert.equal(after.attempts.find((a) => a.n === 1).limitHit, true);
+  await f.command(['verdict', run.id, 'event-limit', 'changes', '--note', 'One actual quality failure']);
+  const next = await f.json(['start', run.id, 'event-limit', '--agent', 'codex', '--brief', f.brief('quality')]);
+  assert.equal(next.tier, 'light');
+  assert.equal((await f.finished(run, 'event-limit')).failureCount, 1);
+});
+
+test('automatic escalation describes resume-last as continuing the session', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'resume-last', { flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'resume-last');
+  }
+  const next = await f.command(['start', run.id, 'resume-last', '--agent', 'claude', '--brief', f.brief('continue'), '--', '--resume-last']);
+  assert.match(next.stdout, /continuing the same session/);
+  assert.doesNotMatch(next.stdout, /starts a fresh session/);
+  const task = readJson(f.taskFile(run, 'resume-last'));
+  await f.finished(run, 'resume-last');
+  const { argv } = readJson(path.join(task.outDir, 'invocation.json'));
+  assert.equal(argv.includes('--resume-last'), true);
+  assert.equal(argv.includes('--session'), false);
+});
+
+test('a failed turn continued by automatic retry is excluded before review feedback', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'transient', { flags: ['--tier', 'light', '--read-only'], config: { status: 'failed', error: 'HTTP 503 provider unavailable' } });
+  await f.finished(run, 'transient');
+  const waited = await f.json(['wait', run.id, '--timeout', '10s']);
+  assert.equal(waited.tasks[0].attempt, 2);
+  assert.equal(waited.tasks[0].failureCount, 0);
+  await f.command(['verdict', run.id, 'transient', 'changes', '--note', 'one quality failure']);
+  const row = await f.json(['result', run.id, 'transient']);
+  assert.equal(row.failureCount, 1);
+  const kept = await f.json(['start', run.id, 'transient', '--agent', 'claude', '--brief', f.brief('quality-rework')]);
+  assert.equal(kept.tier, 'light');
+  await f.finished(run, 'transient');
+});
+
+test('automatic escalation reports a fresh session when the prior attempt never recorded one', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  let task;
+  for (let n = 0; n < 2; n++) {
+    task = await f.start(run, 'no-session', { flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'no-session');
+  }
+  const resultFile = path.join(task.outDir, 'result.json');
+  const result = readJson(resultFile);
+  delete result.sessionId;
+  writeJson(resultFile, result);
+  fs.writeFileSync(path.join(task.outDir, 'events.jsonl'), '');
+  const next = await f.command(['start', run.id, 'no-session', '--agent', 'claude', '--brief', f.brief('fresh')]);
+  assert.match(next.stdout, /this attempt starts a fresh session/);
+  assert.doesNotMatch(next.stdout, /continuing the same session/);
+  task = readJson(f.taskFile(run, 'no-session'));
+  await f.finished(run, 'no-session');
+  assert.equal(readJson(path.join(task.outDir, 'invocation.json')).argv.includes('--session'), false);
+});
+
+test('a removed tier is refused instead of escalating to the lightest model', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'removed', { flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'removed');
+  }
+  const file = f.taskFile(run, 'removed');
+  writeJson(file, { ...readJson(file), tier: 'retired', attemptTiers: { 1: 'retired', 2: 'retired' } });
+  const next = await f.command(['start', run.id, 'removed', '--agent', 'claude', '--brief', f.brief('removed-again')], { code: 2 });
+  assert.match(next.stderr, /unknown --tier "retired"/);
+  assert.equal(readJson(file).attempt, 2);
 });

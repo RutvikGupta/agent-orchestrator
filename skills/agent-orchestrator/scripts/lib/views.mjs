@@ -81,6 +81,7 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
       : `${r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run),
     ...whyLines(tasks),
+    ...tasks.map((t) => `  ${t.id}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
     ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }

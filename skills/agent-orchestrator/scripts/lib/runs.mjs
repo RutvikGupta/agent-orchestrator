@@ -5,8 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { decisionsIn } from "./briefs.mjs";
+import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
-import { attemptReasonOf, lifecycleFields } from "./lifecycle.mjs";
+import { attemptReasonOf, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
@@ -219,7 +220,7 @@ function reportOutcome(message) {
   if (last === undefined) return { present: false, outcome: null, decisions: false };
   try {
     const value = JSON.parse(last.trim());
-    return { present: true, outcome: ["done", "partial", "blocked", "parked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
+    return { present: true, failedCheck: Array.isArray(value?.checks) && value.checks.some((c) => c?.result === "fail"), outcome: ["done", "partial", "blocked", "parked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
   } catch {
     return { present: true, outcome: null, decisions: false };
   }
@@ -439,6 +440,8 @@ function attemptResult(dir) {
     error: firstLine(typeof result.error === "string" ? result.error : result.error ? JSON.stringify(result.error) : "", 160) || null,
     decisions: result.status === "completed" && Boolean(decisionsIn(result.finalMessage) || report.decisions),
     outcome: report.outcome,
+    failedCheck: Boolean(report.failedCheck),
+    limitHit: result.status !== "completed" && USAGE_LIMIT_RE.test([result.error && (typeof result.error === "string" ? result.error : JSON.stringify(result.error)), result.stderrTail, result.finalMessage].filter(Boolean).join("\n")),
     parked: result.status === "completed" && Boolean(parkedSignal(result.finalMessage)),
     startedAt: result.startedAt || null,
     finishedAt: result.finishedAt || null,
@@ -449,6 +452,22 @@ function attemptResult(dir) {
   };
   if (attemptResults.size >= 2000) attemptResults.delete(attemptResults.keys().next().value);
   attemptResults.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+  return value;
+}
+
+// A relay that exited before writing a result may leave its usage error only in its log.
+// Cache that bounded tail too; running and prepared attempts never enter this path.
+const abortedLimits = new Map();
+function abortedLimit(dir, error) {
+  if (USAGE_LIMIT_RE.test(error || "")) return true;
+  const file = path.join(dir, "relay.log");
+  let st;
+  try { st = fs.statSync(file); } catch { abortedLimits.delete(file); return false; }
+  const hit = abortedLimits.get(file);
+  if (hit?.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value;
+  const value = USAGE_LIMIT_RE.test(tailText(file, 16384) || "");
+  if (abortedLimits.size >= 2000) abortedLimits.delete(abortedLimits.keys().next().value);
+  abortedLimits.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
   return value;
 }
 
@@ -501,6 +520,8 @@ function attemptsOf(task, seen, row) {
     const failed = !["completed", "needs-decision", "running", "prepared", "parked"].includes(state);
     return {
       n,
+      limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (r && r.status !== "completed" && USAGE_LIMIT_RE.test(summary.error || "")) || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
+      failedCheck: now ? Boolean(row.report?.checks?.some((c) => c?.result === "fail")) : Boolean(r?.failedCheck),
       reason: attemptReasonOf(task, n),
       agent,
       model: now ? row.model : r?.model || summary.model || null,
@@ -643,7 +664,23 @@ export function describe(run, task) {
   if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };
   described.attempts = attemptsOf(task, seen, described);
+  const history = failureHistory(task, described.attempts, described.reviewRounds, verificationFacts(run, task.id));
+  described.failureCount = history.failureCount;
+  described.attempts = described.attempts.map((a) => ({ ...a, ...history.attempts.find((h) => h.n === a.n) }));
   return described;
+}
+
+const verificationMemo = new Map();
+function verificationFacts(run, id) {
+  const file = verificationsPath(run, id);
+  let st;
+  try { st = fs.statSync(file); } catch { verificationMemo.delete(file); return []; }
+  const hit = verificationMemo.get(file);
+  if (hit?.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value;
+  const value = verificationsOf(run, id);
+  if (verificationMemo.size >= 2000) verificationMemo.delete(verificationMemo.keys().next().value);
+  verificationMemo.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+  return value;
 }
 
 // Errors that mean the agent's usage window is used up, as Claude Code and Codex word them.
