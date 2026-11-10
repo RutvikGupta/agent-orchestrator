@@ -15,6 +15,7 @@ import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { reviveParked } from "./park.mjs";
+import { modelExceedsCeiling } from "./policy.mjs";
 import { isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
@@ -406,7 +407,7 @@ function placeExternal(externals, sections, sectionOf, sessionSection, subAgents
 // agent (of the current attempt, a running one first, then the latest active), the steps and tokens
 // of all of them, and, while the task runs, the lead's activity. `runs` lists each agent for the
 // details. Rows that hung under a folded agent hang under the task.
-function foldCommandAgents(rows) {
+export function foldCommandAgents(rows) {
   const tasks = new Map(rows.filter((t) => t.agent === "command" && !t.native && !t.taskAgent).map((t) => [`${t.run}/${t.id}`, t]));
   if (!tasks.size) return rows;
   const agentsOf = new Map();
@@ -428,6 +429,9 @@ function foldCommandAgents(rows) {
     const sum = (field) => agents.reduce((n, a) => n + (a[field] || 0), task[field] || 0);
     const labels = [...new Set(agents.map((a) => a.modelLabel).filter(Boolean))];
     for (const a of agents) folded.set(`${a.run}/${a.id}`, task.id);
+    const warnings = agents.filter((a) => modelExceedsCeiling(a.agent, a.model, task.maxTier))
+      .map((a) => `⚠ ${a.id} (${a.agent} ${a.model}) exceeds the ${task.maxTier} ceiling`);
+    const activity = task.state === "running" && lead.state === "running" ? lead.now : task.now;
     merged.set(task, {
       ...task,
       model: lead.model || null,
@@ -440,7 +444,7 @@ function foldCommandAgents(rows) {
       tokensOut: sum("tokensOut"),
       tokensExact: agents.every((a) => a.tokensExact !== false) && task.tokensExact !== false,
       lastActiveMs: Math.max(task.lastActiveMs || 0, ...agents.map((a) => a.lastActiveMs || 0)),
-      now: task.state === "running" && lead.state === "running" ? lead.now : task.now,
+      now: warnings.length ? [activity, ...warnings].filter(Boolean).join(" · ") : activity,
       runs: agents.map((a) => ({ kind: a.kind || a.agent, model: a.model || null, modelLabel: a.modelLabel || null, state: a.state, session: a.session || null, attempt: a.taskAttempt ?? null, transcript: a.outDir || null })),
     });
   }
@@ -544,7 +548,7 @@ export function buildDashboardState() {
     section.rows.push(
       ...described.map((d) => {
         const record = records.get(d.id);
-        return { ...d, run: run.id, under: p, attention: addressed(run, record, d, attentionOf(d, Boolean(record?.closedAt), now), now, table()), activeMs: d.lastActiveMs || Date.parse(record?.createdAt) || 0 };
+        return { ...d, maxTier: record?.maxTier || null, run: run.id, under: p, attention: addressed(run, record, d, attentionOf(d, Boolean(record?.closedAt), now), now, table()), activeMs: d.lastActiveMs || Date.parse(record?.createdAt) || 0 };
       }),
       ...natives.map((t) => ({ ...t, run: run.id, attention: addressed(run, null, t, attentionOf(t, t.closed, now), now, table()) })),
     );

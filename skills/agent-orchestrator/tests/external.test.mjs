@@ -1,3 +1,4 @@
+import { foldCommandAgents } from '../scripts/lib/dashboard-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -788,6 +789,8 @@ test('a command task shows the agent its command runs in its own row: its model,
   const { f, fakes } = await setup(t);
   const run = await f.newRun();
   await f.command(['start', run.id, 'review', '--agent', 'command', '--why', 'runs a review script', '--', 'sleep', '60']);
+  const taskFile = path.join(run.dir, 'tasks', 'review', 'task.json');
+  writeJson(taskFile, { ...JSON.parse(fs.readFileSync(taskFile, 'utf8')), maxTier: 'standard' });
   transcript(f, 'cmd-agent', false, 'claude-fable-5-2');
   fakes.start(fakes.session('cmd-shell', 'claude', [
     fakes.script(`${SKILL}/standards_review.sh`, fakes.claude('inner', 'cmd-agent', { env: innerEnv(run, 'review') })),
@@ -804,7 +807,8 @@ test('a command task shows the agent its command runs in its own row: its model,
   assert.deepEqual(ours.map((r) => r.id), ['review'], 'one row: the agent has none of its own');
   assert.deepEqual([row.agent, row.model, row.modelLabel, row.state, row.kids], ['command', 'claude-fable-5-2', 'fable-5-2', 'running', 0]);
   assert.deepEqual({ in: row.tokensIn, out: row.tokensOut, steps: row.steps }, { in: 10, out: 5, steps: 1 });
-  assert.equal(row.now, 'Read README.md', 'the agent\'s activity while the command runs');
+  assert.equal(row.maxTier, 'standard');
+  assert.equal(row.now, 'Read README.md · ⚠ standards-review (claude claude-fable-5-2) exceeds the standard ceiling');
   assert.deepEqual(row.runs.map((a) => [a.kind, a.modelLabel, a.state, a.session]), [['claude -p', 'fable-5-2', 'running', 'cmd-agent']]);
   assert.match(row.agentLog, /cmd-agent\.jsonl$/);
   assert.deepEqual((await board.json(`/api/transcript?file=${encodeURIComponent(row.agentLog)}`)).events.map((e) => [e.kind, e.text]), [['user', 'Review the change.'], ['tool', 'Read README.md']]);
@@ -1054,4 +1058,12 @@ test('a task\'s activity is its own whatever its latest event is, and its agent\
   }
   for (const task of Object.values(tasks)) f.release(task);
   for (const id of ids) await f.finished(run, id);
+});
+
+test('folded command agent ceiling warnings distinguish above, equal, below, and no ceiling', () => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'standard', attempt: 1 };
+  const child = (id, model) => ({ run: 'r', id, parent: 'work', taskAgent: true, agent: 'claude', model, state: 'running', taskAttempt: 1 });
+  const rows = [task, child('above', 'claude-opus-5-5'), child('equal', 'claude-sonnet-5-5'), child('below', 'claude-haiku-5-5')];
+  assert.equal(foldCommandAgents(rows)[0].now, '⚠ above (claude claude-opus-5-5) exceeds the standard ceiling');
+  assert.equal(foldCommandAgents([{ ...task, maxTier: undefined }, ...rows.slice(1)])[0].now, undefined);
 });

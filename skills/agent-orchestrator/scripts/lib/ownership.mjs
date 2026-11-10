@@ -36,7 +36,7 @@ export const DASHBOARD_CALLER = Object.freeze({ kind: "user", via: "dashboard", 
 // and `status` and `wait` revive parked watchers and retry tasks only for the owner.
 export const OPEN_COMMANDS = new Set([
   "status", "wait", "result", "log", "recover", "agents", "stats", "lesson", "runs", "watch", "nap",
-  "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch",
+  "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch", "model",
 ]);
 // The guarded commands. `self`: the command checks ownership itself, so its refusal names what it
 // would change; orch.mjs checks the others on their RUN argument before they run (gateCommand).

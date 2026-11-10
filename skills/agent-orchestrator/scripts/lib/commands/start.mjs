@@ -13,7 +13,7 @@ import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
@@ -105,7 +105,7 @@ function callerTier() {
   if (!record) return null;
   const agent = attemptAgent(record, record.attempt) || record.agent;
   const tier = record.tier || (agent === "claude" ? CLAUDE_DEFAULT_TIER : null);
-  return agent === COMMAND_AGENT || !tier ? null : { run: runId, task: taskId, agent, tier };
+  return agent === COMMAND_AGENT || !tier ? null : { run: runId, task: taskId, agent, tier, effort: record.effort || null };
 }
 
 // A delegated agent never starts a stronger model than its own: it was given its task at a tier
@@ -128,6 +128,7 @@ export function startTask(args, extra = {}) {
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
   if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
+  if (args["max-tier"] !== undefined) refuse("--max-tier applies to --agent command only", 2);
   if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
   if (!args.brief) refuse("--brief FILE is required", 2);
   const briefSource = path.resolve(args.brief);
@@ -392,6 +393,18 @@ function startCommand(run, id, args, extra) {
     if (error instanceof ModelRefused) refuse(error.message, error.code);
     throw error;
   }
+  let maxTier, defaults;
+  try {
+    const own = callerTier();
+    maxTier = lowerCeiling(args["max-tier"] ?? prev.maxTier, process.env.AGENT_ORCH_MAX_TIER, callerCeiling(own));
+    defaults = ceilingEnv(maxTier);
+    if (own?.effort) defaults = ceilingEnv(maxTier, {
+      AGENT_ORCH_MAX_EFFORT: lowerEffort(defaults.AGENT_ORCH_MAX_EFFORT, own.effort),
+    });
+  } catch (error) {
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
   const { argv, done, timeout, reused } = commandOf(args, prev);
   if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
@@ -427,6 +440,7 @@ function startCommand(run, id, args, extra) {
     // The row's title is the command, unless --title names it.
     title: args.title ?? (sameAgent && reused ? prev.title : null) ?? line,
     command: argv,
+    maxTier,
     doneMarker: done,
     commandTimeout: timeout,
     relay: COMMAND_RELAY,
@@ -453,7 +467,7 @@ function startCommand(run, id, args, extra) {
     resumedBy: null,
     ...extra,
   };
-  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, agentEnv);
+  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
   task.pid = child.pid;
   saveTask(run, task);
   if (startedBy) watchForFinish(run, task);

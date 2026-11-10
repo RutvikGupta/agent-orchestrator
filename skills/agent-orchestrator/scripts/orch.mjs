@@ -26,6 +26,7 @@ import { cmdStatus, cmdWait, cmdWatch } from "./lib/commands/monitor.mjs";
 import { cmdPrWatch } from "./lib/commands/pr-watch.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
+import { cmdModel } from "./lib/commands/model.mjs";
 import { cmdStart } from "./lib/commands/start.mjs";
 import { cmdTell } from "./lib/commands/tell.mjs";
 import { cmdClose, cmdLog, cmdResult, cmdStop } from "./lib/commands/task.mjs";
@@ -35,6 +36,10 @@ const USAGE = `agent-orchestrator · orch.mjs
 
 Usage: node orch.mjs <command> [args] [--json]
 
+  model --agent claude|codex [--tier TIER]
+                                  Print --model and --effort arguments, lowered to the inherited
+                                  ceiling. Without --tier use the ceiling, otherwise standard.
+                                  Codex effort uses -c model_reasoning_effort="LEVEL".
   agents [--refresh]              Installed agent CLIs, their relays, login state, model policy,
                                   and how much of each agent's usage limits is used. --refresh
                                   runs one tiny Claude turn to read Claude's current limits
@@ -76,8 +81,13 @@ Usage: node orch.mjs <command> [args] [--json]
                                   implies complex, so it needs none. "agents" lists each tier's model.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
-  start RUN TASK --agent command --why TEXT [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
+  start RUN TASK --agent command --why TEXT [--max-tier TIER] [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
         [--max-parallel N] [--force] -- COMMAND [ARG...]
+                                  --max-tier uses a Claude policy tier; defaults to the delegated
+                                  caller's tier, otherwise none. Inherited ceilings may lower it.
+                                  Exports AGENT_ORCH_MAX_* and CLI defaults for child agents.
+                                  Explicit CLI choices can override defaults; the board warns
+                                  when a known model exceeds the ceiling.
                                   Run a command as a task, with no model: for a script that starts
                                   its own agents, or any long command whose output you only check.
                                   The words after "--" run as an argument vector, with no shell (put
@@ -217,10 +227,11 @@ for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.`;
 
 const [command, ...rest] = process.argv.slice(2);
 const specs = {
+  model: { value: ["agent", "tier"] },
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
+  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done", "max-tier"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
@@ -254,6 +265,7 @@ const specs = {
   recover: { bool: ["all"] },
 };
 const handlers = {
+  model: cmdModel,
   agents: cmdAgents,
   new: cmdNew,
   worktree: cmdWorktree,
