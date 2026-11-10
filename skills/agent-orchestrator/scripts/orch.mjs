@@ -12,6 +12,7 @@
 
 import { STATE_ROOT } from "./lib/config.mjs";
 import { gateCommand } from "./lib/ownership.mjs";
+import { checkSkill } from "./lib/skill-version.mjs";
 import { die, parseArgs } from "./lib/util.mjs";
 import { cmdHeavy } from "./lib/commands/heavy.mjs";
 import { cmdReclaim } from "./lib/commands/reclaim.mjs";
@@ -25,6 +26,7 @@ import { cmdAccept, cmdDispatch, cmdIntegrate, cmdPlan, cmdRecover, cmdResolve }
 import { cmdStatus, cmdWait, cmdWatch } from "./lib/commands/monitor.mjs";
 import { cmdPrWatch } from "./lib/commands/pr-watch.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
+import { cmdSkill } from "./lib/commands/skill.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
 import { cmdStart } from "./lib/commands/start.mjs";
 import { cmdTell } from "./lib/commands/tell.mjs";
@@ -194,6 +196,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Remove the run's worktrees (dirty ones only with --force)
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d)
+  skill [--loaded]                Whether the skill's instructions (SKILL.md, references/, policy.json)
+                                  changed since this session or task first ran an orch.mjs command:
+                                  the fingerprint recorded for the caller, the current one, and the
+                                  files and commits that differ. --loaded records the current one,
+                                  after you have read the skill again, and prints it. Every other
+                                  command prints a notice on stderr until then (see Skill changes)
   pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
                                   Watch pull requests (number, URL, or branch) with gh until one
                                   needs you: a check failed, all checks finished, a new review or
@@ -213,7 +221,15 @@ their nested runs; reading (status, wait, result, log, recover, inbox, send with
 dry runs) is open to anyone. Another session's run is refused (exit 4, nothing changed): ask its
 owner. A run launched from a terminal is the user's. The user at a terminal and the dashboard may
 act on any run, and the owner is told. When every owner of a run has gone and it has been unused
-for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.`;
+for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.
+
+Skill changes: the first orch.mjs command of a Claude Code or Codex session, or of a delegated task,
+records a fingerprint of SKILL.md, references/ and policy.json. When they differ on a later command, a
+notice on stderr (stdout and --json are untouched) names the changed files, the commits since (at most
+5, in a git checkout) and the file to read again, and the command still runs. The notice repeats until
+\`skill --loaded\`. A caller with no session or task identity (a plain terminal) gets none, and records
+older than 30 days are removed. AGENT_ORCH_SKILL_NOTICE=0 turns it off; it is off while
+AGENT_ORCH_SKILLS_DIR is set (tests) unless AGENT_ORCH_SKILL_NOTICE=1.`;
 
 const [command, ...rest] = process.argv.slice(2);
 const specs = {
@@ -232,6 +248,7 @@ const specs = {
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },
+  skill: { bool: ["loaded"] },
   "pr-watch": { value: ["repo", "timeout", "interval"], bool: ["once"] },
   brief: { value: ["type", "out"], bool: ["force", "read-only", "adopt"] },
   send: { value: ["file"], bool: ["steer", "adopt"] },
@@ -295,10 +312,17 @@ if (command === "wait" && rest.includes("--help")) {
   process.stdout.write(`${USAGE.slice(USAGE.indexOf("  wait RUN"), USAGE.indexOf("  plan RUN"))}`);
 } else if (!command || command === "help" || command === "--help" || command === "-h") {
   process.stdout.write(`${USAGE}\n`);
+} else if (command === "skill") {
+  // The caller's own record, no run: nothing for an ownership check to guard (lib/ownership.mjs).
+  const args = parseArgs(rest, specs.skill);
+  checkSkill(command);
+  cmdSkill(args);
 } else if (!handlers[command]) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
   const args = parseArgs(rest, specs[command]);
+  // A changed skill is reported on stderr before the command's own output (lib/skill-version.mjs).
+  checkSkill(command);
   // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
   gateCommand(command, args);
   await handlers[command](args);
