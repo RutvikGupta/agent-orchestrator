@@ -76,10 +76,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   implies complex, so it needs none. "agents" lists each tier's model.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
-                                  In a run with a plan, start refuses a task whose prerequisites are
+                                  In a run with a plan, the first start refuses a task whose prerequisites are
                                   not integrated yet, or that shares an owned path or resource with
                                   a running task: --force bypasses those checks. A task the plan
-                                  does not name needs --unplanned, which --force does not imply
+                                  does not name needs --unplanned, which --force does not imply.
+                                  Later attempts skip plan checks; babysitters reserve no owned paths,
+                                  parked tasks and command tasks hold no plan reservation.
   start RUN TASK --agent command --why TEXT [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
         [--max-parallel N] [--force] [--unplanned] -- COMMAND [ARG...]
                                   Run a command as a task, with no model: for a script that starts
@@ -142,8 +144,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Lists the tasks still blocked. --dry-run starts nothing.
                                   --follow stays after that first wave: it waits for the running
                                   tasks and starts each next wave as its prerequisites land, until
-                                  the whole plan is complete or a task needs you (ready for review,
-                                  to accept or integrate, a decision handed back, or a failure)
+                                  the whole plan is complete or a new task problem needs you (ready for review,
+                                  to accept or integrate, a decision handed back, or a failure).
+                                  Existing problems are listed without interrupting running work;
+                                  transient failures retry and parked watchers revive as in wait.
+                                  With --follow, --max N caps planned tasks running at once.
+                                  A ready babysitter is listed but does not interrupt running tasks.
   verify RUN TASK [--timeout DUR] -- COMMAND...
                                   Rerun a gate in a finished task's working directory (default
                                   timeout 30m) and record it in the task's verifications.jsonl,

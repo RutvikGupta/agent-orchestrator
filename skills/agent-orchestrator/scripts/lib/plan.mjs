@@ -244,8 +244,12 @@ export function waitsOnText(waitsOn) {
 // Runtime conflicts include dependency-ordered pairs too: a forced start may still be running
 // when its dependent is requested. Keep the running task's original reservation after replanning.
 export function runningConflicts(entry, running) {
+  const reservation = (task) => ({ ...task, dependsOn: [],
+    owns: task.babysit || task.type === "babysit" || task.agent === "command" ? [] : task.owns,
+    resources: task.agent === "command" ? [] : task.resources,
+  });
   return running.flatMap((held) => findConflicts([
-    { ...entry, dependsOn: [] }, { ...held, dependsOn: [] },
+    reservation(entry), reservation(held),
   ]).map((conflict) => ({ ...conflict, running: [held.id] })));
 }
 

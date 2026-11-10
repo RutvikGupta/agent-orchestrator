@@ -14,6 +14,8 @@ import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProg
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
 import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
+import { retryTask } from "../retry.mjs";
+import { reviveParked } from "../park.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { inboxWake } from "../inbox.mjs";
 import { StartRefused, startTask } from "./start.mjs";
@@ -201,7 +203,10 @@ function dispatchWave(args) {
   const progress = planProgress(plan, phaseMap(run, rows, plan));
   const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
   const limit = parallelAt(DEPTH);
-  const slots = Math.max(0, Math.min(limit - running, args.max === undefined ? Infinity : Number(args.max)));
+  const planned = new Set(plan.tasks.map((task) => task.id));
+  const plannedRunning = rows.filter((r) => r.state === "running" && r.phase !== "parked" && planned.has(r.id)).length;
+  const maxSlots = args.max === undefined ? Infinity : Number(args.max) - (args.follow ? plannedRunning : 0);
+  const slots = Math.max(0, Math.min(limit - running, maxSlots));
   if (progress.ready.length && slots && !dryRun && DEPTH >= MAX_NEST_DEPTH) {
     die(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
   }
@@ -212,11 +217,11 @@ function dispatchWave(args) {
   const failed = [];
   const waiting = [];
   const conflicts = [];
-  const reserved = rows.filter((r) => r.state === "running").map((r) => {
+  const reserved = rows.filter((r) => r.state === "running" && r.phase !== "parked").map((r) => {
     const task = loadTask(run, r.id);
     const current = plan.tasks.find((t) => t.id === r.id);
     const original = task?.plan || current || { id: r.id, owns: task?.readOnly ? [] : ["."] };
-    return { ...original, readOnly: Boolean(task?.readOnly),
+    return { ...original, agent: task?.agent || original.agent, readOnly: Boolean(task?.readOnly || task?.agent === "command"), babysit: Boolean(task?.babysit),
       owns: [...new Set([...(original.owns || []), ...(current?.owns || [])])],
       resources: [...new Set([...(original.resources || []), ...(current?.resources || [])])] };
   });
@@ -293,7 +298,52 @@ export async function cmdDispatch(args) {
   const follow = Boolean(args.follow && !args["dry-run"]);
   const wake = follow ? inboxWake() : null;
   const started = [];
+  const run = loadRun(args._[0]);
+  const snapshot = () => {
+    let rows = listTasks(run);
+    if (reviveParked(run, rows).length) rows = listTasks(run);
+    return rows.some((r) => r.state === "aborted" && !r.result && r.health === "ok") ? listTasks(run) : rows;
+  };
+  const maintain = () => {
+    let rows = snapshot();
+    let changed = false;
+    const planned = new Set((readPlan(run.dir)?.tasks || []).map((task) => task.id));
+    let running = rows.filter((row) => planned.has(row.id) && row.state === "running" && row.phase !== "parked").length;
+    for (const row of rows) {
+      // A resumed planned task occupies the same slot as a newly dispatched one.
+      if (planned.has(row.id) && args.max !== undefined && running >= Number(args.max)) continue;
+      const retried = retryTask(run, row);
+      if (retried) {
+        (args.json ? process.stderr : process.stdout).write(`${retried}\n`);
+        changed = true;
+        if (planned.has(row.id)) running++;
+      }
+    }
+    return changed ? snapshot() : rows;
+  };
+  const needing = (plan, rows) => {
+    const planned = new Set(plan.tasks.map((task) => task.id));
+    return rows.flatMap((row) => {
+      if (!planned.has(row.id) && loadTask(run, row.id)?.closedAt) return [];
+      if (row.phase === "integrated" || row.phase === "prepared") return [];
+      const phase = ["awaiting-review", "accepted", "needs-decision", "failed"].includes(row.phase) ? row.phase : null;
+      const item = taskAttention(row, false);
+      return phase || item ? [{ id: row.id, attempt: row.attempt, phase: phase || item.kind, reason: item?.reason || phase,
+        next: `${CLI} ${phase === "accepted" ? "integrate" : "result"} ${run.id} ${row.id}` }] : [];
+    });
+  };
+  const attentionKey = (item) => JSON.stringify([item.id, item.attempt, item.phase]);
+  let previous;
+  if (follow) {
+    guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
+    const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
+    previous = new Set(needing(plan, snapshot()).map(attentionKey));
+  }
   for (;;) {
+    if (follow) {
+      guard(loadRun(run.dir), `dispatch run ${run.id}`, { adopt: args.adopt });
+      maintain();
+    }
     const wave = dispatchWave(args);
     if (!follow) {
       emit(args, wave.data, wave.text);
@@ -301,29 +351,17 @@ export async function cmdDispatch(args) {
       return;
     }
     started.push(...wave.data.started);
-    if (wave.data.started.length) {
-      // Keep JSON a single final document, but show progress while a terminal follows the run.
-      if (!args.json) process.stdout.write(`${wave.text}\n`);
-    }
-    const run = loadRun(args._[0]);
+    if (wave.data.started.length && !args.json) process.stdout.write(`${wave.text}\n`);
     const plan = readPlan(run.dir);
-    let rows = listTasks(run);
-    // A result may be published between the result read and PID check.
-    if (rows.some((r) => r.state === "aborted" && !r.result)) rows = listTasks(run);
+    const rows = maintain();
     const phases = phaseMap(run, rows, plan);
     const complete = plan.tasks.every((t) => phases.get(t.id) === "integrated");
-    const planned = new Set(plan.tasks.map((task) => task.id));
-    const attention = rows.flatMap((row) => {
-      if (!planned.has(row.id) && loadTask(run, row.id)?.closedAt) return [];
-      if (row.phase === "integrated" || row.phase === "prepared") return [];
-      const phase = ["awaiting-review", "accepted", "needs-decision", "failed"].includes(row.phase) ? row.phase : null;
-      const item = taskAttention(row, false);
-      return phase || item ? [{ id: row.id, phase: phase || item.kind, reason: item?.reason || phase,
-        next: `${CLI} ${phase === "accepted" ? "integrate" : "result"} ${run.id} ${row.id}` }] : [];
-    });
+    const attention = needing(plan, rows);
+    const newAttention = attention.some((item) => !previous.has(attentionKey(item)));
+    previous = new Set(attention.map(attentionKey));
     const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id);
-    const active = rows.some((row) => row.state === "running");
-    if (complete || attention.length || message || wave.data.failed.length || !active || wave.data.manual.length) {
+    const active = rows.some((row) => row.state === "running" && row.phase !== "parked");
+    if (complete || newAttention || message || wave.data.failed.length || !active) {
       const reason = complete ? "complete" : message ? "message" : attention.length ? "attention" : wave.data.failed.length ? "failed" : "blocked";
       const text = [wave.data.started.length ? null : wave.text,
         complete ? "plan complete: every task is integrated" : `dispatch stopped: ${reason}`,
