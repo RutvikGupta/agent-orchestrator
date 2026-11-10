@@ -35,7 +35,8 @@ for (const [source, finalMessage] of [
     assert.equal(resolved.phase, 'awaiting-review');
     assert.equal(resolved.closed, true);
     assert.deepEqual(resolved.decisions, [`${question} Resolved: ${note}`]);
-    await f.command(['accept', run.id, 'asks']);
+    const accepted = await f.command(['accept', run.id, 'asks']);
+    if (source === 'report') assert.match(accepted.stderr, /WARNING:.*no passing checks/);
     assert.equal((await row(f, run, 'asks')).phase, 'accepted');
     assert.deepEqual((await f.json(['recover', run.id])).runs[0].groups['needs-decision'], []);
   });

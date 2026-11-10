@@ -150,6 +150,7 @@ function shellTokens(text) {
   };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
+    if (c === "\\" && text[i + 1] === "\n" && quote !== "'") { i++; continue; }
     if (quote) {
       raw += c;
       if (c === quote) quote = null;
@@ -194,13 +195,34 @@ function unwrapEvidenceShell(command) {
   return text;
 }
 
+// Resolve existing parents too, so a missing child of a symlink cannot escape the task tree.
+function canonicalDirectory(directory) {
+  let current = path.resolve(directory), suffix = [];
+  for (;;) {
+    try { return path.resolve(fs.realpathSync(current), ...suffix.reverse()); } catch { /* Try its parent. */ }
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(directory);
+    suffix.push(path.basename(current)); current = parent;
+  }
+}
+function insideTask(directory, cwd) {
+  if (!cwd) return false;
+  const relative = path.relative(canonicalDirectory(cwd), canonicalDirectory(directory));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
 // Keep command identity separate from shell setup and output presentation. Only a literal cd
 // prefix and pipes to the three display filters are removed; other shell control flow stays.
 export function normalizeCommand(cmd, cwd = null) {
-  let text = collapseSpaces(unwrapEvidenceShell(cmd));
+  const text = unwrapEvidenceShell(cmd);
   const tokens = shellTokens(text);
-  if (!tokens) return text;
-  while (tokens[0]?.word === "cd" && tokens[1]?.word && !/[$`~]/.test(tokens[1].word) && tokens[2]?.op === "&&") tokens.splice(0, 3);
+  if (!tokens) return collapseSpaces(text);
+  let directory = cwd;
+  while (tokens[0]?.word === "cd" && tokens[1]?.word && !/[$`~]/.test(tokens[1].word) && tokens[2]?.op === "&&") {
+    const target = path.resolve(directory || ".", tokens[1].word);
+    if (!insideTask(target, cwd)) break;
+    directory = target; tokens.splice(0, 3);
+  }
   for (;;) {
     while (/^[A-Za-z_][\w]*=/.test(tokens[0]?.word || "")) tokens.shift();
     if (tokens[0]?.word === "env") {
@@ -292,18 +314,19 @@ export function computeEvidence() {
 }
 function checkEvidence(task, row, report) {
   if (!report || report.invalid || !row.outDir || !task.outDir || ["running", "prepared"].includes(row.state)) return null;
-  const file = path.join(task.outDir, "evidence.json");
-  const saved = savedEvidence(file);
-  if (saved?.version === 3 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
-  if (!evidenceAllowed) return null;
   const dir = path.dirname(task.outDir);
   const logs = reportAttempts(task).map((n) => ({ agent: task.attemptAgents?.[n] || task.agent, file: path.join(dir, `attempt-${n}`, "events.jsonl") }));
+  if (!logs.some((log) => fs.existsSync(log.file))) return null;
+  const file = path.join(task.outDir, "evidence.json");
+  const saved = savedEvidence(file);
+  if (saved?.version === 4 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
+  if (!evidenceAllowed) return null;
   const runs = logs.flatMap((log) => commandRuns(log.agent, log.file)).map((run) => ({ ...run, key: normalizeCommand(run.cmd, row.cd) }));
   const checks = report.checks.map((check) => matchCheckEvidence(check, runs, row.cd));
   const checkout = saved?.attempt === row.attempt
     ? { readAt: saved.readAt, commit: saved.commit, dirty: saved.dirty }
     : { readAt: new Date().toISOString(), ...treeState(row.cd) };
-  const evidence = { version: 3, attempt: row.attempt, ...checkout, checks };
+  const evidence = { version: 4, attempt: row.attempt, ...checkout, checks };
   try {
     writeJson(file, evidence);
   } catch {
@@ -332,15 +355,17 @@ function matchingRuns(run, cwd) {
   const stopped = parts.findIndex((p) => /^(?:exit|return|exec)$/.test(p.tokens[0]?.word || ""));
   const candidates = [];
   let directory = cwd;
+  let directoryKnown = true;
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (stopped >= 0 && i > stopped) break;
     const previous = parts[i - 1];
     if (previous?.tokens[0]?.word === "cd") {
       const target = previous.tokens[1]?.word || "";
-      if (/[$`~]/.test(target)) continue;
-      directory = path.resolve(directory || ".", target);
+      if (/[$`~]/.test(target) || (!directoryKnown && !path.isAbsolute(target))) directoryKnown = false;
+      else { directory = path.resolve(directory || ".", target); directoryKnown = true; }
     }
+    if (!directoryKnown || (directory && cwd && directory !== cwd && !insideTask(directory, cwd))) continue;
     // A successful && chain establishes each step's status. In a masked chain, record
     // the named step with unknown status; a literal false proves the next step was skipped.
     if (previous?.after === "&&" && previous.tokens[0]?.word === "false") continue;
@@ -358,7 +383,21 @@ function matchingRuns(run, cwd) {
   return [exact, ...candidates];
 }
 
-const VALUE_FLAGS = new Set(["-k", "-p", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination", "--test-concurrency", "--config", "--timeout", "--maxfail", "--color", "--tb", "--log-level", "--grep", "--workers", "--repo", "-R", "--jq", "--json", "--template", "-j", "-n"]);
+// Only presentation options may be omitted. Selection, validation and mutation options
+// remain part of the command, including their values and attached forms such as -k=one.
+const DISPLAY_FLAGS = new Set(["-q", "--quiet", "-v", "--verbose", "--oneline", "--stat", "--short", "--porcelain", "--name-only", "--name-status", "--no-color"]);
+const DISPLAY_VALUE_FLAGS = new Set(["--color", "--format", "--pretty", "--jq", "--json", "--template", "--test-reporter", "--test-reporter-destination", "--tb", "--log-level"]);
+const SELECTION_VALUE_FLAGS = new Set(["-k", "--keyword", "-m", "--markers", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--include", "--config"]);
+function displayOption(program, option, words) {
+  if (program === "git") {
+    const command = words[1];
+    if (command === "status") return ["--short", "--porcelain"].includes(option);
+    return ["diff", "log", "show", "reflog"].includes(command) && ["--oneline", "--stat", "--name-only", "--name-status", "--no-color", "--color", "--format", "--pretty"].includes(option);
+  }
+  if (program === "gh") return ["--jq", "--json", "--template"].includes(option);
+  if (program === "node") return words.includes("--test") && ["--test-reporter", "--test-reporter-destination"].includes(option);
+  return /^(?:pytest|py_test|ruff|black|run_.*tests.*\.sh)$/.test(program) && ["-q", "--quiet", "-v", "--verbose", "--color", "--tb", "--log-level"].includes(option);
+}
 function identity(key) {
   let tokens;
   try { tokens = JSON.parse(key); } catch { return null; }
@@ -367,9 +406,15 @@ function identity(key) {
   const keep = [];
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
-    if (i && word.startsWith("-") && word !== "-" && !["-c", "-e", "-m"].includes(word) && words[0] !== "test") {
-      if (VALUE_FLAGS.has(word) && words[i + 1] && !words[i + 1].startsWith("-")) i++;
+    const option = word.split("=", 1)[0];
+    const display = i && displayOption(path.basename(words[0]), option, words);
+    if (display && DISPLAY_FLAGS.has(option)) continue;
+    if (display && DISPLAY_VALUE_FLAGS.has(option)) {
+      if (!word.includes("=") && words[i + 1] && !words[i + 1].startsWith("-")) i++;
       continue;
+    }
+    if (i && SELECTION_VALUE_FLAGS.has(word) && words[i + 1] !== undefined) {
+      keep.push(`${word}\0${words[++i]}`); continue;
     }
     keep.push(word);
   }
@@ -381,9 +426,11 @@ function compatibleCommand(left, right, cwd, runCwd) {
   return a.every((word, i) => {
     if (word === b[i]) return true;
     if (!i && path.basename(word) === path.basename(b[i]) && (!word.includes(path.sep) || !b[i].includes(path.sep))) return true;
-    if (!/[/.]/.test(word) || !/[/.]/.test(b[i]) || /[$`]/.test(word + b[i])) return false;
+    if (word.startsWith("-") || b[i].startsWith("-") || !/[/.]/.test(word) || !/[/.]/.test(b[i]) || /[$`]/.test(word + b[i])) return false;
     const x = path.normalize(word), y = path.normalize(b[i]);
-    if (path.resolve(cwd || ".", x) === path.resolve(runCwd || cwd || ".", y)) return true;
+    const from = path.resolve(cwd || ".", x), to = path.resolve(runCwd || cwd || ".", y);
+    if (from === to) return true;
+    if (!cwd || !insideTask(from, cwd) || !insideTask(to, cwd) || (path.isAbsolute(x) && path.isAbsolute(y))) return false;
     // A report often uses the path relative to a test subdirectory rather than the task
     // root. Require the complete relative suffix, never just a shared filename.
     return (x.includes(path.sep) && y.endsWith(path.sep + x)) || (y.includes(path.sep) && x.endsWith(path.sep + y));
@@ -402,13 +449,11 @@ export function matchCheckEvidence(check, runs, cwd = null) {
   }
   if (!command) return { ran: false, notCommand: true };
   const key = normalizeCommand(command, cwd);
+  const candidates = runs.flatMap((run) => matchingRuns(run, cwd));
   const find = (wanted) => {
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const candidates = matchingRuns(runs[i], cwd);
-      const last = candidates.findLast((run) => run.key === wanted || compatibleCommand(wanted, run.key, cwd, run.cwd));
-      if (last) return { ran: true, exitCode: last.exitCode, atMs: last.atMs };
-    }
-    return null;
+    const exact = candidates.findLast((run) => run.key === wanted);
+    const last = exact || candidates.findLast((run) => compatibleCommand(wanted, run.key, cwd, run.cwd));
+    return last ? { ran: true, exitCode: last.exitCode, atMs: last.atMs } : null;
   };
   const direct = find(key);
   if (direct) return direct;
@@ -426,7 +471,7 @@ export function matchCheckEvidence(check, runs, cwd = null) {
 
 // A check's evidence in words, for `result`: "ran, exit 0", or "NOT FOUND in the log".
 export function evidenceText(evidence) {
-  if (!evidence) return "";
+  if (!evidence) return "no events log; evidence unavailable";
   if (evidence.notCommand) return "not a command";
   if (!evidence.ran) return "NOT FOUND in the log";
   return `ran, exit ${evidence.exitCode ?? "unknown"}`;
@@ -435,7 +480,8 @@ export function evidenceText(evidence) {
 // A warning for a check reported as passing without a successful matching run, or null.
 export function evidenceWarning(check) {
   const evidence = check?.evidence;
-  if (check?.result !== "pass" || !evidence || evidence.exitCode === 0) return null;
+  if (check?.result !== "pass" || evidence?.exitCode === 0) return null;
+  if (!evidence) return `check "${check.cmd || "(no command)"}" has no events log; evidence unavailable`;
   if (evidence.notCommand) return `check "${check.cmd || "(no command)"}" is reported pass, but is not a command`;
   const cmd = check.cmd || "(no command)";
   if (!evidence.ran) return `check "${cmd}" is reported pass, but no matching run is in the log`;

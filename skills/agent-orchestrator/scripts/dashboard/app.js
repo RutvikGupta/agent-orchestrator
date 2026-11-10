@@ -190,7 +190,7 @@ function redrawSection(id){const root=document.getElementById("runs"),run=state.
 // Each check shows the evidence `orch.mjs result` saved for it: the last matching run in the
 // agent's log, as in "pass · ran, exit 0". A check reported as passing without a successful run is
 // marked as a warning, as `result` warns. The dashboard only reads saved evidence.
-const evidenceWords=e=>!e.ran?"NOT FOUND in the log":e.exitCode===0?"ran, exit 0":"exit "+(e.exitCode??"unknown");
+const evidenceWords=e=>e.notCommand?'not a command':!e.ran?"NOT FOUND in the log":e.exitCode===0?"ran, exit 0":"exit "+(e.exitCode??"unknown");
 const checkWarning=c=>{const e=c?.evidence;if(c?.result!=="pass"||!e||e.exitCode===0)return null;
   return !e.ran?"reported pass, but no matching run is in the log":e.exitCode==null?"reported pass, but the log has no exit code for its last run":"reported pass, but its last run exited "+e.exitCode};
 function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.length)return[];

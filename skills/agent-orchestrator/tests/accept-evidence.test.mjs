@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { fixture, readJson } from './helpers.mjs';
 
 const report = (checks) => `Done.\n\n\`\`\`orch-result\n${JSON.stringify({ outcome: 'done', changed: [], checks, decisions: [], unresolved: [] })}\n\`\`\`\n`;
@@ -57,4 +59,45 @@ test('read-only reports warn without refusal and no-report tasks accept', async 
   assert.match(reader.stderr, /WARNING:.*npm test.*exited 2/);
   await start(f, run, 'no-report', null);
   await f.command(['accept', run.id, 'no-report']);
+});
+
+for (const [id, checks] of [
+  ['empty', []],
+  ['no-pass', [{ cmd: 'npm test', result: 'fail' }, { cmd: 'npm run lint', result: 'not-run' }]],
+]) test(`${id} report accepts with a warning`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await start(f, run, id, checks);
+  const accepted = await f.command(['accept', run.id, id]);
+  assert.match(accepted.stderr, /WARNING:.*no passing checks/);
+});
+
+test('invalid report accepts with a warning', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await f.start(run, 'invalid', { config: { finalMessage: '```orch-result\n{bad json}\n```' } });
+  await f.finished(run, 'invalid');
+  const accepted = await f.command(['accept', run.id, 'invalid']);
+  assert.match(accepted.stderr, /WARNING:.*invalid orch-result report/);
+});
+
+for (const agent of ['claude', 'codex']) test(`${agent} missing event log accepts with a warning`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await f.start(run, 'missing-log', { agent, config: { finalMessage: report([pass('npm test')]) } });
+  const finished = await f.finished(run, 'missing-log');
+  fs.unlinkSync(path.join(finished.outDir, 'events.jsonl'));
+  const accepted = await f.command(['accept', run.id, 'missing-log']);
+  assert.match(accepted.stderr, /WARNING:.*npm test.*(?:evidence unavailable|no events log)/i);
+});
+
+test('Codex exact failed run refuses despite a later narrower success', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const event = (id, command, exit_code) => ({ type: 'item.completed', item: {
+    type: 'command_execution', id, command: `/bin/zsh -lc '${command}'`, exit_code, status: 'completed',
+  } });
+  await f.start(run, 'codex-failure', { agent: 'codex', config: {
+    finalMessage: report([pass('pytest tests/')]),
+    extraEvents: [event('first', 'pytest tests/', 1), event('second', 'pytest -k one tests/', 0)],
+  } });
+  await f.finished(run, 'codex-failure');
+  const denied = await f.command(['accept', run.id, 'codex-failure'], { code: 1 });
+  assert.match(denied.stderr, /pytest tests\/.*exited 1/);
 });

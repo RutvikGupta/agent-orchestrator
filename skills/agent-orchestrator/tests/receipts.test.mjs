@@ -142,7 +142,8 @@ test('each row lists its attempts newest first, and the dashboard rereads an att
   await f.finished(run, 'work');
   await f.command(['verify', run.id, 'work', '--', 'true']);
   await f.command(['verdict', run.id, 'work', 'clean', '--note', 'reads well']);
-  await f.command(['accept', run.id, 'work', '--note', 'gates pass']);
+  const accepted = await f.command(['accept', run.id, 'work', '--note', 'gates pass']);
+  assert.match(accepted.stderr, /WARNING:.*no passing checks/);
 
   const row = await rowOf(f, run, 'work');
   assert.deepEqual(row.attempts.map((a) => [a.n, a.reason, a.agent, a.state, a.error, a.outcome]), [
@@ -266,6 +267,7 @@ test('the panel shows each check with its saved evidence, and marks a pass witho
     { cmd: 'npm run lint', result: 'pass', evidence: { ran: false } },
     { cmd: 'npm run e2e', result: 'pass', evidence: { ran: true, exitCode: 1, atMs: 2 } },
     { cmd: 'npm run docs', result: 'fail', evidence: { ran: true, exitCode: 1, atMs: 3 } },
+    { cmd: 'manual inspection', result: 'pass', evidence: { ran: false, notCommand: true } },
     { cmd: 'npm run bench', result: 'not-run', note: 'too slow' },
   ];
   const view = context.reportView({ state: 'completed', report: { outcome: 'done', checks } });
@@ -275,11 +277,13 @@ test('the panel shows each check with its saved evidence, and marks a pass witho
     'pass · NOT FOUND in the log ⚠ npm run lint',
     'pass · exit 1 ⚠ npm run e2e',
     'fail · exit 1 npm run docs',
+    'pass · not a command ⚠ manual inspection',
     'not-run npm run bench — too slow',
   ]);
-  assert.deepEqual(lines.map((l) => l.attrs.class.includes('mismatch')), [false, true, true, false, false], 'only a pass without a successful run is a warning');
+  assert.deepEqual(lines.map((l) => l.attrs.class.includes('mismatch')), [false, true, true, false, true, false], 'only a pass without a successful run is a warning');
   assert.match(lines[1].attrs.title, /no matching run is in the log/);
   assert.match(lines[2].attrs.title, /last run exited 1/);
+  assert.doesNotMatch(textOf(lines[4]), /NOT FOUND/);
   assert.match(textOf(view), /evidence is worked out by `orch\.mjs result`/, 'a check without saved evidence gets the note');
   // No note when every check has evidence, while the task runs, or for a native sub-agent.
   for (const t of [{ state: 'completed', report: { outcome: 'done', checks: checks.slice(0, 4) } },
