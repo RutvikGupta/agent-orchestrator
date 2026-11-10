@@ -51,6 +51,7 @@ export const GUARDED_COMMANDS = {
   send: { self: true, open: (a) => !a.steer },
   plan: { self: true, open: (a) => a.check },
   worktree: { self: true }, brief: { self: true }, verify: { self: true },
+  review: { self: true }, rework: { self: true },
   inbox: { open: (a) => !a.ack, ownTask: true },
   reply: { ownTask: true },
 };
