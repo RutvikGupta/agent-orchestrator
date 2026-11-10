@@ -55,7 +55,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   overwrite it without --force
   start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
-        [--max-parallel N] [--force] [--babysit --pr N] [-- RELAY_ARGS...]
+        [--max-parallel N] [--force] [--unplanned] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
                                   Tasks run outside the agents' sandboxes by default, with full
                                   network and user access, and a write task may commit, push
@@ -76,8 +76,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   implies complex, so it needs none. "agents" lists each tier's model.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
+                                  In a run with a plan, start refuses a task whose prerequisites are
+                                  not integrated yet, or that shares an owned path or resource with
+                                  a running task: --force bypasses those checks. A task the plan
+                                  does not name needs --unplanned, which --force does not imply
   start RUN TASK --agent command --why TEXT [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
-        [--max-parallel N] [--force] -- COMMAND [ARG...]
+        [--max-parallel N] [--force] [--unplanned] -- COMMAND [ARG...]
                                   Run a command as a task, with no model: for a script that starts
                                   its own agents, or any long command whose output you only check.
                                   The words after "--" run as an argument vector, with no shell (put
@@ -91,7 +95,13 @@ Usage: node orch.mjs <command> [args] [--json]
                                   for an agent; accept takes it as a read-only task
   status RUN                     Every task: state, steps, current activity, tokens; also
                                   the sub-agents that the launching session started with its
-                                  host's own tool (Claude Code's Agent tool, Codex's spawn_agent)
+                                  host's own tool (Claude Code's Agent tool, Codex's spawn_agent).
+                                  With a plan, also each planned task, started or not: waiting
+                                  (and on which tasks), ready, running, awaiting-review, accepted
+                                  or integrated; recorded tasks outside the plan; and a warning
+                                  for each task whose branch was already merged by hand
+                                  (record it with integrate --already-merged). --json adds
+                                  plannedTasks, unplannedTasks and manualMerges
   watch [RUN|--all] [--interval S] [--once]
                                   Live tree of runs → launched sessions, refreshed every S seconds
   dashboard [--detach] [--open [--new-tab]] [--port N] [--idle-exit DUR] [--stop]
@@ -122,12 +132,18 @@ Usage: node orch.mjs <command> [args] [--json]
                                   shared by tasks that can run at once) and record it as plan.json.
                                   --check only validates. A new plan replaces the old one; started
                                   tasks keep their records, and a running task cannot be dropped
-  dispatch RUN [--max N] [--dry-run]
+  dispatch RUN [--max N] [--dry-run] [--follow]
                                   Start, in plan order and up to the free slots (and N), every
                                   planned task whose prerequisites are integrated: a write task in a
-                                  new worktree (from the base commit, or the base branch's head
-                                  once it has prerequisites), a read-only one in the run's repo.
-                                  Lists the tasks still blocked. --dry-run starts nothing
+                                  new worktree (from the base commit, or, once it has prerequisites,
+                                  from the head of the branch they were integrated into, which
+                                  integrate records; it must contain every prerequisite's merge),
+                                  a read-only one in the run's repo.
+                                  Lists the tasks still blocked. --dry-run starts nothing.
+                                  --follow stays after that first wave: it waits for the running
+                                  tasks and starts each next wave as its prerequisites land, until
+                                  the whole plan is complete or a task needs you (ready for review,
+                                  to accept or integrate, a decision handed back, or a failure)
   verify RUN TASK [--timeout DUR] -- COMMAND...
                                   Rerun a gate in a finished task's working directory (default
                                   timeout 30m) and record it in the task's verifications.jsonl,
@@ -144,11 +160,13 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --note records why; notes when no clean verdict is recorded
   resolve RUN TASK --note TEXT    Mark a handed-back decision as handled, when you answered it
                                   without resuming the agent
-  integrate RUN TASK [--into BRANCH] [--dry-run]
+  integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged]
                                   Merge an accepted task's branch into the run's base branch (or
                                   BRANCH), which must be checked out and clean in the run's repo.
                                   Checks for conflicts first and changes nothing if there are any.
-                                  --dry-run only runs the check
+                                  --dry-run only runs the check. --already-merged records an
+                                  accepted task whose branch was merged earlier (by hand, say) as
+                                  integrated, without merging again; status warns about such tasks
   recover [RUN] [--all]           Read-only summary of the runs this session launched (--all: every
                                   run active in the last 24h): tasks by phase, blocked tasks, dirty
                                   worktrees, dead processes, and the next command for each
@@ -220,7 +238,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
+  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "unplanned", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
@@ -245,12 +263,12 @@ const specs = {
   tell: { value: ["file"] },
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check", "adopt"] },
-  dispatch: { value: ["max"], bool: ["dry-run", "adopt"] },
+  dispatch: { value: ["max"], bool: ["dry-run", "follow", "adopt"] },
   accept: { value: ["commit", "note"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
-  integrate: { value: ["into"], bool: ["dry-run", "adopt"] },
+  integrate: { value: ["into"], bool: ["dry-run", "already-merged", "adopt"] },
   recover: { bool: ["all"] },
 };
 const handlers = {

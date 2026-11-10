@@ -9,7 +9,8 @@ import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
 import { claimParked, keptEnd, reviveParked } from "../park.mjs";
-import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
+import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
+import { readPlan, runningConflicts } from "../plan.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
@@ -125,6 +126,37 @@ export function startTask(args, extra = {}) {
   }
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
+  const plan = readPlan(run.dir);
+  const entry = plan?.tasks.find((task) => task.id === id);
+  const previous = loadTask(run, id);
+  const rows = listTasks(run);
+  if (plan) {
+    if (!entry && !args.unplanned && !previous?.unplanned) {
+      refuse(`task ${id} is not in the plan; add it with plan, or pass --unplanned to record the exception`);
+    }
+    const reservation = entry || { id, owns: args["read-only"] ? [] : ["."], readOnly: Boolean(args["read-only"]) };
+    const phases = phaseMap(run, rows, plan);
+    const waiting = (entry?.dependsOn || []).filter((dep) => phases.get(dep) !== "integrated");
+    const held = rows.filter((row) => row.id !== id && row.state === "running").map((row) => {
+      const record = loadTask(run, row.id);
+      const current = plan.tasks.find((task) => task.id === row.id);
+      const original = record?.plan || current || { id: row.id, owns: record?.readOnly ? [] : ["."] };
+      return { ...original, readOnly: Boolean(record?.readOnly),
+        owns: [...new Set([...(original.owns || []), ...(current?.owns || [])])],
+        resources: [...new Set([...(original.resources || []), ...(current?.resources || [])])] };
+    });
+    const conflicts = runningConflicts(reservation, held);
+    if (!args.force && (waiting.length || conflicts.length)) {
+      const reasons = [
+        waiting.length ? `waits on ${waiting.join(", ")} (not integrated)` : null,
+        ...conflicts.map((c) => `conflicts with running task ${c.b}: ${[...c.paths, ...c.resources].join(", ")}`),
+      ].filter(Boolean);
+      refuse(`cannot start ${id}: ${reasons.join("; ")}; --force overrides the plan checks`);
+    }
+    extra = { ...extra, ...(entry ? { plan: entry } : { unplanned: true, unplannedAt: previous?.unplannedAt || new Date().toISOString() }) };
+  } else if (!previous?.attempt && rows.filter((row) => row.attempt).length === 2) {
+    process.stderr.write(`note: this run is reaching its third task without a plan; use node ${CLI_PATH} plan ${run.id} FILE to coordinate dependencies and owned paths\n`);
+  }
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
   if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);

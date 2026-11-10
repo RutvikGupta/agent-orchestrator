@@ -1,8 +1,9 @@
 // The run's plan (<run-dir>/plan.json): its validation, the parallel conflicts between its tasks,
-// and which planned tasks are ready to start. Plain file reads only, and no import of runs.mjs:
+// and which planned tasks are ready to start. File and git reads only, with no import of runs.mjs:
 // lifecycle.mjs uses this module, and runs.mjs imports lifecycle.mjs.
 
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { AGENTS, TASK_ID } from "./config.mjs";
 import { CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
@@ -238,4 +239,31 @@ export function planProgress(plan, phases, runDir = null) {
 
 export function waitsOnText(waitsOn) {
   return waitsOn.map((w) => `${w.id} (${w.phase})`).join(", ");
+}
+
+// Runtime conflicts include dependency-ordered pairs too: a forced start may still be running
+// when its dependent is requested. Keep the running task's original reservation after replanning.
+export function runningConflicts(entry, running) {
+  return running.flatMap((held) => findConflicts([
+    { ...entry, dependsOn: [] }, { ...held, dependsOn: [] },
+  ]).map((conflict) => ({ ...conflict, running: [held.id] })));
+}
+
+// A hand merge is evidence to reconcile, not an integration receipt. An unchanged branch at its
+// starting commit is not work merged by hand. Git reads only; this also works after worktree removal.
+export function manualMerge(run, task) {
+  if (!run.isGit || !run.baseBranch || !task || task.readOnly) return null;
+  const branch = task.worktree?.branch || `orch/${run.id}/${task.id}`;
+  const into = run.baseBranch;
+  const query = (...args) => spawnSync("git", ["-C", run.repo, ...args], { encoding: "utf8" });
+  const ref = query("rev-parse", "--verify", "--quiet", `refs/heads/${branch}`);
+  if (ref.status !== 0) return null;
+  const commit = ref.stdout.trim();
+  // A later attempt can add commits after an earlier integration receipt. Only that receipt
+  // containing the current tip proves this branch has already been recorded.
+  if (task.integratedAt && task.integratedCommit && query("merge-base", "--is-ancestor", commit, task.integratedCommit).status === 0) return null;
+  const from = task.worktree?.from || run.baseCommit;
+  if (!from || query("merge-base", "--is-ancestor", commit, from).status === 0) return null;
+  if (query("merge-base", "--is-ancestor", commit, `refs/heads/${into}`).status !== 0) return null;
+  return { branch, into, commit };
 }
