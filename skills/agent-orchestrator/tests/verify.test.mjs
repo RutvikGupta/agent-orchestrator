@@ -287,7 +287,7 @@ test('a check matches across whitespace outside quotes only', async (t) => {
   assert.deepEqual(row.report.checks.map((c) => c.evidence.ran), [false, true]);
 });
 
-test('a leading cd matches the bare command only when it enters the task directory', async (t) => {
+test('a literal leading cd matches the bare command from its execution directory', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   const link = path.join(f.root, 'repo-link');
@@ -304,7 +304,7 @@ test('a leading cd matches the bare command only when it enters the task directo
   const row = await resultRow(f, run, 'dirs');
   assert.deepEqual(
     Object.fromEntries(row.report.checks.map((c) => [c.cmd, c.evidence.ran])),
-    { 'npm run a': true, 'npm run b': true, 'npm run c': true, 'npm run d': true, 'npm run e': true, 'npm run f': false, 'npm run g': false, 'npm run h': false },
+    { 'npm run a': true, 'npm run b': true, 'npm run c': true, 'npm run d': true, 'npm run e': true, 'npm run f': true, 'npm run g': true, 'npm run h': false },
   );
 });
 

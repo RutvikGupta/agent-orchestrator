@@ -138,9 +138,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reviews.jsonl, with the verifications since the last round.
                                   changes: the next attempt is a rework; reject: close the task
                                   as rejected
-  accept RUN TASK [--commit SHA] [--note TEXT]
+  accept RUN TASK [--commit SHA] [--note TEXT] [--unverified REASON]
                                   After reviewing a completed task and committing its work, record
                                   it as accepted (its checkout must be clean); SHA defaults to HEAD.
+                                  Write tasks with reports require a matched passing check and no
+                                  matched failed runs; other evidence issues warn. --unverified
+                                  records why the result is accepted anyway.
                                   --note records why; notes when no clean verdict is recorded
   resolve RUN TASK --note TEXT    Mark a handed-back decision as handled, when you answered it
                                   without resuming the agent
@@ -246,7 +249,7 @@ const specs = {
   lesson: { value: ["repo", "evidence"], bool: ["list"] },
   plan: { bool: ["check", "adopt"] },
   dispatch: { value: ["max"], bool: ["dry-run", "adopt"] },
-  accept: { value: ["commit", "note"], bool: ["adopt"] },
+  accept: { value: ["commit", "note", "unverified"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
