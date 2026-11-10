@@ -54,7 +54,7 @@ reviews, and research.
   follow their own rule.
 
 **Delegate well.** These rules hold at every level, for the user's session and for a delegated
-agent alike:
+agent alike, except the last two, which are for a delegated agent only:
 
 - **Delegate work, never waiting.** A command or script whose output you only need to check runs as
   a command task, with no model: `$ORCH start <run> <task> --agent command --why "..." -- <argv>`.
@@ -66,16 +66,18 @@ agent alike:
 - **Size each piece, not the whole.** Give each piece the lightest tier that does it as well as the
   top one ("Choose the agent and model"): a delegated agent's test runs and lookups go to `light`
   even when the agent itself runs `complex`.
-- **Delegate pieces, never your whole task.** Delegate parts of your task as they need it:
-  independent parts, slow side work, test runs and lookups. The task itself stays yours: never
-  pass all of it, or its hard core, to an agent of any tier and wait for that agent's answer.
-- **Never hand your task to a stronger model.** You were given your task at a tier chosen for it.
-  Never pass its work to a stronger model, directly or through a script. When it needs one, say so
-  with `$ORCH ask` (or end with `NEEDS DECISION:`), so the agent that started you re-runs it on the
-  right tier. `start` refuses a tier stronger than your own task's, on either agent, by each tier's
-  `rank` in `policy.json`; a babysitter, whose tier is fixed, is exempt.
 - **Split only independent parts,** and give each agent everything its piece needs in its brief:
   goal, done criteria, scope, the constraints of your own brief, and its gates.
+- **A delegated agent delegates pieces, never its whole task.** Delegate parts of your task as
+  they need it: independent parts, slow side work, test runs and lookups. The task itself stays
+  yours: never pass all of it, or its hard core, to an agent of any tier and wait for its answer.
+  A main session, which no task started, hands whole tasks to agents: that is how it delegates.
+- **A delegated agent never hands its task to a stronger model.** You were given your task at a
+  tier chosen for it. Never pass its work to a stronger model, directly or through a script. When
+  it needs one, say so with `$ORCH ask` (or end with `NEEDS DECISION:`), so the agent that started
+  you re-runs it on the right tier. `start` refuses a tier stronger than your own task's, on either
+  agent, by each tier's `rank` in `policy.json`; a babysitter, whose tier is fixed, is exempt. A
+  main session starts any tier.
 
 ## Setup (once per session)
 
