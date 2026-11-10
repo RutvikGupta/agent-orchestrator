@@ -10,7 +10,7 @@ function patch(f, run, id, fields) {
 }
 async function worktree(f, run, id, fields = {}) {
   const wt = await f.json(['worktree', run.id, id, '--no-prep']);
-  patch(f, run, id, fields);
+  patch(f, run, id, { ...(fields.closedAt ? { closedExplicitlyAttempt: 0 } : {}), ...fields });
   return wt;
 }
 async function commit(f, wt, name = 'change.txt') {
@@ -22,7 +22,7 @@ async function commit(f, wt, name = 'change.txt') {
 function finished(f, run, id, days, fields = {}) {
   const outDir = path.join(run.dir, 'tasks', id, 'attempt-1');
   writeJson(path.join(outDir, 'result.json'), { status: 'completed', finishedAt: daysAgo(days), finalMessage: 'Finished fixture.' });
-  patch(f, run, id, { pid: 99999999, attempt: 1, agent: 'claude', outDir, startedAt: daysAgo(days + 1), ...fields });
+  patch(f, run, id, { pid: 99999999, attempt: 1, agent: 'claude', outDir, startedAt: daysAgo(days + 1), ...(fields.closedAt ? { closedExplicitlyAttempt: 1 } : {}), ...fields });
 }
 function snapshot(root) {
   const out = {};
@@ -51,7 +51,7 @@ test('gc removes clean closed folders, preserves branches and unmerged commits, 
   const report = await f.json(['gc', '--older-than', '0s']);
   assert.equal(report.totals.removed, 2);
   assert.ok(report.totals.bytesFreed > 0);
-  assert.deepEqual(report.totals.keptByReason, { 'uncommitted changes': 1, 'task is not closed or accepted and integrated': 1, 'commits are not reachable from a retained branch': 1 });
+  assert.deepEqual(report.totals.keptByReason, { 'uncommitted changes': 1, 'task is not explicitly closed or accepted and integrated': 1, 'commits are not reachable from a retained branch': 1 });
   for (const wt of [merged, unmerged]) assert.equal(fs.existsSync(wt.path), false);
   for (const wt of [dirty, open, detached]) assert.equal(fs.existsSync(wt.path), true);
   assert.equal(await f.git(['rev-parse', unmerged.branch]), tip);
@@ -182,4 +182,166 @@ test('cleanup retains custom branch metadata so accepted work can still be integ
   assert.ok(report.integratedCommit);
   assert.equal(await f.git(['rev-parse', wt.branch]), tip);
   await f.git(['merge-base', '--is-ancestor', tip, 'main']);
+});
+
+test('regression: result collection preserves a write worktree until explicit close or integration', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'unreviewed');
+  finished(f, run, 'unreviewed', 1);
+  await worktree(f, run, 'other');
+  await f.command(['result', run.id, 'unreviewed']);
+  await f.command(['close', run.id, 'other']);
+  assert.equal(fs.existsSync(wt.path), true);
+  assert.match((await f.command(['cleanup', run.id])).stdout, /not explicitly closed/);
+  const closed = await f.json(['close', run.id, 'unreviewed']);
+  assert.equal(closed.cleanup.removed.length, 1);
+  assert.equal(readJson(f.taskFile(run, 'unreviewed')).closedExplicitlyAttempt, 1);
+  assert.equal(fs.existsSync(wt.path), false);
+});
+
+test('regression: explicit closure applies only to its attempt and reject also permits cleanup', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'resumed');
+  finished(f, run, 'resumed', 1, { attempt: 2, closedAt: daysAgo(1), closedBy: 'user (terminal)', closedExplicitlyAttempt: 1 });
+  assert.equal((await f.json(['gc', '--older-than', '0s'])).totals.removed, 0);
+  await f.command(['verdict', run.id, 'resumed', 'reject', '--note', 'This result is no longer needed']);
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 1);
+  assert.equal(fs.existsSync(wt.path), false);
+});
+
+test('regression: integrate preserves a worktree used by a running reviewer in a subdirectory', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'impl');
+  const tip = await commit(f, wt);
+  finished(f, run, 'impl', 1, { acceptedAt: daysAgo(1), acceptedAttempt: 1, acceptedCommit: tip });
+  const subdir = path.join(wt.path, 'nested');
+  fs.mkdirSync(subdir);
+  const reviewer = await f.start(run, 'reviewer', { config: { hold: true }, flags: ['--read-only', '--cd', subdir] });
+  await f.ready(reviewer);
+  const report = await f.json(['integrate', run.id, 'impl']);
+  assert.equal(report.cleanup.removed.length, 0);
+  assert.equal(report.cleanup.kept[0].reason, 'worktree is used by a running or parked task');
+  assert.equal(fs.existsSync(wt.path), true);
+  f.release(reviewer);
+  await f.finished(run, 'reviewer');
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 1);
+});
+
+for (const parked of [false, true]) test(`regression: gc preserves a worktree used by another run's ${parked ? 'parked' : 'running'} task`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'impl', { closedAt: daysAgo(3) });
+  const other = await f.newRun('review');
+  let reader;
+  if (parked) {
+    const outDir = path.join(other.dir, 'tasks', 'reader', 'attempt-1');
+    writeJson(f.taskFile(other, 'reader'), { id: 'reader', cd: wt.path, outDir, pid: 99999999, attempt: 1, babysit: true, startedAt: daysAgo(2) });
+    writeJson(path.join(outDir, 'result.json'), { status: 'completed', finishedAt: daysAgo(1), finalMessage: 'PARKED: waiting for feedback' });
+  } else {
+    reader = await f.start(other, 'reader', { config: { hold: true }, flags: ['--read-only', '--cd', wt.path] });
+    await f.ready(reader);
+  }
+  const report = await f.json(['gc', '--older-than', '0s']);
+  const kept = report.runs.find((r) => r.run === run.id);
+  assert.equal(kept.removed.length, 0);
+  assert.equal(kept.kept[0].reason, 'worktree is used by a running or parked task');
+  assert.equal(fs.existsSync(wt.path), true);
+  if (reader) { f.release(reader); await f.finished(other, 'reader'); }
+  else patch(f, other, 'reader', { closedAt: new Date().toISOString() });
+});
+
+test('regression: an unidentified caller cannot collect or expire another session runs', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await worktree(f, run, 'old');
+  finished(f, run, 'old', 9);
+  f.launchingSession(run, 'owner-session');
+  const before = snapshot(f.state);
+  const env = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: 'missing-parent', AGENT_ORCH_TASK: 'missing-task' };
+  for (const flags of [[], ['--dry-run']]) {
+    const report = await f.json(['gc', '--older-than', '0s', ...flags], { env });
+    assert.equal(report.runs[0].reason, 'ownership refused');
+    assert.equal(report.totals.expired, 0);
+    assert.equal(report.totals.removed, 0);
+  }
+  assert.deepEqual(snapshot(f.state), before);
+  const file = path.join(run.dir, 'run.json');
+  writeJson(file, { ...readJson(file), orchestrator: { agent: 'delegated-agent', parentRun: 'missing-parent', parentTask: 'missing-task' } });
+  const matchedBefore = snapshot(f.state);
+  const matched = await f.json(['gc', '--older-than', '0s'], { env });
+  assert.equal(matched.runs[0].reason, 'ownership refused', 'an invalid identity cannot own a run by matching stale records');
+  assert.deepEqual(snapshot(f.state), matchedBefore);
+});
+
+test('regression: missing folders are pruned individually and recorded without deleting their branch', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'missing', { closedAt: daysAgo(3) });
+  const tip = await commit(f, wt);
+  const other = await f.newRun('unowned');
+  const otherWt = await worktree(f, other, 'also-missing');
+  fs.rmSync(wt.path, { recursive: true });
+  fs.rmSync(otherWt.path, { recursive: true });
+  const before = snapshot(f.state), gitBefore = snapshot(path.join(f.repo, '.git'));
+  const dry = await f.json(['gc', '--older-than', '0s', '--dry-run']);
+  assert.ok(dry.runs.find((r) => r.run === run.id).removed[0].missing);
+  assert.deepEqual(snapshot(f.state), before);
+  assert.deepEqual(snapshot(path.join(f.repo, '.git')), gitBefore);
+  const cleaned = await f.json(['cleanup', run.id]);
+  assert.equal(cleaned.removed[0].missing, true);
+  assert.equal(cleaned.bytesFreed, 0);
+  assert.equal(readJson(f.taskFile(run, 'missing')).worktree, undefined);
+  assert.equal(await f.git(['rev-parse', wt.branch]), tip);
+  const registered = await f.git(['worktree', 'list', '--porcelain']);
+  assert.ok(!registered.includes(wt.path));
+  assert.ok(registered.includes(otherWt.path), 'another run registration must remain');
+});
+
+test('regression: cache-only worktrees are removable but ordinary untracked work stays', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'caches', { closedAt: daysAgo(3) });
+  for (const name of ['.DS_Store', '__pycache__/a.pyc', 'node_modules/pkg/index.js']) {
+    fs.mkdirSync(path.dirname(path.join(wt.path, name)), { recursive: true });
+    fs.writeFileSync(path.join(wt.path, name), 'cache');
+  }
+  fs.writeFileSync(path.join(wt.path, 'keep.txt'), 'work');
+  assert.equal((await f.json(['cleanup', run.id])).kept[0].reason, 'uncommitted changes');
+  fs.unlinkSync(path.join(wt.path, 'keep.txt'));
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 1);
+});
+
+test('regression: teardown failures are reported without retaining a safe worktree', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'teardown', { closedAt: daysAgo(3) });
+  const task = readJson(f.taskFile(run, 'teardown'));
+  patch(f, run, 'teardown', { worktree: { ...task.worktree, prep: { teardown: ['echo failed; exit 7'] } } });
+  const report = await f.json(['cleanup', run.id]);
+  assert.equal(report.removed.length, 1);
+  assert.equal(report.removed[0].teardownFailures[0].exitCode, 7);
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.ok(await f.git(['branch', '--list', wt.branch]));
+});
+
+test('regression: dead relays expire by the newest file in their latest attempt only', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  for (const [id, age] of [['expired', 8], ['recent', 6]]) {
+    await worktree(f, run, id);
+    const outDir = path.join(run.dir, 'tasks', id, 'attempt-2');
+    const files = [['events.jsonl', 9], ['relay.log', age], ['nested/progress', age]];
+    for (const [name, days] of files) {
+      const file = path.join(outDir, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '');
+      fs.utimesSync(file, new Date(daysAgo(days)), new Date(daysAgo(days)));
+    }
+    const earlier = path.join(run.dir, 'tasks', id, 'attempt-1', 'relay.log');
+    fs.mkdirSync(path.dirname(earlier), { recursive: true });
+    fs.writeFileSync(earlier, 'A recent read of an old attempt must not reset expiry.');
+    patch(f, run, id, { pid: 99999999, attempt: 2, outDir, startedAt: daysAgo(10) });
+  }
+  const before = snapshot(f.state);
+  const preview = await f.json(['gc', '--older-than', '0s', '--dry-run']);
+  assert.deepEqual(preview.runs[0].expired, ['expired']);
+  assert.deepEqual(snapshot(f.state), before);
+  const report = await f.json(['gc', '--older-than', '0s']);
+  assert.deepEqual(report.runs[0].expired, ['expired']);
+  assert.equal(readJson(f.taskFile(run, 'expired')).closedBy, 'expired');
+  assert.equal(readJson(f.taskFile(run, 'recent')).closedAt, undefined);
 });

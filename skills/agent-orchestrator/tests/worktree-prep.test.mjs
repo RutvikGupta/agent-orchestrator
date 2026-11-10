@@ -22,7 +22,7 @@ async function configuration(f, includes = '', ignores = '.env*\ncache/\nnode_mo
 }
 function closed(f, run, id) {
   const file = f.taskFile(run, id);
-  writeJson(file, { ...readJson(file), closedAt: new Date().toISOString() });
+  writeJson(file, { ...readJson(file), closedAt: new Date().toISOString(), closedExplicitlyAttempt: 0 });
 }
 function recipes(f, value, name = 'recipe.json') {
   const dir = path.join(f.root, 'recipes');
@@ -76,9 +76,9 @@ test('absolute recipe beats basename; symlinks, commands, environment and teardo
   fs.unlinkSync(path.join(wt.path, '.env.after'));
   fs.rmSync(env.AGENT_ORCH_RECIPES_DIR, { recursive: true });
   const cleaned = await f.command(['cleanup', run.id]);
-  assert.match(cleaned.stdout, /skip recipe: teardown failed/);
+  assert.match(cleaned.stdout, /teardown recipe failed \(9\)/);
   assert.equal(fs.readFileSync(path.join(f.repo, 'teardown.local'), 'utf8'), expected);
-  assert.equal(fs.existsSync(wt.path), true);
+  assert.equal(fs.existsSync(wt.path), false);
   assert.ok(fs.existsSync(path.join(f.repo, 'node_modules/pkg/index.js')));
 });
 
@@ -229,7 +229,7 @@ test('macOS clone-copy failure falls back to a normal copy', { skip: process.pla
 
 test('cleanup removes gate caches and ignored build output without force', async (t) => {
   const f = await fixture(t);
-  await configuration(f, '', 'build/\n.venv/\n__pycache__/\n.pytest_cache/\nnode_modules/\n');
+  await configuration(f, '', 'build/\n.venv/\n');
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'gates']);
   closed(f, run, 'gates');

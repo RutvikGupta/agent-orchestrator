@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { reclaimTask } from './reclaim.mjs';
+import { CACHE_PATH } from './config.mjs';
+import { reclaimTask, runningDirectories } from './reclaim.mjs';
 import { acceptedNow } from './lifecycle.mjs';
 import { guard, recordChange } from './ownership.mjs';
 import { isParked, loadTask, relayAlive, saveTask } from './runs.mjs';
@@ -27,37 +28,74 @@ export function gcTasks(run) {
     const running = relayAlive(task.pid, task.startedAt) || isParked(run, task);
     const result = task.outDir ? readJson(path.join(task.outDir, 'result.json')) : null;
     const evidence = task.outDir ? readJson(path.join(task.outDir, 'evidence.json')) : null;
-    let eventTime = 0;
-    try { eventTime = fs.statSync(path.join(task.outDir, 'events.jsonl')).mtimeMs; } catch {}
+    const eventTime = latestAttemptActivity(task.outDir);
     return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? 'prepared' : result?.status || 'aborted', result,
       lastActiveMs: Math.max(eventTime, Date.parse(result?.finishedAt || '') || 0),
       readAt: evidence && evidence.attempt === task.attempt ? evidence.readAt : null }];
   });
 }
 
+// Read file times without following links into other attempts or checkouts.
+function latestAttemptActivity(dir) {
+  if (!dir) return 0;
+  let newest = 0;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) newest = Math.max(newest, latestAttemptActivity(file));
+      else newest = Math.max(newest, fs.lstatSync(file).mtimeMs);
+    }
+  } catch {}
+  return newest;
+}
+
+function registration(run, wt) {
+  const listing = value(run.repo, ['worktree', 'list', '--porcelain', '-z']);
+  if (listing === null) return { error: 'cannot list registered worktrees' };
+  const matches = (dir) => samePath(dir, wt) || path.resolve(dir) === path.resolve(wt);
+  const record = listing.split('\0\0').find((part) => part.split('\0').some((line) => line.startsWith('worktree ') && matches(line.slice(9))));
+  return { registered: Boolean(record), head: record?.split('\0').find((line) => line.startsWith('HEAD '))?.slice(5) };
+}
+
 export function worktreeSafety(run, task) {
   const wt = task.worktree?.path;
-  if (!wt || !fs.existsSync(wt)) return 'worktree missing';
+  if (!wt) return 'worktree path missing';
   if (isParked(run, task) || relayAlive(task.pid, task.startedAt)) return 'task still running';
-  if (!task.closedAt && !(acceptedNow(task) && task.integratedAt)) return 'task is not closed or accepted and integrated';
-  if (samePath(wt, run.repo)) return 'worktree is the repository checkout';
-  const top = value(wt, ['rev-parse', '--show-toplevel']);
-  const common = value(wt, ['rev-parse', '--git-common-dir']);
-  const repoCommon = value(run.repo, ['rev-parse', '--git-common-dir']);
-  const registered = value(run.repo, ['worktree', 'list', '--porcelain', '-z']);
-  if (!top || !samePath(top, wt) || !common || !repoCommon ||
-      !samePath(path.resolve(wt, common), path.resolve(run.repo, repoCommon)) ||
-      !registered?.split('\0').some((line) => line.startsWith('worktree ') && samePath(line.slice(9), wt))) {
-    return 'worktree is not registered in the run repository';
+  try {
+    const root = fs.existsSync(wt) ? fs.realpathSync(wt) : path.resolve(wt);
+    if (runningDirectories().some((dir) => dir === root || dir.startsWith(root + path.sep))) return 'worktree is used by a running or parked task';
+  } catch { return 'cannot check running task directories'; }
+  if (samePath(wt, run.repo) || path.resolve(wt) === path.resolve(run.repo)) return 'worktree is the repository checkout';
+  const registered = registration(run, wt);
+  if (registered.error) return registered.error;
+  const exists = fs.existsSync(wt);
+  if (exists) {
+    const explicitlyClosed = task.closedAt && (task.readOnly || task.closedExplicitlyAttempt === (task.attempt || 0));
+    if (!explicitlyClosed && !(acceptedNow(task) && task.integratedAt)) return 'task is not explicitly closed or accepted and integrated';
+    const top = value(wt, ['rev-parse', '--show-toplevel']);
+    const common = value(wt, ['rev-parse', '--git-common-dir']);
+    const repoCommon = value(run.repo, ['rev-parse', '--git-common-dir']);
+    if (!top || !samePath(top, wt) || !common || !repoCommon ||
+        !samePath(path.resolve(wt, common), path.resolve(run.repo, repoCommon)) || !registered.registered) {
+      return 'worktree is not registered in the run repository';
+    }
+    const status = git(wt, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']);
+    if (status.status !== 0) return 'git status failed';
+    const records = status.stdout.split('\0').filter(Boolean);
+    for (let i = 0; i < records.length; i++) {
+      const entry = records[i];
+      const paths = [entry.slice(3)];
+      if (/[RC]/.test(entry.slice(0, 2))) paths.push(records[++i] || '');
+      if (paths.some((file) => !CACHE_PATH.test(file))) return 'uncommitted changes';
+    }
   }
-  const status = git(wt, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']);
-  if (status.status !== 0) return 'git status failed';
-  if (status.stdout) return 'uncommitted changes';
-  const head = value(wt, ['rev-parse', '--verify', 'HEAD']);
+  // A missing folder may still have a detached HEAD in git's worktree registration.
+  // Prune that registration only after verifying that its commits have a durable ref.
+  const head = exists ? value(wt, ['rev-parse', '--verify', 'HEAD']) : registered.head;
   const refs = [task.worktree.branch, run.baseBranch].filter(Boolean)
     .map((branch) => value(run.repo, ['rev-parse', '--verify', `refs/heads/${branch}`])).filter(Boolean);
   const retained = (commit) => refs.some((ref) => git(run.repo, ['merge-base', '--is-ancestor', commit, ref]).status === 0);
-  if (!head || !retained(head) || (task.acceptedCommit && !retained(task.acceptedCommit))) return 'commits are not reachable from a retained branch';
+  if ((exists && !head) || (head && !retained(head)) || (task.acceptedCommit && !retained(task.acceptedCommit))) return 'commits are not reachable from a retained branch';
   return null;
 }
 
@@ -74,14 +112,16 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
-    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: 'expired' } : task);
+    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: 'expired', closedExplicitlyAttempt: task.attempt || 0 } : task);
     if (reason) { report.kept.push({ ...entry, reason }); continue; }
     let g;
     if (!dryRun) {
       g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id] });
-      reclaimTask(run, task);
-      const teardown = await teardownWorktree(run, task);
-      if (teardown.some((r) => r.exitCode !== 0)) { report.kept.push({ ...entry, reason: 'teardown failed' }); continue; }
+      if (fs.existsSync(entry.path)) {
+        reclaimTask(run, task);
+        const teardown = await teardownWorktree(run, task);
+        entry.teardownFailures = teardown.filter((r) => r.exitCode !== 0);
+      }
       // Teardown can modify tracked files, and another command may have reopened the task.
       task = loadTask(run, id);
       reason = task?.worktree ? worktreeSafety(run, task) : 'task worktree changed';
@@ -89,10 +129,12 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
         report.kept.push({ ...entry, reason: reason || 'task worktree changed' }); continue;
       }
     }
-    const bytes = diskBytes(entry.path);
+    const missing = !fs.existsSync(entry.path);
+    const bytes = missing ? 0 : diskBytes(entry.path);
     if (!dryRun) {
-      // --force permits ignored build output only; status above rejects all other changes.
-      const removed = git(run.repo, ['worktree', 'remove', '--force', entry.path]);
+      // Remove this registration only; a repository-wide prune could affect another run.
+      // --force permits ignored output and the same cache paths acceptance ignores.
+      const removed = missing && !registration(run, entry.path).registered ? { status: 0 } : git(run.repo, ['worktree', 'remove', '--force', entry.path]);
       if (removed.status !== 0) { report.kept.push({ ...entry, reason: 'git worktree remove failed', detail: removed.stderr.trim() }); continue; }
       task.removedWorktree = { ...task.worktree, removedAt: new Date().toISOString() };
       delete task.worktree;
@@ -100,14 +142,15 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       saveTask(run, task);
       recordChange(run, g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
     }
-    report.removed.push({ ...entry, bytes, dryRun });
+    report.removed.push({ ...entry, bytes, dryRun, missing });
     report.bytesFreed += bytes || 0;
   }
   return report;
 }
 
 export function collectionText(report, dryRun = false) {
-  return [...report.removed.map((r) => `${dryRun ? 'would remove' : 'removed'} worktree ${r.path} (branch kept: ${r.branch || '(none)'})`),
+  return [...[...report.removed, ...report.kept].flatMap((r) => (r.teardownFailures || []).map((f) => `teardown ${r.task} failed (${f.exitCode ?? f.signal}): ${f.command}\n${f.output}`)),
+    ...report.removed.map((r) => `${dryRun ? 'would remove' : 'removed'} worktree ${r.path} (branch kept: ${r.branch || '(none)'})`),
     ...report.kept.map((r) => `skip ${r.task}: ${r.reason} (${r.path})`),
     `${dryRun ? 'would free' : 'freed'} ${report.bytesFreed} bytes${report.removed.some((r) => r.bytes === null) ? ' (some sizes unavailable)' : ''}`].join('\n');
 }

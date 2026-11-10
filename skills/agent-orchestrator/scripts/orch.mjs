@@ -191,13 +191,16 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Stop any of these tasks that still run, and mark them closed.
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
-  cleanup RUN                    Remove only closed (or accepted and integrated), clean worktrees
-                                  whose commits remain on kept branches. Never deletes branches.
+  cleanup RUN                    Remove only explicitly closed (or accepted and integrated),
+                                  clean worktrees; gate caches are ignored as in accept.
+                                  Commits stay on kept branches; running or parked users protect
+                                  their worktrees across all runs. Never deletes branches.
   gc [--dry-run] [--older-than DUR] [--json]
                                   Collect owned runs with no running task and no activity for
                                   24h (override with --older-than, e.g. 7d). Dry runs change nothing.
                                   Unread, unaccepted finished tasks expire after AGENT_ORCH_EXPIRE
-                                  (default 7d). Reports removed/kept worktrees and disk bytes freed.
+                                  (default 7d); dead relays expire from their latest attempt activity.
+                                  Reports removed/kept worktrees, teardown failures and disk freed.
                                   close cleans after the last open task; integrate cleans its task.
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d)

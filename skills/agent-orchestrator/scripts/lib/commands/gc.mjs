@@ -1,7 +1,7 @@
 // Collect inactive runs owned by the caller, retaining every branch and unsafe worktree.
 import fs from 'node:fs';
 import path from 'node:path';
-import { guard, mayAct, ownershipOf, recordChange } from '../ownership.mjs';
+import { guard, ownershipOf, recordChange } from '../ownership.mjs';
 import { listRuns, loadTask, saveTask } from '../runs.mjs';
 import { die, emit, parseDuration } from '../util.mjs';
 import { collectWorktrees, collectionText, gcTasks } from '../worktree-gc.mjs';
@@ -34,7 +34,7 @@ export async function cmdGc(args) {
     const rows = gcTasks(run);
     const report = { run: run.id, removed: [], kept: [], expired: [], bytesFreed: 0 };
     // A dry run uses the same ownership decision, without invoking any mutating guard path.
-    const reason = !mayAct(own) ? 'ownership refused' : rows.some((r) => r.state === 'running' || r.phase === 'parked') ? 'run has running tasks' : now - activity(run, rows) < olderThan ? 'run is too recent' : null;
+    const reason = !(own.caller.kind === 'user' || (own.caller.kind !== 'unknown' && own.mine)) ? 'ownership refused' : rows.some((r) => r.state === 'running' || r.phase === 'parked') ? 'run has running tasks' : now - activity(run, rows) < olderThan ? 'run is too recent' : null;
     if (reason) {
       report.reason = reason;
       for (const row of rows) {
@@ -48,12 +48,12 @@ export async function cmdGc(args) {
     const expired = new Set();
     for (const row of rows) {
       const task = loadTask(run, row.id);
-      const finished = time(row.result?.finishedAt);
+      const finished = time(row.result?.finishedAt) || (row.state === 'aborted' ? row.lastActiveMs : 0);
       if (!finished || now - finished < expireAfter || task.closedAt || task.acceptedAt || task.resultReadAt || task.readAt || row.readAt || (task.decisionSeenAttempt != null && task.decisionSeenAttempt === row.attempt) || ['running', 'prepared'].includes(row.state)) continue;
       expired.add(row.id);
       report.expired.push(row.id);
       if (!dryRun) {
-        saveTask(run, { ...task, closedAt: new Date(now).toISOString(), closedBy: 'expired' });
+        saveTask(run, { ...task, closedAt: new Date(now).toISOString(), closedBy: 'expired', closedExplicitlyAttempt: task.attempt || 0 });
         recordChange(run, g, { task: row.id, attempt: task.attempt || null, action: 'expired' });
       }
     }

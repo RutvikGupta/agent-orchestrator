@@ -25,7 +25,9 @@ test('new records the repository and worktree prepares an isolated branch', asyn
   assert.equal(started.cd, wt.path);
   await f.finished(run, 'writer');
   await f.command(['result', run.id, 'writer']);
-  const cleaned = await f.command(['cleanup', run.id, '--delete-branches']);
+  await f.command(['cleanup', run.id, '--delete-branches']);
+  assert.equal(fs.existsSync(wt.path), true, 'reading a result is not explicit closure');
+  const cleaned = await f.command(['close', run.id, 'writer']);
   assert.match(cleaned.stdout, /removed worktree/);
   assert.match(cleaned.stdout, /branch kept/);
   assert.equal(fs.existsSync(wt.path), false);

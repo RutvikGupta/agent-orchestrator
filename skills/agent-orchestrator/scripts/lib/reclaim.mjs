@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { RUNS_DIR } from "./config.mjs";
+import { isParked } from "./runs.mjs";
 import { readJson } from "./util.mjs";
 
 const real = (dir) => { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } };
@@ -27,7 +28,7 @@ export function daemonDirectory(command) {
   return pants ? { kind: "pantsd", directory: real(pants[1]) } : null;
 }
 
-function workingDirectories(rows) {
+export function workingDirectories(rows) {
   const dirs = new Map();
   if (process.platform === "linux") {
     for (const row of rows) {
@@ -50,9 +51,10 @@ function workingDirectories(rows) {
   return dirs;
 }
 
-function runningDirectories(rows) {
+export function runningDirectories(rows = ps()) {
   const byPid = new Map(rows.map((r) => [r.pid, r]));
   const dirs = [];
+  const active = new Map();
   let runs;
   try { runs = fs.readdirSync(RUNS_DIR); } catch (e) { if (e.code === "ENOENT") return dirs; throw e; }
   for (const run of runs) {
@@ -61,13 +63,18 @@ function runningDirectories(rows) {
     try { ids = fs.readdirSync(tasks); } catch { continue; }
     for (const id of ids) {
       const task = readJson(path.join(tasks, id, "task.json"));
-      const proc = byPid.get(task?.pid);
-      if (!proc) continue;
+      if (!task) continue;
+      const proc = byPid.get(task.pid);
+      const parked = isParked({ dir: path.join(RUNS_DIR, run) }, task);
       const age = Date.now() - Date.parse(task.startedAt);
-      if (!proc.command.includes("relay.mjs") && !(age >= 0 && age < 10000)) continue;
+      const live = proc && (proc.command.includes("relay.mjs") || (age >= 0 && age < 10000));
+      if (!live && !parked) continue;
+      if (live) active.set(proc.pid, proc);
       for (const dir of [task.cd, task.worktree?.path].filter(Boolean)) dirs.push(real(dir));
     }
   }
+  // A running agent may have changed directory since its task record was written.
+  dirs.push(...workingDirectories([...active.values()]).values());
   return dirs;
 }
 

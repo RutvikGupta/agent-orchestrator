@@ -188,10 +188,10 @@ export async function cmdClose(args) {
   });
   const lines = [];
   for (const task of tasks) {
-    // A task that was closed already keeps who closed it: closing it again changes nothing.
-    lines.push(`${task.id}: ${closeTask(run, task, task.closedAt ? {} : { closedBy: g.actor })}`);
+    // Collecting a result is not an explicit close. Record the intent even if it was read.
+    lines.push(`${task.id}: ${closeTask(run, task, task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) ? {} : { closedBy: g.actor })}`);
     // The owner hears of a task that was open; one it had closed already changed nothing.
-    if (!task.closedAt) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
+    if (!task.closedAt || task.closedExplicitlyAttempt !== (task.attempt || 0)) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
   const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
   const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
@@ -202,6 +202,7 @@ export async function cmdClose(args) {
 // Close one task: stop it if it still runs, and record closedAt, plus `extra` fields (closedBy, the
 // actor; a `reject` verdict adds its own). Returns what happened, in words.
 export function closeTask(run, task, extra = {}) {
+  extra = { ...extra, closedExplicitlyAttempt: task.attempt || 0 };
   let note = "closed";
   const now = new Date().toISOString();
   // A parked babysitter has no relay. Mark it closed first, so that a resume that has not started
