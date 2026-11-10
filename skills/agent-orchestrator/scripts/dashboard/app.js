@@ -192,7 +192,7 @@ function redrawSection(id){const root=document.getElementById("runs"),run=state.
 // marked as a warning, as `result` warns. The dashboard only reads saved evidence.
 const evidenceWords=e=>e.notCommand?'not a command':!e.ran?"NOT FOUND in the log":e.exitCode===0?"ran, exit 0":"exit "+(e.exitCode??"unknown");
 const checkWarning=c=>{const e=c?.evidence;if(c?.result!=="pass"||!e||e.exitCode===0)return null;
-  return !e.ran?"reported pass, but no matching run is in the log":e.exitCode==null?"reported pass, but the log has no exit code for its last run":"reported pass, but its last run exited "+e.exitCode};
+  return e.notCommand?"reported pass, but is not a command":!e.ran?"reported pass, but no matching run is in the log":e.exitCode==null?"reported pass, but the log has no exit code for its last run":"reported pass, but its last run exited "+e.exitCode};
 function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.length)return[];
   const text=v=>typeof v==="string"?v:JSON.stringify(v),list=(items,f=text)=>$("ul",{},...items.map(x=>$("li",{},f(x))));
   const mark=(s,ok,bad)=>$("span",{class:"state "+(s===ok?"s-completed":s===bad?"s-bad":s==null||s==="not-run"?"s-idle":"s-running")},s||"unknown");

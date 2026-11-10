@@ -284,6 +284,8 @@ test('the panel shows each check with its saved evidence, and marks a pass witho
   assert.match(lines[1].attrs.title, /no matching run is in the log/);
   assert.match(lines[2].attrs.title, /last run exited 1/);
   assert.doesNotMatch(textOf(lines[4]), /NOT FOUND/);
+  assert.match(lines[4].attrs.title, /not a command/);
+  assert.doesNotMatch(lines[4].attrs.title, /no matching run/);
   assert.match(textOf(view), /evidence is worked out by `orch\.mjs result`/, 'a check without saved evidence gets the note');
   // No note when every check has evidence, while the task runs, or for a native sub-agent.
   for (const t of [{ state: 'completed', report: { outcome: 'done', checks: checks.slice(0, 4) } },

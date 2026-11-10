@@ -324,10 +324,8 @@ export function cmdAccept(args) {
   if (row.report?.invalid) warnings.unshift(`invalid orch-result report: ${row.report.error}`);
   else if (row.report && !passing.length) warnings.unshift("report has no passing checks");
   const failed = passing.some(({ evidence }) => evidence?.ran && evidence.exitCode != null && evidence.exitCode !== 0);
-  const matched = passing.some(({ evidence }) => evidence?.ran);
-  const evidenceAvailable = checks.some((check) => check?.evidence != null);
-  if (!task.readOnly && passing.length && evidenceAvailable && (failed || !matched) && !unverifiedReason) {
-    die(`cannot accept ${id}: ${failed ? "a passing check matched a failed run" : "no passing check matched a run"}.${warnings.length ? `\n  ${warnings.join("\n  ")}` : ""}\nUse --unverified <reason> to accept anyway.`);
+  if (!task.readOnly && failed && !unverifiedReason) {
+    die(`cannot accept ${id}: a passing check matched a failed run.${warnings.length ? `\n  ${warnings.join("\n  ")}` : ""}\nUse --unverified <reason> to accept anyway.`);
   }
   if (warnings.length) process.stderr.write(`${warnings.map((warning) => `WARNING: ${warning}`).join("\n")}\n`);
   const cwd = row.cd || run.repo;

@@ -319,14 +319,14 @@ function checkEvidence(task, row, report) {
   if (!logs.some((log) => fs.existsSync(log.file))) return null;
   const file = path.join(task.outDir, "evidence.json");
   const saved = savedEvidence(file);
-  if (saved?.version === 4 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
+  if (saved?.version === 5 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
   if (!evidenceAllowed) return null;
   const runs = logs.flatMap((log) => commandRuns(log.agent, log.file)).map((run) => ({ ...run, key: normalizeCommand(run.cmd, row.cd) }));
   const checks = report.checks.map((check) => matchCheckEvidence(check, runs, row.cd));
   const checkout = saved?.attempt === row.attempt
     ? { readAt: saved.readAt, commit: saved.commit, dirty: saved.dirty }
     : { readAt: new Date().toISOString(), ...treeState(row.cd) };
-  const evidence = { version: 4, attempt: row.attempt, ...checkout, checks };
+  const evidence = { version: 5, attempt: row.attempt, ...checkout, checks };
   try {
     writeJson(file, evidence);
   } catch {
@@ -383,40 +383,45 @@ function matchingRuns(run, cwd) {
   return [exact, ...candidates];
 }
 
-// Only presentation options may be omitted. Selection, validation and mutation options
-// remain part of the command, including their values and attached forms such as -k=one.
-const DISPLAY_FLAGS = new Set(["-q", "--quiet", "-v", "--verbose", "--oneline", "--stat", "--short", "--porcelain", "--name-only", "--name-status", "--no-color"]);
-const DISPLAY_VALUE_FLAGS = new Set(["--color", "--format", "--pretty", "--jq", "--json", "--template", "--test-reporter", "--test-reporter-destination", "--tb", "--log-level"]);
-const SELECTION_VALUE_FLAGS = new Set(["-k", "--keyword", "-m", "--markers", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--include", "--config"]);
-function displayOption(program, option, words) {
-  if (program === "git") {
-    const command = words[1];
-    if (command === "status") return ["--short", "--porcelain"].includes(option);
-    return ["diff", "log", "show", "reflog"].includes(command) && ["--oneline", "--stat", "--name-only", "--name-status", "--no-color", "--color", "--format", "--pretty"].includes(option);
-  }
-  if (program === "gh") return ["--jq", "--json", "--template"].includes(option);
-  if (program === "node") return words.includes("--test") && ["--test-reporter", "--test-reporter-destination"].includes(option);
-  return /^(?:pytest|py_test|ruff|black|run_.*tests.*\.sh)$/.test(program) && ["-q", "--quiet", "-v", "--verbose", "--color", "--tb", "--log-level"].includes(option);
+// Ignore neutral flags, but keep options that select work, validate it, or mutate it.
+const PROOF_FLAGS = new Set(["-k", "-m", "-c", "-e", "--keyword", "--markers", "--check", "--exit-code", "--fix", "--write", "--dry-run", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--exclude-dir", "--include", "--config", "--test", "--test-name-pattern", "--test-skip-pattern", "--match", "--grep", "--filter", "--path", "--paths", "--file", "--files", "--repo", "-R", "--git-dir", "--work-tree", "-C", "-G", "-S", "--version"]);
+const PYTEST_VALUES = new Set(["-k", "-m", "-c", "-p", "-n", "--keyword", "--markers", "--ignore", "--ignore-glob", "--deselect", "--exclude", "--include", "--config", "--tb", "--color", "--capture", "--maxfail", "--durations", "--log-level", "--junitxml", "--basetemp", "--rootdir", "--confcutdir"]);
+const PROGRAM_VALUES = {
+  node: new Set(["-e", "--eval", "-p", "--print", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination", "--test-concurrency"]),
+  gh: new Set(["--jq", "-q", "--json", "--template", "--repo", "-R"]),
+  git: new Set(["-C", "--git-dir", "--work-tree", "--grep", "-G", "-S"]),
+  black: new Set(["--config", "--include", "--exclude"]),
+  ruff: new Set(["--config", "--include", "--exclude", "--output-format"]),
+};
+function flagTakesValue(program, option) {
+  if (/^(?:pytest|py_test|run_.*tests.*\.sh)$/.test(program)) return PYTEST_VALUES.has(option);
+  if (/^python\d*(?:\.\d+)?$/.test(program)) return option === "-m" || option === "-c";
+  return PROGRAM_VALUES[program]?.has(option) || false;
 }
 function identity(key) {
   let tokens;
   try { tokens = JSON.parse(key); } catch { return null; }
   if (!Array.isArray(tokens) || tokens.some((t) => t.op)) return null;
-  const words = tokens.map((t) => t.word);
-  const keep = [];
+  const words = tokens.map((t) => t.word), keep = [];
+  const program = path.basename(words[0] === "uv" && words[1] === "run" ? words[2] || words[0] : words[0] || "");
+  let positional = false;
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
-    const option = word.split("=", 1)[0];
-    const display = i && displayOption(path.basename(words[0]), option, words);
-    if (display && DISPLAY_FLAGS.has(option)) continue;
-    if (display && DISPLAY_VALUE_FLAGS.has(option)) {
-      if (!word.includes("=") && words[i + 1] && !words[i + 1].startsWith("-")) i++;
-      continue;
+    if (word === "--") { positional = true; continue; }
+    if (!i || positional || !word.startsWith("-") || word === "-") { keep.push(word); continue; }
+    let option = word.split("=", 1)[0];
+    let attached = word.includes("=") ? word.slice(word.indexOf("=") + 1) : undefined;
+    const short = word.slice(0, 2);
+    if (attached === undefined && word.length > 2 && flagTakesValue(program, short) && (PROOF_FLAGS.has(short) || (program === "node" && short === "-p"))) {
+      option = short; attached = word.slice(2);
     }
-    if (i && SELECTION_VALUE_FLAGS.has(word) && words[i + 1] !== undefined) {
-      keep.push(`${word}\0${words[++i]}`); continue;
-    }
-    keep.push(word);
+    const protectedFlag = PROOF_FLAGS.has(option)
+      || (program === "git" && words[1] === "diff" && ["-q", "--quiet"].includes(option))
+      || (program === "git" && words[1] === "apply" && option === "--stat")
+      || (program === "node" && (["-v", "-p", "--print", "--eval"].includes(option) || (!words.includes("--test") && option === "--test-reporter")));
+    const value = attached !== undefined ? attached
+      : flagTakesValue(program, option) && words[i + 1] !== undefined ? words[++i] : undefined;
+    if (protectedFlag) keep.push(value === undefined ? word : `${option}\0${value}`);
   }
   return keep;
 }
@@ -451,8 +456,7 @@ export function matchCheckEvidence(check, runs, cwd = null) {
   const key = normalizeCommand(command, cwd);
   const candidates = runs.flatMap((run) => matchingRuns(run, cwd));
   const find = (wanted) => {
-    const exact = candidates.findLast((run) => run.key === wanted);
-    const last = exact || candidates.findLast((run) => compatibleCommand(wanted, run.key, cwd, run.cwd));
+    const last = candidates.findLast((run) => run.key === wanted || compatibleCommand(wanted, run.key, cwd, run.cwd));
     return last ? { ran: true, exitCode: last.exitCode, atMs: last.atMs } : null;
   };
   const direct = find(key);

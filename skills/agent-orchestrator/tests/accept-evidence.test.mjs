@@ -28,11 +28,12 @@ test('a failed matching check refuses even alongside success; override is saved 
   assert.equal(readJson(f.taskFile(run, 'writer')).unverifiedReason, 'reviewed elsewhere');
 });
 
-test('a report with no matched passing checks is refused', async (t) => {
+test('a report with no matched passing checks accepts with warnings', async (t) => {
   const f = await fixture(t), run = await f.newRun();
   await start(f, run, 'missing', [pass('npm test'), pass('manual inspection')]);
-  const denied = await f.command(['accept', run.id, 'missing'], { code: 1 });
-  assert.match(denied.stderr, /no passing check matched a run/);
+  const accepted = await f.command(['accept', run.id, 'missing']);
+  assert.match(accepted.stderr, /WARNING:.*npm test.*no matching run/);
+  assert.match(accepted.stderr, /WARNING:.*manual inspection/);
 });
 
 test('unknown exit counts as matched and warns', async (t) => {
@@ -99,5 +100,26 @@ test('Codex exact failed run refuses despite a later narrower success', async (t
   } });
   await f.finished(run, 'codex-failure');
   const denied = await f.command(['accept', run.id, 'codex-failure'], { code: 1 });
+  assert.match(denied.stderr, /pytest tests\/.*exited 1/);
+});
+
+for (const agent of ['claude', 'codex']) test(`${agent} later compatible success accepts`, async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const events = agent === 'claude'
+    ? [...runEvent('first', 'pytest tests/', 'Exit code 1', true), ...runEvent('second', 'pytest -q tests/')]
+    : ['pytest tests/', 'pytest -q tests/'].map((command, i) => ({ type: 'item.completed', item: {
+      type: 'command_execution', id: String(i), command: `/bin/zsh -lc '${command}'`, exit_code: i === 0 ? 1 : 0, status: 'completed',
+    } }));
+  await f.start(run, 'later-success', { agent, config: { finalMessage: report([pass('pytest tests/')]), extraEvents: events } });
+  await f.finished(run, 'later-success');
+  await f.command(['accept', run.id, 'later-success']);
+});
+
+test('a later matching failure refuses after a success', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await start(f, run, 'later-failure', [pass('pytest tests/')], { events: [
+    ...runEvent('first', 'pytest tests/'), ...runEvent('second', 'pytest tests/', 'Exit code 1', true),
+  ] });
+  const denied = await f.command(['accept', run.id, 'later-failure'], { code: 1 });
   assert.match(denied.stderr, /pytest tests\/.*exited 1/);
 });

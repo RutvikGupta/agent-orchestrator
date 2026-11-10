@@ -43,9 +43,9 @@ for (const agent of ['claude', 'codex']) test(`${agent} evidence matches wrapper
   assert.match(out.stdout, /last run exited 2/);
   assert.match(out.stdout, /not a command/);
   assert.match(out.stdout, /WARNING: check "synthetic.*not a command/);
-  // Evidence saved by the old exact matcher must not survive the matcher upgrade.
+  // Evidence saved before these identity rules must be refreshed on the matcher upgrade.
   const file = path.join(row.outDir, 'evidence.json');
-  const saved = readJson(file); delete saved.version; saved.checks = checks.map(() => ({ ran: false }));
+  const saved = readJson(file); saved.version = 4; saved.checks = checks.map(() => ({ ran: false }));
   fs.writeFileSync(file, JSON.stringify(saved));
   await f.command(['result', run.id, 'forms']);
   assert.equal(readJson(file).checks[0].ran, true);
@@ -123,14 +123,22 @@ test('command identity preserves validation, mutation and selection flags in bot
   }
 });
 
-test('an exact failing run wins over every later compatible or narrowed success', async () => {
+test('the latest identity-equal run wins, while narrower runs are excluded', async () => {
   const { matchCheckEvidence } = await import('../scripts/lib/report.mjs');
   const runs = [
     { cmd: 'pytest tests/', exitCode: 1, atMs: 1 },
     { cmd: 'pytest -q tests/', exitCode: 0, atMs: 2 },
     { cmd: 'pytest -k one tests/', exitCode: 0, atMs: 3 },
   ];
-  assert.deepEqual(matchCheckEvidence({ cmd: 'pytest tests/' }, runs, '/repo'), { ran: true, exitCode: 1, atMs: 1 });
+  assert.deepEqual(matchCheckEvidence({ cmd: 'pytest tests/' }, runs, '/repo'), { ran: true, exitCode: 0, atMs: 2 });
+  assert.equal(matchCheckEvidence({ cmd: 'pytest tests/' }, [runs[2]], '/repo').ran, false);
+  assert.equal(matchCheckEvidence({ cmd: 'pytest tests/' }, [runs[0], runs[2]], '/repo').exitCode, 1);
+  assert.equal(matchCheckEvidence({ cmd: 'pytest tests/' }, [runs[1], runs[0]], '/repo').exitCode, 1);
+  assert.equal(matchCheckEvidence({ cmd: 'node --test /repo/tests/a.mjs' }, [
+    { cmd: 'node --test /repo/tests/a.mjs', exitCode: 1, atMs: 1 },
+    { cmd: 'node --test --test-reporter spec tests/a.mjs', exitCode: 0, atMs: 2 },
+  ], '/repo').exitCode, 0);
+  assert.equal(matchCheckEvidence({ cmd: 'pytest tests/' }, [{ cmd: 'pytest -kone tests/', exitCode: 0, atMs: 1 }], '/repo').ran, false);
 });
 
 test('outside directory switches and symlinks cannot provide evidence for the task tree', async (t) => {
@@ -168,7 +176,7 @@ for (const agent of ['claude', 'codex']) test(`${agent} missing event logs have 
   const row = await f.finished(run, 'no-log');
   fs.rmSync(path.join(row.outDir, 'events.jsonl'));
   const file = path.join(row.outDir, 'evidence.json');
-  for (const version of [2, 4]) {
+  for (const version of [2, 5]) {
     const legacy = JSON.stringify({ version, attempt: 1, checks: [{ ran: true, exitCode: 0, atMs: 1 }] });
     fs.writeFileSync(file, legacy);
     const output = await f.command(['result', run.id, 'no-log']);
@@ -178,4 +186,28 @@ for (const agent of ['claude', 'codex']) test(`${agent} missing event logs have 
     assert.equal(task.report.checks[0].evidence, undefined);
     assert.equal(fs.readFileSync(file, 'utf8'), legacy);
   }
+});
+
+test('neutral pytest flags are ignored without discarding test targets', async () => {
+  const { matchCheckEvidence } = await import('../scripts/lib/report.mjs');
+  const match = (cmd, logged) => matchCheckEvidence({ cmd }, [{ cmd: logged, exitCode: 0, atMs: null }], '/repo');
+  for (const flags of ['-q', '-p no:cacheprovider', '-s -x --no-header --disable-warnings', '--tb short --color yes']) {
+    assert.equal(match('pytest tests/', `pytest ${flags} tests/`).ran, true);
+    assert.equal(match(`pytest ${flags} tests/`, 'pytest tests/').ran, true);
+  }
+  assert.equal(match('pytest tests/', 'pytest -q -p no:cacheprovider other-tests/').ran, false);
+});
+
+test('option values are consumed only for the program that accepts them', async () => {
+  const { matchCheckEvidence } = await import('../scripts/lib/report.mjs');
+  const match = (cmd, logged) => matchCheckEvidence({ cmd }, [{ cmd: logged, exitCode: 0, atMs: null }], '/repo');
+  for (const flag of ['--color', '--format', '--pretty']) {
+    assert.equal(match('git diff', `git diff ${flag} HEAD~1`).ran, false);
+    assert.equal(match('git diff HEAD~1', `git diff ${flag} HEAD~1`).ran, true);
+  }
+  assert.equal(match('black .', 'black --color .').ran, true);
+  assert.equal(match('black', 'black --color .').ran, false);
+  assert.equal(match('pytest tests/', 'pytest --tb short --color yes tests/').ran, true);
+  assert.equal(match('gh api endpoint', "gh api --jq '.[].id' endpoint").ran, true);
+  assert.equal(match('node --test tests/a.mjs', 'node --test --test-reporter spec tests/a.mjs').ran, true);
 });

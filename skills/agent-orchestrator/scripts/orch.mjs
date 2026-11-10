@@ -142,7 +142,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   After reviewing a completed task and committing its work, record
                                   it as accepted (its checkout must be clean); SHA defaults to HEAD.
                                   When evidence is available, write tasks with passing checks require
-                                  a matched pass and no matched failed runs; other issues warn. --unverified
+                                  no matched failed runs; other issues warn. --unverified
                                   records why the result is accepted anyway.
                                   --note records why; notes when no clean verdict is recorded
   resolve RUN TASK --note TEXT    Mark a handed-back decision as handled, when you answered it
