@@ -13,6 +13,9 @@ import { die, readJson } from "./util.mjs";
 // Claude had tiers (which ran `complex`, then Opus).
 export const CLAUDE_DEFAULT_TIER = "complex";
 const POLICY_AGENTS = ["claude", "codex"];
+// A command task (`start --agent command -- COMMAND...`, scripts/command-relay.mjs) runs a command
+// with no model: it has no tiers, and the model policy does not apply to it.
+export const COMMAND_AGENT = "command";
 // The model names the relays accept, and an effort level such as "high".
 const MODEL_NAME = /^[A-Za-z0-9._:@/[\]-]+$/;
 const EFFORT = /^[a-z]+$/;
@@ -66,6 +69,7 @@ export function loadPolicy() {
 
 // An agent's tier names, lightest first.
 export function tierOrder(key) {
+  if (key === COMMAND_AGENT) return [];
   return Object.keys(loadPolicy()[key].tiers);
 }
 
@@ -118,6 +122,12 @@ function effortFor(key, name, tier, wanted) {
 // A new task needs --tier, for both agents. A choice it cannot accept throws ModelRefused, which
 // `start` turns into its own refusal: `dispatch` skips that one task and starts the others.
 export function modelFor(key, args, previousTier = null) {
+  // The words after `--` are the command itself, so a `--model` there is the command's own.
+  if (key === COMMAND_AGENT) {
+    const given = ["tier", "model", "effort"].filter((name) => args[name] !== undefined && args[name] !== null);
+    if (given.length) refuse(`a command task runs no model: drop ${given.map((name) => `--${name}`).join(", ")}`, 2);
+    return { tier: null, model: null, effort: null };
+  }
   const policy = loadPolicy();
   const { tiers } = policy[key];
   const override = args.model ?? passthroughValue(args.passthrough, "--model") ?? passthroughValue(args.passthrough, "--effort");

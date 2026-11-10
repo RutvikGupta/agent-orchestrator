@@ -153,7 +153,7 @@ function sectionView(run){
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+m.text).join("\n")},"✉ "+t.inbox.unread+" unread"):null,
-        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:t.why||""},t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
+        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
       $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(t.attempt>1?" · "+t.attempt+" attempts":"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
@@ -303,7 +303,7 @@ function paint(key,t,ext,ev,keep){
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
-    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
+    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
     ...(own?[...contextView(t,n),...briefView(key,t,n),...attemptsView(key,t,n)]:[]),

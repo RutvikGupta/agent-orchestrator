@@ -76,7 +76,20 @@ Usage: node orch.mjs <command> [args] [--json]
                                   implies complex, so it needs none. "agents" lists each tier's model.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
-  status RUN                      Every task: state, steps, current activity, tokens; also
+  start RUN TASK --agent command --why TEXT [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
+        [--max-parallel N] [--force] -- COMMAND [ARG...]
+                                  Run a command as a task, with no model: for a script that starts
+                                  its own agents, or any long command whose output you only check.
+                                  The words after "--" run as an argument vector, with no shell (put
+                                  variables in with: -- env VAR=value COMMAND ...), detached, in --cd,
+                                  with a relay's AGENT_ORCH_* variables, so agents it starts belong
+                                  to the task. It succeeds on exit 0 and, with --done, only if its
+                                  output printed MARKER. Its log is the output, its activity the
+                                  latest line, and its result the last 40 lines. It has no session:
+                                  "start" again runs the command again (the same one, unless a new
+                                  one follows "--"). stop, close, wait and the finish notice work as
+                                  for an agent; accept takes it as a read-only task
+  status RUN                     Every task: state, steps, current activity, tokens; also
                                   the sub-agents that the launching session started with its
                                   host's own tool (Claude Code's Agent tool, Codex's spawn_agent)
   watch [RUN|--all] [--interval S] [--once]
@@ -192,7 +205,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --once prints the current state and marks nothing as seen
 
 RUN may be a run id, a run directory, or "latest". State lives in ${STATE_ROOT}.
-Text after "--" is passed to the relay unchanged (for example: -- --session <id>).
+Text after "--" is passed to the relay unchanged (for example: -- --session <id>); for
+--agent command, it is the command.
 
 Ownership: every command that changes a run acts only on runs the calling session launched, or
 their nested runs; reading (status, wait, result, log, recover, inbox, send without --steer, and
@@ -206,7 +220,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
+  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },

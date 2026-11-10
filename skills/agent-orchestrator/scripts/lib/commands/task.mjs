@@ -8,10 +8,32 @@ import { verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
 import { endPark } from "../park.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
-import { describe, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, validTask, waitForExit } from "../runs.mjs";
+import { endRecordedGroup } from "../command-group.mjs";
+import { COMMAND_AGENT } from "../policy.mjs";
+import { attemptAgent, describe, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
+
+// A command task's relay ends what its command left running in its process group. When the relay
+// has gone without doing that (it was killed), `stop` and `close` end each recorded group that is
+// left, even after the command that led it has exited (lib/command-group.mjs). Returns
+// { found, killed, groups } over the task's command attempts, or null when nothing was left.
+function endCommandGroups(run, task) {
+  let found = 0, killed = 0;
+  const groups = [];
+  for (let n = 1; n <= (task.attempt || 0); n++) {
+    if (attemptAgent(task, n) !== COMMAND_AGENT) continue;
+    const ended = endRecordedGroup(path.join(taskDir(run, task.id), `attempt-${n}`));
+    if (!ended?.found) continue;
+    found += ended.found;
+    killed += ended.killed;
+    groups.push(ended.pgid);
+  }
+  return found ? { found, killed, groups } : null;
+}
+
+const leftText = (left) => `${left.found} process${left.found === 1 ? "" : "es"} its command left running (process group ${left.groups.join(", ")}${left.killed ? `; ${left.killed} needed SIGKILL` : ""})`;
 
 function reportText(row) {
   const report = row.report;
@@ -130,7 +152,14 @@ export function cmdStop(args) {
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
-  if (!relayAlive(task.pid)) die(`task ${id} is not running`);
+  if (!relayAlive(task.pid)) {
+    const left = endCommandGroups(run, task);
+    if (!left) die(`task ${id} is not running`);
+    if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
+    stopped();
+    process.stdout.write(`stopped the ${leftText(left)}; its relay had already exited\n`);
+    return;
+  }
   // Recorded on the task, whatever its attempt: a babysitter stopped as it ends parked never parks.
   if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
   stopped();
@@ -140,7 +169,8 @@ export function cmdStop(args) {
     process.kill(task.pid, "SIGTERM");
   }
   const gone = waitForExit(task.pid);
-  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${id} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome\n`);
+  const left = gone ? endCommandGroups(run, task) : null;
+  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${id} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
 }
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark
@@ -190,6 +220,9 @@ export function closeTask(run, task, extra = {}) {
     }
     note = waitForExit(task.pid) ? `stopped (pid ${task.pid}) and closed` : `sent SIGTERM to pid ${task.pid}, which has not exited yet; closed`;
   }
+  // Only once the relay has gone: a live relay ends its own command's group.
+  const left = relayAlive(task.pid) ? null : endCommandGroups(run, task);
+  if (left) note = `stopped the ${leftText(left)}; ${note}`;
   // Closing a task that handed back a decision means the orchestrator dealt with it without
   // resuming the task, so the decision shows as resolved instead of still waiting.
   const row = describe(run, task);

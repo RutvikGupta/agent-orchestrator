@@ -11,8 +11,8 @@ import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
-import { modelLabel } from "./policy.mjs";
-import { die, readJson, writeJson } from "./util.mjs";
+import { COMMAND_AGENT, modelLabel } from "./policy.mjs";
+import { die, readJson, tailText, writeJson } from "./util.mjs";
 
 export function resolveRunDir(ref) {
   if (!ref) die("missing RUN (a run id, a run directory, or 'latest')", 2);
@@ -146,6 +146,52 @@ export function waitForExit(pid, ms = 15000) {
 // A task may switch agents between attempts, so each attempt is parsed as its own agent's stream.
 export function attemptAgent(task, n) {
   return task.attemptAgents?.[n] || task.agent;
+}
+
+// A command task's argument vector as one line a shell would read back: words with only safe
+// characters as they are, others in single quotes.
+export function commandText(argv) {
+  return (Array.isArray(argv) ? argv : []).map((word) => {
+    const text = String(word);
+    return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+  }).join(" ");
+}
+
+// A command task's progress (command-relay.mjs): its latest non-blank output line, or null, and how
+// many lines it has printed, from the newest output events at the end of its events.jsonl. Each
+// event is small, so a short tail holds the latest; read again only when the file changes.
+const progressMemo = new Map(); // events.jsonl path -> { size, mtimeMs, value }
+function commandProgress(file) {
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    return { line: null, lines: 0 };
+  }
+  const hit = progressMemo.get(file);
+  if (hit?.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.value;
+  const value = { line: null, lines: 0 };
+  const events = (tailText(file, 131_072) || "").split("\n");
+  for (let i = events.length - 1; i >= 0 && !value.line; i--) {
+    if (!events[i].includes('"command_output"')) continue;
+    try {
+      const e = JSON.parse(events[i]);
+      if (!value.lines) value.lines = Number(e.command_output?.last) || 0;
+      value.line = String(e.message?.content?.[0]?.content ?? "").split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || null;
+    } catch {
+      // A line still being written.
+    }
+  }
+  if (progressMemo.size >= 500) progressMemo.delete(progressMemo.keys().next().value);
+  progressMemo.set(file, { size: st.size, mtimeMs: st.mtimeMs, value });
+  return value;
+}
+
+// A finished command task's activity line: its last line of output, after the reason it failed.
+function commandOutcome(result) {
+  const last = String(result.finalMessage || "").split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
+  const error = typeof result.error === "string" ? result.error : "";
+  return shortText(result.status === "completed" || !error ? last : last ? `${error} · ${last}` : error, 300);
 }
 
 function attemptDirs(run, task) {
@@ -427,7 +473,8 @@ function attemptsOf(task, seen, row) {
     // The session this attempt resumed: the relay records it for Codex; the current attempt's
     // relay arguments name it for both; a Claude result says only that it resumed, so its own
     // session counts when an earlier attempt had the same one.
-    const argv = now && Array.isArray(task.argv) ? task.argv : [];
+    // A command task's arguments are its command's, which resume nothing.
+    const argv = now && Array.isArray(task.argv) && agent !== COMMAND_AGENT ? task.argv : [];
     const named = argv.includes("--session") ? argv[argv.indexOf("--session") + 1] : null;
     const explicit = (now ? (typeof result?.session === "string" ? result.session : null) : r?.resumedFrom) || named || null;
     const flagged = now ? Boolean(result?.resumed || result?.resumeLast || argv.includes("--resume-last")) : Boolean(r?.resumed);
@@ -523,6 +570,10 @@ export function describe(run, task) {
   } catch {
     lastEventMs = started;
   }
+  // A command task (command-relay.mjs) shows its latest output line as its activity, and counts
+  // lines of output as its steps.
+  const command = attemptAgent(task, task.attempt) === COMMAND_AGENT;
+  const progress = command && task.outDir ? commandProgress(path.join(task.outDir, "events.jsonl")) : null;
   const quietMs = running && lastEventMs ? Date.now() - lastEventMs : null;
   // When the session last did anything: its latest event while running, else when it finished.
   const lastActiveMs = running ? lastEventMs || Date.now() : (result?.finishedAt && Date.parse(result.finishedAt)) || lastEventMs || started || 0;
@@ -531,9 +582,11 @@ export function describe(run, task) {
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
   const limitHit = !running && !parked && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
   let now;
-  if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${current.activity || "starting"}`;
+  const activity = command ? progress?.line || `$ ${shortText(commandText(task.command), 200)}` : current.activity || "starting";
+  if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${activity}`;
   else if (decisions) now = firstLine(`asks: ${decisions.join(" · ")}`);
   else if (parked) now = parkedNow(parked);
+  else if (result && command) now = commandOutcome(result) || "(no output)";
   else if (result) now = firstLine(result.finalMessage) || current.error || "(empty final message)";
   else now = state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
 
@@ -546,7 +599,7 @@ export function describe(run, task) {
     state,
     attempt: task.attempt || 0,
     elapsed: task.pid ? formatElapsed(elapsedMs) : "-",
-    steps: task.pid ? current.steps : "-",
+    steps: task.pid ? (command ? progress?.lines || result?.lines || 0 : current.steps) : "-",
     tokensIn: tokens.input,
     tokensCached: tokens.cached,
     tokensOut: tokens.output,
@@ -559,11 +612,14 @@ export function describe(run, task) {
     modelLabel: modelLabel(task),
     why: task.why || null,
     session: result?.threadId || result?.sessionId || current.sessionId || null,
-    quietMs,
+    // A command often prints nothing while an agent it started works, so it is never flagged
+    // silent (report.mjs); --timeout bounds one that hangs.
+    quietMs: command ? null : quietMs,
     touched: Array.isArray(result?.touchedFiles) ? result.touchedFiles.length : "-",
     now,
     cd: task.cd || task.worktree?.path || null,
     branch: task.worktree?.branch || null,
+    ...(command ? { command: commandText(task.command) } : {}),
     outDir: task.outDir || null,
     // Closed: finished, and either completed or its result collected, or closed with `close`.
     closed: !["running", "prepared"].includes(state) && (state === "completed" || Boolean(task.closedAt)),
