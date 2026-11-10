@@ -88,8 +88,11 @@ test('every tier reaches the relay with its policy model and effort, and status 
   }
 });
 
-// What the error that asks for --tier lists for an agent: its tiers, then one line per tier on when to use it.
-const tierUseLines = (agent) => tiersOf(agent).map(([tier, choice]) => `  ${tier.padEnd(Math.max(...Object.keys(policy[agent].tiers).map((t) => t.length)))}  ${choice.use}`);
+// What the error that asks for --tier lists for an agent: its tiers, then one line per tier on when to use it
+// and how it has done in the last 30 days. `finished` maps a tier to its finished tasks; the rest have none.
+const tierUseLines = (agent, finished = {}) => tiersOf(agent).map(([tier, choice]) =>
+  `  ${tier.padEnd(Math.max(...Object.keys(policy[agent].tiers).map((t) => t.length)))}  ${choice.use}`
+  + ` [last 30d: too few tasks (${finished[tier] ?? 0} finished, 5 needed)]`);
 
 test('a new Claude task needs --tier: the error lists each tier with when to use it, and nothing starts', async (t) => {
   const f = await fixture(t);
@@ -108,7 +111,8 @@ test('a new Claude task needs --tier: the error lists each tier with when to use
   }
   const codex = await f.command(['start', run.id, 'fresh-codex', '--agent', 'codex', '--why', 'Policy regression',
     '--brief', f.brief('fresh-codex')], { code: 2 });
-  assert.deepEqual(codex.stderr.split('\n').filter((line) => line.startsWith('  ')), tierUseLines('codex'), codex.stderr);
+  // The one finished task, by-codex, ran at the standard tier.
+  assert.deepEqual(codex.stderr.split('\n').filter((line) => line.startsWith('  ')), tierUseLines('codex', { standard: 1 }), codex.stderr);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), ['by-codex']);
   assert.equal(readJson(f.taskFile(run, 'by-codex')).agent, 'codex');
 });

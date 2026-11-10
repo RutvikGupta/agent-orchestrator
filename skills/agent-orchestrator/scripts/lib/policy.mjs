@@ -7,6 +7,9 @@
 // A follow-up attempt keeps its earlier tier unless --tier names another.
 
 import { POLICY_PATH } from "./config.mjs";
+// stats.mjs imports this module too. Neither uses the other's exports until a function runs, so
+// the cycle is safe.
+import { evidenceNote, tierEvidence } from "./stats.mjs";
 import { die, readJson } from "./util.mjs";
 
 // Not a default for new tasks: the tier of every babysitter, and of a Claude task recorded before
@@ -84,10 +87,14 @@ function passthroughValue(argv, flag) {
 
 // "light = claude-haiku-5-5, standard = ...": an agent's tiers with their models, for messages.
 const tierList = (tiers) => Object.entries(tiers).map(([t, v]) => `${t} = ${v.model}`).join(", ");
-// One line per tier on when to use it, for the error that asks for --tier.
-const tierUses = (tiers) => {
+// One line per tier on when to use it, with how that tier has done on this machine in the last 30
+// days (stats.mjs), for the error that asks for --tier. The numbers are read only when the error
+// is built, so a start that names its tier never reads them. Without them, a line holds the use only.
+const tierUses = (key, policy) => {
+  const { tiers } = policy[key];
   const width = Math.max(...Object.keys(tiers).map((t) => t.length));
-  return Object.entries(tiers).map(([t, v]) => `\n  ${t.padEnd(width)}  ${v.use || v.model}`).join("");
+  const evidence = tierEvidence(policy);
+  return Object.entries(tiers).map(([t, v]) => `\n  ${t.padEnd(width)}  ${v.use || v.model}${evidenceNote(evidence, key, t)}`).join("");
 };
 // A tier by name; never an inherited key such as "constructor".
 const tierOf = (tiers, name) => (typeof name === "string" && Object.hasOwn(tiers, name) ? tiers[name] : null);
@@ -138,14 +145,14 @@ export function modelFor(key, args, previousTier = null) {
     }
     const name = args.tier || (tierOf(tiers, previousTier) ? previousTier : null);
     if (!name) {
-      refuse(`--tier is required for a new Claude task: ${tierList(tiers)}. Choose the lightest tier that does the task as well as the top one (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
+      refuse(`--tier is required for a new Claude task: ${tierList(tiers)}. Choose the lightest tier that does the task as well as the top one (see SKILL.md, "Choose the agent and model")${tierUses(key, policy)}`, 2);
     }
     const tier = tierOf(tiers, name) || refuse(`unknown --tier "${args.tier}" for Claude (choose: ${tierList(tiers)})`, 2);
     return { tier: name, model: tier.model, effort: effortFor(key, name, tier, args.effort) };
   }
   const names = Object.keys(tiers);
   if (override !== null) refuse(`choose the Codex model with --tier (${names.join(" | ")}), not --model/--effort`, 2);
-  if (!args.tier) refuse(`--tier is required for Codex: ${tierList(tiers)} (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
+  if (!args.tier) refuse(`--tier is required for Codex: ${tierList(tiers)} (see SKILL.md, "Choose the agent and model")${tierUses(key, policy)}`, 2);
   const tier = tierOf(tiers, args.tier) || refuse(`unknown --tier "${args.tier}" (choose: ${names.join(", ")})`, 2);
   return { tier: args.tier, model: tier.model, effort: effortFor(key, args.tier, tier, args.effort) };
 }

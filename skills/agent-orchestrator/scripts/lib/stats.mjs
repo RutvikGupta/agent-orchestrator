@@ -2,12 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decisionsIn } from "./briefs.mjs";
+import { STATE_ROOT } from "./config.mjs";
 import { summarizeEvents } from "./events.mjs";
+import { compact, formatElapsed } from "./format.mjs";
 import { phaseOf } from "./lifecycle.mjs";
-import { modelLabel } from "./policy.mjs";
+import { loadPolicy, modelLabel } from "./policy.mjs";
 import { reportFields } from "./report.mjs";
-import { attemptAgent, describe } from "./runs.mjs";
-import { die, readJson } from "./util.mjs";
+import { attemptAgent, describe, listRuns } from "./runs.mjs";
+import { die, readJson, writeJson } from "./util.mjs";
 
 export function sinceDuration(value = "30d") {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value);
@@ -51,47 +53,202 @@ function group(items, identity) {
     const key = JSON.stringify(labels);
     if (!groups.has(key)) groups.set(key, { ...labels, tasks: 0, attempts: 0, firstAttemptAccepted: 0,
       accepted: 0, integrated: 0, failed: 0, limitHits: 0, transientErrors: 0,
-      tokensIn: 0, tokensOut: 0, elapsed: [], reviewWait: [] });
+      tokensIn: 0, tokensOut: 0, acceptedTokensIn: 0, elapsed: [], reviewWait: [] });
     const g = groups.get(key);
     g.tasks++;
     g.attempts += item.attempts;
+    // The input tokens that the accepted tasks used, over all their attempts.
+    if (item.accepted) g.acceptedTokensIn += item.tokensIn;
     for (const field of ["firstAttemptAccepted", "accepted", "integrated", "failed", "limitHits", "transientErrors", "tokensIn", "tokensOut"]) g[field] += item[field];
     if (item.elapsedMs !== null) g.elapsed.push(item.elapsedMs);
     if (item.reviewWaitMs !== null) g.reviewWait.push(item.reviewWaitMs);
   }
   return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, g]) => {
-    const { elapsed, reviewWait, ...numbers } = g;
+    const { elapsed, reviewWait, acceptedTokensIn, ...numbers } = g;
     return { ...numbers, firstAttemptAcceptance: g.accepted ? g.firstAttemptAccepted / g.accepted : null,
+      tokensInPerAccepted: g.accepted ? Math.round(acceptedTokensIn / g.accepted) : null,
       medianFirstAttemptMs: median(elapsed), medianReviewWaitMs: median(reviewWait) };
   });
 }
 
-export function taskStats(runs) {
-  const items = [];
+// The folder of every task in `runs`, as { run, dir }.
+function* taskDirs(runs) {
   for (const run of runs) {
     const tasksDir = path.join(run.dir, "tasks");
     if (!fs.existsSync(tasksDir)) continue;
-    for (const entry of fs.readdirSync(tasksDir)) {
-      const dir = path.join(tasksDir, entry);
-      const task = readJson(path.join(dir, "task.json"));
-      // Prepared worktrees, main sessions, and native sub-agents are not dispatched tasks.
-      if (!task || !["claude", "codex"].includes(task.agent) || !(task.attempt > 0)) continue;
-      const results = {};
-      for (let n = 1; n <= task.attempt; n++) results[n] = readJson(path.join(dir, `attempt-${n}`, "result.json"));
-      const row = outcome(run, task, dir, results);
-      const accepted = Boolean(task.acceptedAt);
-      const first = results[1];
-      items.push({ agent: task.agent, modelLabel: modelLabel(task),
-        type: task.plan?.type || (task.babysit ? "babysit" : task.readOnly ? "read-only" : "write"),
-        attempts: task.attempt, accepted: Number(accepted), firstAttemptAccepted: Number(accepted && task.acceptedAttempt === 1),
-        integrated: Number(Boolean(task.integratedAt) || row.phase === "integrated"),
-        failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
-        limitHits: Number(Boolean(row.limitHit)), transientErrors: Number(row.health === "transient-error" || task.retries > 0),
-        elapsedMs: interval(first?.startedAt || (task.attempt === 1 ? task.startedAt : null), first?.finishedAt),
-        reviewWaitMs: accepted ? interval(results[task.acceptedAttempt]?.finishedAt, task.acceptedAt) : null,
-        tokensIn: row.tokensIn, tokensOut: row.tokensOut });
-    }
+    for (const entry of fs.readdirSync(tasksDir)) yield { run, dir: path.join(tasksDir, entry) };
   }
+}
+
+// The task record in `dir`, or null when it is not a dispatched task: prepared worktrees, main
+// sessions, and native sub-agents are not.
+function dispatchedTask(dir) {
+  const task = readJson(path.join(dir, "task.json"));
+  return task && ["claude", "codex"].includes(task.agent) && task.attempt > 0 ? task : null;
+}
+
+function attemptResults(dir, task) {
+  const results = {};
+  for (let n = 1; n <= task.attempt; n++) results[n] = readJson(path.join(dir, `attempt-${n}`, "result.json"));
+  return results;
+}
+
+// What the stats groups and the tier summary both read from a task: its verdict, how long its
+// first attempt took, and how that attempt ran, which says what tier it ran at.
+function baseItem(task, results) {
+  const accepted = Boolean(task.acceptedAt);
+  const first = results[1];
+  return { agent: task.agent, attempts: task.attempt, accepted: Number(accepted),
+    firstAttemptAccepted: Number(accepted && task.acceptedAttempt === 1),
+    elapsedMs: interval(first?.startedAt || (task.attempt === 1 ? task.startedAt : null), first?.finishedAt),
+    // A babysitter's tier is fixed, not chosen, so the tier summary leaves it out.
+    chosen: !task.babysit,
+    first: first ? { agent: attemptAgent(task, 1), model: first.model || null, effort: first.effort || null,
+      // The tier recorded on a one-attempt task, for a result that does not name its model.
+      tier: task.attempt === 1 ? task.tier || null : null } : null,
+    // The first attempt's outcome is known once it was accepted or rejected, or once the task
+    // needed another attempt. A task closed with no verdict says nothing about its tier.
+    reviewed: accepted || Boolean(task.rejectedAt) || task.attempt > 1 };
+}
+
+// One record per task, with the numbers the stats groups add up.
+function taskItems(runs) {
+  const items = [];
+  for (const { run, dir } of taskDirs(runs)) {
+    const task = dispatchedTask(dir);
+    if (!task) continue;
+    const results = attemptResults(dir, task);
+    const row = outcome(run, task, dir, results);
+    items.push({ ...baseItem(task, results), modelLabel: modelLabel(task),
+      type: task.plan?.type || (task.babysit ? "babysit" : task.readOnly ? "read-only" : "write"),
+      integrated: Number(Boolean(task.integratedAt) || row.phase === "integrated"),
+      failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
+      limitHits: Number(Boolean(row.limitHit)), transientErrors: Number(row.health === "transient-error" || task.retries > 0),
+      reviewWaitMs: task.acceptedAt ? interval(results[task.acceptedAttempt]?.finishedAt, task.acceptedAt) : null,
+      tokensIn: row.tokensIn, tokensOut: row.tokensOut });
+  }
+  return items;
+}
+
+export function taskStats(runs) {
+  const items = taskItems(runs);
   return { byAgent: group(items, ({ agent, modelLabel }) => ({ agent, modelLabel })),
     byType: group(items, ({ type }) => ({ type })) };
+}
+
+// How each tier has done on this machine, which is what an orchestrator weighs when it picks one.
+// A task counts toward the tier its first attempt ran at (the tier chosen for it), even when it
+// was redone one tier up and finished there. The task record keeps only the latest attempt's
+// tier, so the first attempt's model, which its result records, names the tier.
+export const EVIDENCE_DAYS = 30;
+// Fewer finished tasks than this say too little about a tier to show a rate.
+export const EVIDENCE_MIN_TASKS = 5;
+
+// The tier of `agent` that runs `model`: the one tier with that model, or, when several tiers
+// share it, the one with that effort. null when no tier, or more than one, fits.
+function tierRunning(policy, agent, model, effort) {
+  const named = Object.entries(policy[agent]?.tiers || {}).filter(([, tier]) => tier.model === model);
+  if (named.length === 1) return named[0][0];
+  const same = named.filter(([, tier]) => (tier.effort ?? null) === (effort ?? null));
+  return same.length === 1 ? same[0][0] : null;
+}
+
+// One entry per policy tier, in policy order (claude, then codex, lightest first), from the
+// per-task records (`baseItem`, with the tokens of an accepted task). An entry counts the tier's finished tasks (first attempt done), how
+// many of the reviewed ones were accepted on that first attempt, the median first-attempt time, and
+// the input tokens an accepted task used, over all its attempts.
+export function tierSummary(items, policy) {
+  const entries = [];
+  for (const agent of ["claude", "codex"]) {
+    for (const tier of Object.keys(policy[agent].tiers)) {
+      const mine = items.filter(({ chosen, first }) => chosen && first && first.agent === agent
+        && (first.model ? tierRunning(policy, agent, first.model, first.effort) : first.tier) === tier);
+      const accepted = mine.filter((item) => item.accepted);
+      const reviewed = mine.filter((item) => item.reviewed);
+      const acceptedFirst = reviewed.filter((item) => item.firstAttemptAccepted).length;
+      entries.push({ agent, tier, tasks: mine.length, reviewed: reviewed.length, firstAttemptAccepted: acceptedFirst,
+        firstAttemptAcceptance: reviewed.length ? acceptedFirst / reviewed.length : null,
+        accepted: accepted.length,
+        tokensInPerAccepted: accepted.length ? Math.round(accepted.reduce((sum, item) => sum + item.tokensIn, 0) / accepted.length) : null,
+        medianFirstAttemptMs: median(mine.map((item) => item.elapsedMs).filter((ms) => ms !== null)) });
+    }
+  }
+  return entries;
+}
+
+// A tier's numbers on one line, for `agents` and for the error that asks for --tier.
+export function evidenceText(entry) {
+  const window = `last ${EVIDENCE_DAYS}d`;
+  if (!entry || entry.tasks < EVIDENCE_MIN_TASKS) return `${window}: too few tasks (${entry?.tasks ?? 0} finished, ${EVIDENCE_MIN_TASKS} needed)`;
+  const first = entry.firstAttemptAcceptance === null ? "no reviewed task yet"
+    : `${Math.round(entry.firstAttemptAcceptance * 100)}% accepted first try (${entry.firstAttemptAccepted} of ${entry.reviewed} reviewed)`;
+  const tokens = entry.tokensInPerAccepted === null ? "no accepted task yet" : `${compact(entry.tokensInPerAccepted)} input tokens per accepted task`;
+  return `${window}: ${entry.tasks} tasks, ${first}, median first attempt ${formatElapsed(entry.medianFirstAttemptMs)}, ${tokens}`;
+}
+
+// A tier's numbers as the note that follows the tier on a line: ` [last 30d: ...]`, or nothing
+// when the summary could not be read.
+export function evidenceNote(summary, agent, tier) {
+  return summary ? ` [${evidenceText(summary.find((entry) => entry.agent === agent && entry.tier === tier))}]` : "";
+}
+
+// The tier summary reads far less of a task than `stats` does: its verdict, its first attempt's
+// result, and, for an accepted task, the input tokens of its attempts. This is that record, or null
+// when the task is not dispatched or its first attempt has not finished.
+function tierItem(dir) {
+  const task = dispatchedTask(dir);
+  const results = task && { 1: readJson(path.join(dir, "attempt-1", "result.json")) };
+  if (!results?.[1]) return null;
+  let tokensIn = 0;
+  if (task.acceptedAt) {
+    for (let n = 1; n <= task.attempt; n++) tokensIn += summarizeEvents(attemptAgent(task, n), path.join(dir, `attempt-${n}`, "events.jsonl"), task.cd).tokens.input;
+  }
+  return { ...baseItem(task, results), tokensIn };
+}
+
+function statKey(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "-";
+  }
+}
+
+// Where each task's record for the summary is kept between calls, so that reading the summary
+// costs a few file stats and not a read of every task's event log. A record is read again when its
+// task's record or first result changes; tasks that other sessions run in the meantime change only their own.
+const EVIDENCE_CACHE = path.join(STATE_ROOT, "tier-evidence.json");
+const EVIDENCE_VERSION = 1;
+
+// The tier summary over the last EVIDENCE_DAYS days. null when it cannot be read: callers then
+// print no numbers, and what they were doing goes on.
+export function tierEvidence(policy = loadPolicy()) {
+  try {
+    const cutoff = Date.now() - EVIDENCE_DAYS * 86400000;
+    const runs = listRuns().filter((run) => Date.parse(run.createdAt) >= cutoff);
+    const cached = readJson(EVIDENCE_CACHE);
+    const known = cached?.version === EVIDENCE_VERSION && cached.tasks && typeof cached.tasks === "object" ? cached.tasks : {};
+    const tasks = {};
+    let changed = false;
+    for (const { dir } of taskDirs(runs)) {
+      const key = `${statKey(path.join(dir, "task.json"))} ${statKey(path.join(dir, "attempt-1", "result.json"))}`;
+      if (Object.hasOwn(known, dir) && known[dir]?.key === key) {
+        tasks[dir] = known[dir];
+      } else {
+        tasks[dir] = { key, item: tierItem(dir) };
+        changed = true;
+      }
+    }
+    if (changed || Object.keys(known).length !== Object.keys(tasks).length) {
+      try {
+        writeJson(EVIDENCE_CACHE, { version: EVIDENCE_VERSION, tasks });
+      } catch {
+        // A read-only or missing state folder only costs the next call a full read.
+      }
+    }
+    return tierSummary(Object.values(tasks).map((entry) => entry.item).filter(Boolean), policy);
+  } catch {
+    return null;
+  }
 }

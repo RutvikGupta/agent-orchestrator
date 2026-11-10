@@ -35,8 +35,11 @@ const USAGE = `agent-orchestrator · orch.mjs
 
 Usage: node orch.mjs <command> [args] [--json]
 
-  agents [--refresh]              Installed agent CLIs, their relays, login state, model policy,
-                                  and how much of each agent's usage limits is used. --refresh
+  agents [--refresh]              Installed agent CLIs, their relays, login state, model policy
+                                  with each tier's results over the last 30 days (finished tasks,
+                                  share accepted first try, median first attempt, input tokens per
+                                  accepted task; "too few tasks" under 5), and how much of each
+                                  agent's usage limits is used. --refresh
                                   runs one tiny Claude turn to read Claude's current limits
   new [--repo DIR] [--name S] [--goal TEXT]
                                   Create a run (records the repo, base commit, and the
@@ -73,7 +76,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   light|standard|strong|complex. Only frontier takes --effort (medium or high).
                                   A Claude follow-up keeps its earlier tier (a task recorded before
                                   tiers resumes at complex), and --babysit
-                                  implies complex, so it needs none. "agents" lists each tier's model.
+                                  implies complex, so it needs none. "agents" lists each tier's model and results.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
   start RUN TASK --agent command --why TEXT [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
@@ -193,7 +196,8 @@ Usage: node orch.mjs <command> [args] [--json]
   cleanup RUN [--force] [--delete-branches]
                                   Remove the run's worktrees (dirty ones only with --force)
   runs                            List runs, newest first
-  stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d)
+  stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d),
+                                  with the input tokens of an accepted task
   pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
                                   Watch pull requests (number, URL, or branch) with gh until one
                                   needs you: a check failed, all checks finished, a new review or
