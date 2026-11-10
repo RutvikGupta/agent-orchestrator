@@ -1,6 +1,6 @@
 {
   "claude": {
-    "note": "Tiers are listed lightest first. Every Claude tier runs at xhigh effort, the same as Opus: the claude CLI accepts it for Haiku, Sonnet and Opus, and a lighter model should not also lose effort. Every new task names its tier with --tier; choose the lightest one that does the task as well as the top one.",
+    "note": "Tiers are listed lightest first. Every new task names its tier with --tier; choose the lightest one that does the task as well as the top one. light, standard and complex run at xhigh effort. frontier runs Claude Fable 5.2, the strongest model, at high effort by default; --effort medium is its only other choice, and it never runs above high.",
     "tiers": {
       "light": {
         "model": "claude-haiku-5-5",
@@ -16,20 +16,40 @@
         "model": "claude-opus-5-5",
         "effort": "xhigh",
         "use": "hard or high-risk work: several modules, an unsettled approach, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed lighter attempt; every pull-request babysitter"
+      },
+      "frontier": {
+        "model": "claude-fable-5-2",
+        "effort": "high",
+        "efforts": [
+          "medium",
+          "high"
+        ],
+        "use": "difficult or long tasks: long-horizon or unattended multi-step work, changes across many modules with an unsettled design, hard debugging or root-cause analysis, large or high-risk reviews and audits, a complex attempt that failed. Fable 5.2 beats Opus 5.5 and Codex astra on agentic coding and keeps going until a long job is done; at high effort it matches Opus's best at about half the cost per task. --effort high (default) or medium for long but less hard work, never above"
       }
     }
   },
   "codex": {
+    "note": "Tiers are listed lightest first; choose the lightest one that does the task as well as the top one. Simple work (lookups, test runs, inventories) goes to luna or terra; difficult work to astra, or to Claude frontier when it is also long.",
     "tiers": {
+      "light": {
+        "model": "gpt-6-luna",
+        "effort": "medium",
+        "use": "work with nothing to judge: running tests or gates and reporting, lookups, inventories and summaries, reproducing a bug from given steps, mechanical edits"
+      },
       "standard": {
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "use": "well-specified, bounded coding: small changes with clear done criteria, tests for existing behavior, lint or type fixes, reviews of small diffs"
+      },
+      "strong": {
         "model": "gpt-6.1-sol",
         "effort": "medium",
-        "use": "well-specified, bounded work: small changes, test or gate runs, lookups and research, reviews of small diffs"
+        "use": "bounded work that needs more judgment: live web research, reviews of medium diffs, debugging in a known area, a standard attempt that failed. Near-astra quality at a lower cost"
       },
       "complex": {
         "model": "gpt-6-astra",
         "effort": "high",
-        "use": "hard or high-risk work: several modules, an unsettled approach, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed standard attempt"
+        "use": "hard or high-risk work: several modules, an unsettled approach, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed strong attempt"
       }
     }
   }

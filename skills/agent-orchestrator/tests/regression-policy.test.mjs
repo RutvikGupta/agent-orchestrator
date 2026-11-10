@@ -26,8 +26,8 @@ test('model policy rejects direct and passthrough overrides and unknown tiers be
   for (const [agent, tier, message] of [
     ['claude', 'imaginary', `unknown --tier "imaginary" for Claude (choose: ${tierList('claude')})`],
     ['claude', 'constructor', 'unknown --tier "constructor" for Claude'],
-    ['codex', 'imaginary', 'unknown --tier "imaginary" (choose: standard, complex)'],
-    ['codex', 'light', 'unknown --tier "light"'],
+    ['codex', 'imaginary', 'unknown --tier "imaginary" (choose: light, standard, strong, complex)'],
+    ['codex', 'frontier', 'unknown --tier "frontier"'],
   ]) {
     const result = await f.command(['start', run.id, 'refused', '--agent', agent, '--tier', tier,
       '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
@@ -36,6 +36,31 @@ test('model policy rejects direct and passthrough overrides and unknown tiers be
   const codex = await f.command(['start', run.id, 'refused', '--agent', 'codex', '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
   assert.ok(codex.stderr.includes(`--tier is required for Codex: ${tierList('codex')}`), codex.stderr);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
+});
+
+test('the frontier tier runs Fable at high, or medium with --effort, and never above high', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const frontier = policy.claude.tiers.frontier;
+  assert.equal(frontier.model, 'claude-fable-5-2');
+  assert.deepEqual([frontier.effort, frontier.efforts], ['high', ['medium', 'high']]);
+  const medium = await f.start(run, 'long-medium', { flags: ['--tier', 'frontier', '--effort', 'medium'] });
+  assert.deepEqual([medium.model, medium.effort], ['claude-fable-5-2', 'medium']);
+  await f.finished(run, 'long-medium');
+  const { argv } = readJson(path.join(medium.outDir, 'invocation.json'));
+  assert.equal(argv[argv.indexOf('--effort') + 1], 'medium');
+  for (const level of ['xhigh', 'max', 'low']) {
+    const refused = await f.command(['start', run.id, `too-${level}`, '--agent', 'claude', '--tier', 'frontier', '--effort', level,
+      '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
+    assert.match(refused.stderr, new RegExp(`--effort ${level} is not allowed for the claude frontier tier: choose medium or high \\(never higher\\)`));
+  }
+  // Every other tier runs at its own effort only.
+  for (const [agent, tier] of [['claude', 'complex'], ['codex', 'complex']]) {
+    const refused = await f.command(['start', run.id, `${agent}-effort`, '--agent', agent, '--tier', tier, '--effort', 'high',
+      '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
+    assert.match(refused.stderr, new RegExp(`the ${agent} ${tier} tier runs at \\w+ only`));
+  }
+  assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')).sort(), ['long-medium']);
 });
 
 test('every tier reaches the relay with its policy model and effort, and status shows the tier', async (t) => {
@@ -141,12 +166,12 @@ test('a Claude follow-up keeps its tier, and a failed lighter attempt names the 
   assert.deepEqual([task.attempt, task.tier, task.model], [4, 'standard', policy.claude.tiers.standard.model]);
   await f.finished(run, 'lookup');
 
-  // A check the agent itself reported as failing counts too, and Codex `standard` names `complex`.
+  // A check the agent itself reported as failing counts too, and Codex `standard` names `strong`.
   const failing = { finalMessage: failingCheck };
   await f.start(run, 'scan', { agent: 'codex', config: failing });
   await f.finished(run, 'scan');
   const codex = await f.command(['start', run.id, 'scan', '--agent', 'codex', '--tier', 'standard', '--brief', f.brief('scan-again')]);
-  assert.match(codex.stdout, /^note: attempt 1 at the standard tier failed its review or gates; redo it one tier up, with --tier complex and a new --why$/m);
+  assert.match(codex.stdout, /^note: attempt 1 at the standard tier failed its review or gates; redo it one tier up, with --tier strong and a new --why$/m);
   await f.finished(run, 'scan');
 });
 

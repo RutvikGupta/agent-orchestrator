@@ -39,6 +39,14 @@ export function policyProblems(policy) {
       if (tier.effort !== undefined && (typeof tier.effort !== "string" || !EFFORT.test(tier.effort))) {
         problems.push(`${at}.effort must be a level such as "high", or left out for the CLI's default`);
       }
+      if (tier.efforts !== undefined) {
+        // The effort levels `start --effort` may choose for this tier; the tier's own effort is one of them.
+        if (!Array.isArray(tier.efforts) || !tier.efforts.length || tier.efforts.some((e) => typeof e !== "string" || !EFFORT.test(e))) {
+          problems.push(`${at}.efforts must be a list of levels such as ["medium", "high"]`);
+        } else if (tier.effort !== undefined && !tier.efforts.includes(tier.effort)) {
+          problems.push(`${at}.effort must be one of ${at}.efforts`);
+        }
+      }
       if (tier.use !== undefined && typeof tier.use !== "string") problems.push(`${at}.use must be a string`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
@@ -92,6 +100,19 @@ function refuse(message, code = 2) {
   throw new ModelRefused(message, code);
 }
 
+// The effort a task runs: its tier's, or the one --effort chose from the tier's `efforts`. A tier
+// without `efforts` runs only its own, so --effort is refused there, as is a level the tier lists not.
+function effortFor(key, name, tier, wanted) {
+  if (wanted === undefined || wanted === null) return tier.effort || null;
+  const allowed = Array.isArray(tier.efforts) ? tier.efforts : [];
+  if (!allowed.includes(wanted)) {
+    refuse(allowed.length
+      ? `--effort ${wanted} is not allowed for the ${key} ${name} tier: choose ${allowed.join(" or ")} (never higher)`
+      : `the ${key} ${name} tier runs at ${tier.effort || "the CLI's default effort"} only; --effort applies to tiers that list efforts in ${POLICY_PATH}`, 2);
+  }
+  return wanted;
+}
+
 // The tier, model and effort (null: the CLI's default) a task runs. `previousTier` is the tier of
 // the task's earlier attempt by the same agent: a Claude follow-up keeps it unless --tier is given.
 // A new task needs --tier, for both agents. A choice it cannot accept throws ModelRefused, which
@@ -109,13 +130,13 @@ export function modelFor(key, args, previousTier = null) {
       refuse(`--tier is required for a new Claude task: ${tierList(tiers)}. Choose the lightest tier that does the task as well as the top one (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
     }
     const tier = tierOf(tiers, name) || refuse(`unknown --tier "${args.tier}" for Claude (choose: ${tierList(tiers)})`, 2);
-    return { tier: name, model: tier.model, effort: tier.effort || null };
+    return { tier: name, model: tier.model, effort: effortFor(key, name, tier, args.effort) };
   }
   const names = Object.keys(tiers);
   if (override !== null) refuse(`choose the Codex model with --tier (${names.join(" | ")}), not --model/--effort`, 2);
   if (!args.tier) refuse(`--tier is required for Codex: ${tierList(tiers)} (see SKILL.md, "Choose the agent and model")${tierUses(tiers)}`, 2);
   const tier = tierOf(tiers, args.tier) || refuse(`unknown --tier "${args.tier}" (choose: ${names.join(", ")})`, 2);
-  return { tier: args.tier, model: tier.model, effort: tier.effort || null };
+  return { tier: args.tier, model: tier.model, effort: effortFor(key, args.tier, tier, args.effort) };
 }
 
 export function modelLabel(task) {

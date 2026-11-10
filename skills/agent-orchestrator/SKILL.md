@@ -217,14 +217,15 @@ statement of your assessment (the plan's `why`) that names the deciding factor b
 may omit `--why`; a Claude follow-up may also omit `--tier`. Each keeps its earlier value.
 
 Each tier's model is fixed by `policy.json` (`$ORCH agents` lists them), and `start` enforces it. Do
-not pass `--model` or `--effort`.
+not pass `--model`. Only the Claude `frontier` tier takes `--effort`, and only `medium` or `high`.
 
-- **Claude**: `--tier light` runs `claude-haiku-5-5`, `standard` runs `claude-sonnet-5-5`, and
-  `complex` runs `claude-opus-5-5`, all at effort `xhigh`. A new task needs `--tier`; a follow-up
-  attempt keeps its earlier tier (a task recorded before tiers existed resumes at `complex`). A
-  babysitter always runs `complex`, and `--babysit` implies it.
-- **Codex** needs `--tier`. `standard` runs `gpt-6.1-sol` at effort `medium`. `complex` runs
-  `gpt-6-astra` at effort `high`.
+- **Claude**, lightest first: `light` runs `claude-haiku-5-5`, `standard` `claude-sonnet-5-5`, and
+  `complex` `claude-opus-5-5`, all at effort `xhigh`. `frontier` runs `claude-fable-5-2` at `high`, or
+  `medium` with `--effort medium`, never above. A follow-up attempt keeps its earlier tier (a task
+  recorded before tiers existed resumes at `complex`). A babysitter always runs `complex`, and
+  `--babysit` implies it.
+- **Codex**, lightest first: `light` runs `gpt-6-luna`, `standard` `gpt-6.1-terra`, and `strong`
+  `gpt-6.1-sol`, all at effort `medium`. `complex` runs `gpt-6-astra` at `high`.
 
 Assess each task with these questions, then weigh the answers together:
 
@@ -253,31 +254,37 @@ Assess each task with these questions, then weigh the answers together:
 When the answers do not favor Codex, choose Claude. Re-assess after each failure and whenever you
 change the plan, not only at the start.
 
-**Prefer the lightest tier.** Most delegated work does not need the top model. These fit `light` or
-`standard`:
+**Match the model to the task.** Cheap, fast models do simple work as well as big ones; difficult
+work goes to the strongest models.
 
-- running tests or gates and reporting the result; reproducing a bug;
-- lookups, inventories and summaries; mechanical edits (renames, pattern refactors, lint or type fixes);
-- well-specified small changes with clear done criteria (1 to 5 files), docs and config edits, and
-  tests for existing behavior;
-- reviews of small diffs.
+- **Nothing to judge** (run tests or gates and report, lookups, inventories, summaries, reproducing a
+  bug from given steps, mechanical edits): Claude `light` or Codex `light`.
+- **Small judgment calls** (a change or test from a clear spec in 1 to 5 files, lint or type fixes,
+  docs and config edits, reviews of small diffs): Claude `standard` or Codex `standard`.
+- **Bounded but needing more judgment** (live web research, reviews of medium diffs, debugging in a
+  known area): Codex `strong`, or Claude `standard`.
+- **Complex**: choose Claude `complex` or Codex `complex` if **any** of these is true:
+  - The change spans several modules or more than about 5 files, or changes an interface that other
+    code depends on.
+  - The approach is not settled: the brief leaves design choices open, or the cause of a bug is not
+    yet known.
+  - Mistakes would be costly or subtle: concurrency, security or authentication, data migrations or
+    schemas, billing, performance-critical paths, or integration between systems.
+  - Doing it right requires understanding a large, unfamiliar subsystem.
+  - It reviews a large or high-risk diff, or babysits a pull request.
+  - A lighter-tier attempt at this task already failed review or its gates.
+- **Difficult and long** (long-horizon or unattended multi-step work, a large refactor or migration,
+  hard root-cause analysis across systems, a long audit or review, a `complex` attempt that failed):
+  Claude `frontier`. Fable 5.2 beats Opus 5.5 and Codex astra on agentic coding (FrontierSWE v2:
+  69.9% against 62.3% and 65.5%), keeps going until a long job is done, and at `high` matches
+  Opus's best at about half the cost per task. Use `--effort medium` for long but less hard work.
+  It costs about twice Opus per token, so never send it bounded or routine work.
 
-Take Claude `light` when there is nothing to judge: the brief says what to run, find or change, and
-the result is facts or a mechanical edit. Take `standard` (Codex's lower tier too) when the agent
-makes small judgment calls, such as writing a change or test from a clear spec or reviewing a small
-diff. Reviews and verification of another agent's work run at `standard` or above.
+Reviews and verification of another agent's work run at `standard` or above, on the other agent.
 
-For either agent, choose `complex` if **any** of these is true:
-
-- The change spans several modules or more than about 5 files, or changes an interface that other
-  code depends on.
-- The approach is not settled: the brief leaves design choices open, or the cause of a bug is not
-  yet known.
-- Mistakes would be costly or subtle: concurrency, security or authentication, data migrations or
-  schemas, billing, performance-critical paths, or integration between systems.
-- Doing it right requires understanding a large, unfamiliar subsystem.
-- It reviews a large or high-risk diff, or babysits a pull request.
-- A lighter-tier attempt at this task already failed review or its gates.
+Judge cost per accepted task, not per token: a cheap attempt that fails review costs a rework
+attempt and another review. Measure on this work, not on public benchmarks: when `$ORCH stats`
+shows a tier's first-attempt acceptance is low for a task type, start that type one tier up.
 
 When unsure between two tiers, take the lower one if a failure would be caught by the gates or
 review and is cheap to redo. Take the higher one only when a mistake would be costly or subtle.
@@ -419,9 +426,9 @@ $ORCH dispatch <run> [--max N] [--dry-run]
   task, babysitters, and tasks that need relay flags, such as research with live web search.
 
 ```bash
-$ORCH start <run> <task-id> --agent claude --tier light|standard|complex --why "<assessment>" \
+$ORCH start <run> <task-id> --agent claude --tier light|standard|complex|frontier --why "<assessment>" \
   --brief <brief-file> [--read-only] [--timeout 2h]
-$ORCH start <run> <task-id> --agent codex --tier standard --why "<assessment>" --brief <brief-file> \
+$ORCH start <run> <task-id> --agent codex --tier light|standard|strong|complex --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
 
@@ -793,7 +800,7 @@ implementer decision the user should confirm.
   its evidence. Then fix the confirmed cause in one write task.
 - **Research fan-out:** split broad research into independent areas, one task per area, all at
   once. Research agents run on Codex with live web search (`brief --type research`, then
-  `start <run> <id> --agent codex --tier standard --read-only --why "..." --brief <file> -- --web-search live`).
+  `start <run> <id> --agent codex --tier strong --read-only --why "..." --brief <file> -- --web-search live`).
   Merge their answers yourself, and check the claims that matter against their sources.
 - **Long sequential queue:** one task at a time, each one landed before the next is dispatched. See
   `~/.agents/skills/codex-delegate/references/multi-task-queues.md`.

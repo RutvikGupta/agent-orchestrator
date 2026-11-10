@@ -53,7 +53,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   unless the plan says otherwise. Writes the plan's brief path
                                   (default <run-dir>/briefs/TASK.md) or --out, and refuses to
                                   overwrite it without --force
-  start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--cd DIR]
+  start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
         [--max-parallel N] [--force] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
@@ -69,9 +69,10 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --why records the assessment behind the choice of agent and tier;
                                   it is required unless this attempt keeps the previous attempt's
                                   agent and tier. --tier picks the model from policy.json and is
-                                  required for a new task: Claude light|standard|complex, Codex
-                                  standard|complex. A Claude follow-up keeps its earlier tier (a
-                                  task recorded before tiers resumes at complex), and --babysit
+                                  required for a new task: Claude light|standard|complex|frontier, Codex
+                                  light|standard|strong|complex. Only frontier takes --effort (medium or high).
+                                  A Claude follow-up keeps its earlier tier (a task recorded before
+                                  tiers resumes at complex), and --babysit
                                   implies complex, so it needs none. "agents" lists each tier's model.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
@@ -205,7 +206,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["agent", "why", "brief", "tier", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
+  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },

@@ -7,7 +7,7 @@ model"); the models themselves live in `../policy.json`.
 
 | | Claude Code (`claude`) | Codex (`codex`) |
 | --- | --- | --- |
-| Model and effort | `--tier` is required for a new task. `light`: `claude-haiku-5-5`; `standard`: `claude-sonnet-5-5`; `complex` (also every babysitter's, implied by `--babysit`): `claude-opus-5-5`; all at `xhigh` | `--tier` is required. `standard`: `gpt-6.1-sol`, `medium`; `complex`: `gpt-6-astra`, `high` |
+| Model and effort | `--tier` is required for a new task. `light`: `claude-haiku-5-5`; `standard`: `claude-sonnet-5-5`; `complex` (also every babysitter's, implied by `--babysit`): `claude-opus-5-5`, all at `xhigh`; `frontier`: `claude-fable-5-2` at `high`, or `--effort medium`, never above | `--tier` is required. `light`: `gpt-6-luna`; `standard`: `gpt-6.1-terra`; `strong`: `gpt-6.1-sol`, all at `medium`; `complex`: `gpt-6-astra`, `high` |
 | Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) |
 | Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; may commit, push without force, and write to GitHub (force pushes, admin merges, secrets, repository creation and deletion, and nested `claude` denied); `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
 | `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run |
