@@ -1,8 +1,7 @@
 // Native sub-agents: agents that a session started with its host's own tool (Claude Code's Agent
 // tool, Codex's spawn_agent) instead of `orch.mjs start`. They bypass the model policy and
 // `--why`, but the views still list them, under the run that their session launched.
-//   Claude Code: <config>/projects/<project>/<session>/subagents/agent-*.jsonl plus .meta.json,
-//   and subagents/workflows/<workflow id>/agent-*.jsonl for the agents a Workflow started
+//   Claude Code: <config>/projects/<project>/<session>/subagents/agent-*.jsonl plus .meta.json
 //   Codex: <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl whose session_meta names the parent
 //   thread and has thread_source "subagent" (Codex's automatic approval reviews are skipped).
 // The session that launched a run is read from its own transcript the same way (`mainRow`).
@@ -129,47 +128,29 @@ function sessionSubagentDirs(sessionId) {
   return subagentDirs.bySession.get(sessionId);
 }
 
-// The transcripts in one sub-agent folder: the agents the Agent tool started (agent-*.jsonl), and
-// those a Workflow started, which Claude Code keeps one folder down (workflows/<workflow id>/).
-function agentFiles(dir) {
-  const list = (d) => {
-    try {
-      return fs.readdirSync(d);
-    } catch {
-      return []; // removed since it was found, or never there
-    }
-  };
-  const own = (d) => list(d).filter((f) => /^agent-.*\.jsonl$/.test(f)).map((f) => path.join(d, f));
-  const flows = path.join(dir, "workflows");
-  return [...own(dir), ...list(flows).flatMap((wf) => own(path.join(flows, wf)))];
-}
-
 export function claudeNativeAgents(sessionId, parentLabel, window = [0, Infinity]) {
   const rows = [];
-  const ids = new Set();
   for (const dir of sessionSubagentDirs(sessionId)) {
-    for (const file of agentFiles(dir)) {
-      const n = path.basename(file);
-      let stat;
-      try {
-        stat = fs.statSync(file);
-      } catch {
-        continue; // removed since it was listed
-      }
+    let names = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue; // removed since it was found
+    }
+    for (const n of names.filter((f) => /^agent-.*\.jsonl$/.test(f))) {
+      const file = path.join(dir, n);
+      const stat = fs.statSync(file);
       const startedMs = stat.birthtimeMs || stat.mtimeMs;
       if (!(startedMs >= window[0] && startedMs < window[1])) continue;
       const meta = readJson(file.replace(/\.jsonl$/, ".meta.json")) || {};
       const summary = summarizeEvents("claude", file, null);
       const agentId = n.replace(/^agent-|\.jsonl$/g, "");
-      // Two agents with one description, as a workflow's often have, get distinct ids.
-      let id = slug(meta.description || agentId).slice(0, 28);
-      if (ids.has(id)) id = `${id.slice(0, 21)}-${agentId.slice(-6)}`;
-      ids.add(id);
+      const id = slug(meta.description || agentId).slice(0, 28);
       // Claude Code only sometimes adds `finished: true` to .meta.json; the transcript's end is reliable.
       const finished = meta.finished === true || Boolean(summary.ended);
       const interrupted = summary.interrupted && !summary.busy;
       const silent = Date.now() - stat.mtimeMs > TURN_SILENT_MS;
-      const row = nativeRow({ id, agent: "claude", parent: parentLabel, startedMs, lastMs: stat.mtimeMs, running: !finished && !interrupted && !silent, summary, sessionId: agentId, file, description: meta.workflowPhase ? `workflow agent (${meta.workflowPhase}): ${meta.description || agentId}` : meta.description || meta.agentType });
+      const row = nativeRow({ id, agent: "claude", parent: parentLabel, startedMs, lastMs: stat.mtimeMs, running: !finished && !interrupted && !silent, summary, sessionId: agentId, file, description: meta.description || meta.agentType });
       if (row.stateSource !== "transcript" || finished || !(interrupted || silent)) rows.push(row);
       else rows.push({ ...row, state: "stopped", now: `${interrupted ? "interrupted by the user" : "stopped without finishing"}; last: ${row.now}` });
     }

@@ -270,10 +270,6 @@ test('an agent a task\'s shell started shows once, as its row under the task, wi
   // The agent's own session: its transcript, and one sub-agent that its Agent tool started.
   transcript(f, 'task-shell-session');
   agentTranscript(f, path.join(projectDir(f), 'task-shell-session', 'subagents'), 'helper', 'helper');
-  // Two agents that its Workflow tool started, with one description: Claude Code keeps them one folder down.
-  const flow = path.join(projectDir(f), 'task-shell-session', 'subagents', 'workflows', 'wf_1');
-  agentTranscript(f, flow, 'a1b2c3d4e5f60001', 'check-a-standard');
-  agentTranscript(f, flow, 'a1b2c3d4e5f60002', 'check-a-standard');
   fakes.start(fakes.session('task-agent', 'claude', [
     fakes.claude('agent', 'task-shell-session', { env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'reviewer' } }),
   ]));
@@ -289,11 +285,7 @@ test('an agent a task\'s shell started shows once, as its row under the task, wi
   assert.equal(agent.parentKey, row.key);
   const helper = boardRows(state).find((r) => r.id === 'helper');
   assert.deepEqual([helper.mode, helper.native, helper.parentKey, helper.depth, helper.run, helper.parent], ['native', true, agent.key, agent.depth + 1, run.id, agent.id]);
-  const checkers = boardRows(state).filter((r) => r.id.startsWith('check-a-standard'));
-  assert.deepEqual(checkers.map((r) => r.id).sort(), ['check-a-standard', 'check-a-standard-f60002'], 'each workflow agent has a row of its own');
-  assert.deepEqual(checkers.map((r) => [r.native, r.parentKey, r.depth]), [[true, agent.key, agent.depth + 1], [true, agent.key, agent.depth + 1]]);
-  assert.equal(new Set(checkers.map((r) => r.key)).size, 2);
-  assert.equal(agent.kids, 3);
+  assert.equal(agent.kids, 1);
   // Nothing else shows the agent: no section of its own, and no second row.
   assert.ok(!state.some((s) => s.id === 'claude-task-shell-session'), `its session got a section: ${JSON.stringify(state.map((s) => s.id))}`);
   assert.deepEqual(boardRows(state).filter((r) => r.session === 'task-shell-session').map((r) => r.id), [agent.id], 'one row for the agent');
