@@ -21,7 +21,7 @@ the user's choices, and when to ask before dispatching.
 | `owns`, `readOnly` | Files or directories the task may change; `readOnly: true` (reviews, investigations, research, second opinions) owns nothing |
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
-| `dependsOn` | Task ids that must be integrated before this task starts |
+| `dependsOn` | Task ids that must be integrated before this task starts. `dispatch` waits for them, `start` refuses without them, and `integrate` takes tasks in this order |
 | `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out), and your one-line assessment |
 | `brief` | The brief file, relative to the run directory |
 
@@ -36,6 +36,9 @@ Two tasks that own different files can still break each other:
 `uses`, `produces` and `resources` make these explicit. When a task uses what another produces,
 make it depend on the producer, or settle the interface's exact shape in both briefs before either
 starts.
+
+`dispatch` and `start` check owned paths and resources again, against the tasks that run now
+(`references/dispatch.md`).
 
 ## Parallel limit
 
@@ -53,4 +56,8 @@ starts.
   paths or a shared resource. Fix what it reports: add a dependency, split the path or resource,
   or merge the tasks.
 - Record every later change the same way. `--check` only validates.
+- A new plan replaces the old one. Started tasks keep their records. A running task cannot be
+  dropped, and keeps the owned paths and resources it started with until it finishes.
+- Add a task that belongs to the job to the plan. Starting one the plan does not name is an
+  exception (`references/dispatch.md`, "Plan checks").
 - The briefs need not exist yet: `plan` lists the ones still to write, and `brief` drafts them.

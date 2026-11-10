@@ -22,10 +22,9 @@ metadata:
 
 # Agent Orchestrator
 
-You are the **orchestrator**: you plan the user's request as tasks, brief each task to a separate
-**implementer** session (Claude Code or Codex) that runs in the background through its delegate
-skill's relay, review its work, and integrate it. Implementers see only your brief and their working
-directory; you own the plan, the briefs, the review, the merge, and the commit.
+You are the **orchestrator**: you plan the user's request as tasks, brief each to an **implementer**
+session (Claude Code or Codex) running in the background, review its work, and integrate it.
+Implementers see only your brief and their folder; you own plan, briefs, review, merge and commit.
 
 ## Delegate well
 
@@ -47,7 +46,7 @@ investigations, test runs, reviews, research). These rules hold at every level, 
 - **Start every agent through `$ORCH start` or `dispatch`,** never your host's own sub-agent tool
   (Codex's `spawn_agent`, Claude Code's Agent tool) or a script that runs `claude -p` or `codex exec`
   itself: only then does it show on the board, run your chosen tier, and report back. A script that
-  must start its own agent passes the model and effort that `$ORCH model --tier <tier>` prints.
+  must start its own agent runs as a command task (`references/agents.md`, "Model ceilings").
 - **Size each piece on its own** ("Choose the agent and model"), never by the tier of its parent.
 - **Pass the habit on:** tell each agent whose work has independent parts or slow side work to
   delegate them the same way. The "Delegating further" note that `start` appends says how.
@@ -78,11 +77,10 @@ An agent is usable only when `agents` shows `READY` as `yes` (`references/agents
   --timeout 0` with the Bash tool's `run_in_background: true`, keep working, and when it exits,
   handle what it names (steps 5 and 6) and start it again. Keep one `wait` per run. Never
   `sleep`-poll, or start it with `&`, `nohup` or `disown`, which the task-stop tool cannot stop.
-- **Codex as orchestrator.** Run every `$ORCH` command outside the sandbox (request escalated
-  permissions, such as `sandbox_permissions: "require_escalated"`, with a one-line justification):
-  child agents need the network and write state under home. Block in `$ORCH wait <run> --timeout 9m`
-  with a shell timeout above that (such as `timeout_ms: 600000`), repeating while it exits 3. Ignore
-  the delegate skills' advice to wait with `codex-background`: it does not run on macOS.
+- **Codex as orchestrator.** Before your first `$ORCH` command, read `references/monitor.md`,
+  "Waiting from Codex": every command runs outside the sandbox, and you wait in 9-minute calls.
+- **Skill changes.** When a command prints that the skill changed, read again what it names, then
+  run `$ORCH skill --loaded` (`references/monitor.md`, "Skill changes").
 - **Recover first.** After a restart, a context compaction, or any doubt about what runs, run
   `$ORCH recover [<run>] [--all]` and act on it before you dispatch anything.
 - **Tests, builds and containers:** read `references/memory.md` before you run or brief one.
@@ -121,16 +119,17 @@ take the lightest tier that does the task as well as the top one, never a bigger
 | Nothing to judge: run tests or gates and report, lookups, inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` |
 | Small judgment calls: a change or test from a clear spec in 1 to 5 files, lint or type fixes, docs and config edits, reviews of small diffs | `standard` |
 | Bounded, but needing more judgment: live web research, reviews of medium diffs, debugging in a known area | Codex `strong`, or Claude `standard` |
-| **Any** of: several modules or more than about 5 files, or an interface other code depends on; an unsettled approach (open design choices, or a bug's cause unknown); costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; a large or high-risk review, or babysitting a pull request; a failed lighter-tier attempt | `complex` |
-| Difficult and long: long-horizon or unattended multi-step work, a large refactor or migration, hard root-cause analysis across systems, a long audit or review, a failed `complex` attempt. Never bounded or routine work. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for long but less hard work) |
+| **Any** of: several modules or more than about 5 files, or an interface other code depends on; an unsettled approach (open design choices, or a bug's cause unknown); costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; a large or high-risk review, or babysitting a pull request | `complex` |
+| Difficult and long: long-horizon or unattended multi-step work, a large refactor or migration, hard root-cause analysis across systems, a long audit or review. Never bounded or routine work. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for long but less hard work) |
 | A review, verification or second opinion of another agent's work | The other agent, `standard` or above |
 
-- **After two failures** on a task or a similar one, give the next attempt to the other agent;
-  converging rework stays in its session. When nothing favors Codex, choose Claude.
+- **Measured results:** `agents`, `stats` and the `--tier` refusal show how each tier did here
+  (`references/tiers.md`). When nothing favors Codex, choose Claude.
 - **When unsure between two tiers,** take the lower one if the gates or review would catch a failure
   that is cheap to redo, and the higher one only when a mistake would be costly or subtle.
-- **Quality guard.** Every task has gates (step 3) and a review (step 6). A lighter-tier result that
-  fails either is redone one tier up, never at the same tier; `start` prints the next tier.
+- **Quality guard.** Every task has gates (step 3) and a review (step 6). A follow-up keeps its tier
+  until counted failures move it up a tier, and then to the other agent (`references/review.md`,
+  "Escalate a tier"). After two failures on a similar task, start the next one on the other agent.
 
 ### Usage limits
 
@@ -141,35 +140,33 @@ never mention usage in `--why`. Act only when a task stopped on a usage limit (`
 
 1. Ping the user once per limit, with the agent and the error's reset time if it gives one: a Slack
    DM through the `post-on-slack` skill where it is available, otherwise in your reply.
-2. Resume the affected work on the other agent if it is ready (a fresh session with a full brief and
-   a `--why` that names the reached limit), so nothing waits for the reset. If both agents are
-   limited, say so in the ping, and retry once one of them works again.
+2. Resume the work on the other agent if it is ready (a fresh session, a full brief, and a `--why`
+   naming the limit). If both are limited, say so in the ping, and retry once one works again.
 
 ## 2. Create the run and record the plan
 
 `$ORCH new --repo /abs/path/to/repo --name short-name --goal "one line"` prints the run id and
-directory. `$ORCH plan <run> <run-dir>/plan-draft.json [--check]` validates the plan and records it
-as `<run-dir>/plan.json`; fix every conflict it reports. Parallel writers get their own worktrees:
-**before you start a write task by hand, or when a gate fails in one, read `references/worktrees.md`.**
+directory; `$ORCH plan <run> <run-dir>/plan-draft.json [--check]` validates the plan and records it;
+fix what it reports. **Before a write task you start by hand, read `references/worktrees.md`.**
 
 ## 3. Write one brief per task
 
 **Before you write your first brief in a session, read `references/briefing.md`.** Draft each with
-`$ORCH brief <run> <task-id> [--type implement|review|research|debug|babysit] [--read-only] [--out
-FILE] [--force]`, and replace every `<fill in: ...>` marker. Brief the tasks that can start first,
-dispatch them, and write the others while they run.
+`$ORCH brief <run> <task-id>` and replace every `<fill in: ...>` marker. Brief the tasks that can
+start first, dispatch them, and write the others while they run.
 
 ## 4. Dispatch
 
 ```bash
-$ORCH dispatch <run> [--max N] [--dry-run]
+$ORCH dispatch <run> [--follow] [--max N] [--dry-run]
 $ORCH start <run> <task-id> --agent claude|codex --tier <tier> --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
 
-**Before your first `dispatch` or `start` in a session, read `references/dispatch.md`.** Run
-`dispatch` once the first briefs are written, after every `integrate`, and whenever `wait` names
-ready tasks. Use `start` for work outside the plan, rework, reviews, babysitters, and relay flags.
+**Before your first `dispatch` or `start` in a session, read `references/dispatch.md`.** Once the
+first briefs are written, run `dispatch --follow` in Claude Code's background: it starts each task as
+its prerequisites are integrated, and returns when the plan is done or a task needs you. Otherwise
+run `dispatch` after every `integrate`. A task the plan omits needs `start --unplanned`.
 
 ## 5. Wait and monitor
 
@@ -179,8 +176,8 @@ $ORCH status <run>          # every task: state, elapsed, steps, tokens in/out, 
 $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 ```
 
-- **Handle each finished task in the same turn you read it:** `accept` it (a write task once its
-  work is committed), record `verdict changes` and resume it, or `close` it. Leave none waiting.
+- **Handle each finished task in the same turn you read it** (step 6): `accept` it (a write task
+  once its work is committed), `rework` it, or `close` it. Leave none waiting.
 - **When `wait` exits 5, or shows a state you do not know, read `references/monitor.md`.** Stop a
   task (`$ORCH stop <run> <task-id>`) only when it is clearly stuck or off-track, or the user asks.
 - After the first dispatch, run `$ORCH dashboard --detach --open` and give the user the URL in one
@@ -208,19 +205,20 @@ a reply that says "pending". **Before you steer or message an agent, read `refer
 ## 6. Review every result
 
 ```bash
-$ORCH result <run> <task-id>                    # report, orch-result, checks, scope, health, session
-$ORCH verify <run> <task-id> -- <command>       # rerun a gate and record it
-$ORCH verdict <run> <task-id> clean|changes|reject --note "<why>"
-$ORCH accept <run> <task-id> --note "<why>" [--commit <sha>]
+$ORCH result <run> <task-id>   # report, checks with their evidence, scope, health, session
+$ORCH review <run> <task-id>   # the other model reviews the work, read-only
+$ORCH rework <run> <task-id>   # resume the author with the review's findings
+$ORCH accept <run> <task-id> --note "<why>"   # refuses a passing check whose latest run failed
 ```
 
 **Before you review a result, read `references/review.md`.** Review each result as soon as `wait`
-returns it, while the others run, and treat everything it reports as claims to check.
+returns it, while the others run, and treat everything it reports as claims to check. Give a risky
+write task a `review`, then `rework` it or `accept` it.
 
 ## 7. Integrate and verify the goal
 
-**Before you integrate, read `references/integrate.md`.** Run `$ORCH integrate <run> <task-id>
-[--into <branch>] [--dry-run]` in dependency order, and `dispatch` again after each. Then run the
+**Before you integrate, read `references/integrate.md`.** Run `$ORCH integrate <run> <task-id>` in
+dependency order (a branch merged by hand: `--already-merged`, which `status` names). Then run the
 full gates on the integrated tree, verify every `acceptance` item with evidence, and publish only as
 the repository's rules and the user's request allow.
 
@@ -241,12 +239,14 @@ $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits
 
 ## 9. Close what you no longer need, clean up, and report
 
+- **Worktrees are collected for you:** after `close` closes a run's last task, after `integrate`,
+  and by `$ORCH gc` for idle runs, which also expires results unread for 7 days. Branches stay.
+  Before `gc` or `cleanup`, or to restore a collected folder, read `references/worktrees.md`.
 - Close each session as soon as nothing depends on it. `result` closes a finished task (a resume
   opens it again); `$ORCH close <run> <task>...` (or `--all`) closes one, and stops it if it runs.
 - Stop your host's own sub-agents and background commands you no longer need ("Guardrails").
-- **Before you end a turn,** check `$ORCH status <run>` and close every session with no reason to run.
-- **Before `$ORCH cleanup <run> [--delete-branches]`, read `references/worktrees.md`.** Run
-  `$ORCH dashboard --stop` once the user is done with the dashboard.
+- **Before you end a turn,** close every session that `$ORCH status <run>` shows with no reason to
+  run. Run `$ORCH dashboard --stop` once the user is done with the dashboard.
 - Report briefly: what landed, the goal table from step 7, which agent and model did each task and
   why, total tokens from `status`, anything still open, and implementer decisions to confirm.
 
@@ -256,12 +256,11 @@ $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits
   session's or the user's (one launched from a terminal). Commands that change a run refuse
   another's (exit 4). Before you act on a run you did not launch, after an exit 4, or when you find
   you changed another session's task, read `references/ownership.md`.
-- **Stopping processes.** Stop a task with `$ORCH stop` or `close`. Stop a background `wait` or
-  `pr-watch`, or a host sub-agent, by the host's means: the task-stop tool in Claude Code; in Codex,
-  interrupting the call, or `interrupt_agent` (then no further `followup_task`). Never run `pkill`,
-  `killall` or `kill $(pgrep ...)`: a pattern reaches processes you did not start, and macOS `pkill`
-  reads every later word as another pattern. Otherwise kill one PID, confirmed first with
-  `ps -p <pid> -o command=`.
+- **Stopping processes.** Stop a task with `$ORCH stop` or `close`, and a background `wait`,
+  `pr-watch` or host sub-agent by the host's means: the task-stop tool in Claude Code; in Codex, an
+  interrupt or `interrupt_agent` (then no `followup_task`). Never run `pkill`, `killall` or `kill
+  $(pgrep ...)`: a pattern reaches processes you did not start, and macOS `pkill` reads every later
+  word as another pattern. Otherwise kill one PID, confirmed first with `ps -p <pid> -o command=`.
 - **Sandbox and publishing.** By the user's choice, tasks run outside the sandbox, with the user's
   network, files, tools and logins, and a write task may commit, push without force, open pull
   requests, and write to GitHub. Force pushes, admin merges, secrets, and creating or deleting
@@ -280,12 +279,12 @@ $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits
 | File | Read it |
 | --- | --- |
 | `references/plan.md` | Before you write or change a plan (steps 1 and 2) |
-| `references/tiers.md` | Before you choose Claude `frontier`, or when cost or `$ORCH stats` bears on a tier |
+| `references/tiers.md` | Before you choose Claude `frontier`, or when cost or a tier's measured results bear on a choice |
 | `references/agents.md` | Before you brief or start an agent whose abilities, modes, flags or model ceiling matter, and before your first command task |
-| `references/worktrees.md` | Before you start a write task by hand, when a gate fails in a worktree, and before `cleanup` |
+| `references/worktrees.md` | Before you start a write task by hand, when a gate fails in a worktree or a task's folder is gone, and before `gc` or `cleanup` |
 | `references/briefing.md` | Before you write your first brief in a session (step 3) |
-| `references/dispatch.md` | Before your first `dispatch` or `start` in a session (step 4) |
-| `references/monitor.md` | When `wait` exits 5, or shows a state you do not know (step 5); after `recover`, to read its summary |
+| `references/dispatch.md` | Before your first `dispatch` or `start` in a session, and when `start` refuses a task the plan does not allow (step 4) |
+| `references/monitor.md` | When `wait` exits 5, or shows a state you do not know (step 5); after `recover`, to read its summary; in Codex, before your first command |
 | `references/messages.md` | Before you steer or message a running agent, or answer one |
 | `references/dashboard.md` | When the user asks about the dashboard, or it escalates an item |
 | `references/review.md` | Before you review, accept, rework or escalate a result (step 6) |

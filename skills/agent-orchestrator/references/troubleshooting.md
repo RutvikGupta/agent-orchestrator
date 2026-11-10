@@ -18,3 +18,9 @@ Read this when a command, task or gate fails in a way the step you are on does n
 | `timeout`, `dead`, `silent`, `quiet` for a long time, or a transient error after `retried <task>` | Check `log`, then resume the session (`wait` prints the command) with a narrower delta brief, split the task, or start it fresh |
 | A gate needs Docker, a database or other host services that a sandboxed task (Claude `--sandbox`, or a Codex sandbox) cannot reach | Tell the implementer to skip that gate, and run it yourself during review |
 | Worktree gates fail on missing dependencies or ignored files | See `references/worktrees.md`, "Preparation" |
+| `start` refuses with `counted failures at <agent> <tier>` | Start the agent and tier that it names, with a fresh brief and a new `--why` (`references/review.md`, "Escalate a tier") |
+| `start` refuses a task that is `not in the plan`, `waits on` another, or `conflicts with running task` | See `references/dispatch.md`, "Plan checks" |
+| `start` refuses because a task's folder was collected | Run the `worktree` command that it prints (`references/worktrees.md`, "Restoring a collected worktree") |
+| `accept` refuses with `a passing check matched a failed run` | Rerun the gate with `verify`, then fix the work or record why with `--unverified` (`references/review.md`, "Accept") |
+| The board shows `⚠ ... exceeds the <tier> ceiling` | See `references/dashboard.md`, "Model ceiling warnings" |
+| Every command prints `orch: the skill changed since this session loaded it` | See `references/monitor.md`, "Skill changes" |
