@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fixture, readJson, writeJson } from './helpers.mjs';
+import { fixture, eventually, readJson, writeJson } from './helpers.mjs';
 
 for (const agent of ['claude', 'codex']) {
   test(`wait retries ${agent} once in the same session and waits for completion`, async (t) => {
@@ -145,4 +145,139 @@ test('start accepts a brief that quotes a full marker inside a code span', async
   fs.appendFileSync(brief, 'start refuses briefs with `<fill in: …>` markers.\n');
   await f.command(['start', run.id, 'task', '--agent', 'claude', '--tier', 'standard', '--why', 'Fixture assessment', '--brief', brief]);
   assert.equal((await f.finished(run, 'task')).state, 'completed');
+});
+
+
+test('wait and dispatch racing to retry one attempt start exactly one relay', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'task', { flags: ['--read-only'], config: { status: 'failed', error: 'HTTP 503' } });
+  await f.finished(run, 'task');
+  const plan = path.join(f.root, 'plan.json');
+  writeJson(plan, { goal: 'Retry once', tasks: [{ id: 'task', goal: 'Inspect', agent: 'claude', tier: 'complex',
+    why: 'Fixture', readOnly: true, owns: [], brief: f.brief('plan') }] });
+  await f.command(['plan', run.id, plan]);
+  const retryBrief = path.join(run.dir, 'tasks', 'task', 'retry-1.md');
+  const prefix = path.join(f.root, 'claim');
+  const preload = path.join(f.root, 'claim.cjs');
+  // Both callers read the same failed attempt before attempting the exclusive write. Keep the
+  // winner before startTask until the loser has tried, so a PID check cannot mask a missing claim.
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const write = fs.writeFileSync;
+const who = process.argv[2];
+const prefix = ${JSON.stringify(prefix)};
+const pause = (file) => {
+  const until = Date.now() + 12000;
+  while (!fs.existsSync(file)) {
+    if (Date.now() > until) throw new Error('claim handshake timed out');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+};
+fs.writeFileSync = function(file, ...args) {
+  if (String(file) !== ${JSON.stringify(retryBrief)} || !['wait', 'dispatch'].includes(who)) return write.call(this, file, ...args);
+  write(prefix + '-' + who + '-ready', '');
+  pause(prefix + '-' + who + '-go');
+  try {
+    const result = write.call(this, file, ...args);
+    write(prefix + '-' + who + '-won', '');
+    pause(prefix + '-finish');
+    return result;
+  } catch (error) {
+    if (error.code === 'EEXIST') write(prefix + '-' + who + '-lost', '');
+    throw error;
+  }
+};`);
+  const launches = path.join(f.root, 'launches.jsonl');
+  const relay = path.join(f.skills, 'claude-delegate/scripts/relay.mjs');
+  fs.writeFileSync(relay, fs.readFileSync(relay, 'utf8').replace('fs.mkdirSync(out,',
+    `fs.appendFileSync(${JSON.stringify(launches)}, JSON.stringify({ pid: process.pid, out }) + '\\n');\nfs.mkdirSync(out,`));
+  const env = { NODE_OPTIONS: `--require=${preload}` };
+  const waiting = f.command(['wait', run.id, '--timeout', '10s'], { env });
+  const dispatching = f.command(['dispatch', run.id, '--follow'], { env, code: 1 });
+  // Attach rejection handlers while the handshakes are being driven.
+  const finished = Promise.allSettled([waiting, dispatching]);
+  try {
+    await eventually(() => ['wait', 'dispatch'].every((id) => fs.existsSync(`${prefix}-${id}-ready`)), 'both retry claims did not reach the race');
+    fs.writeFileSync(`${prefix}-wait-go`, '');
+    await eventually(() => fs.existsSync(`${prefix}-wait-won`), 'first claim did not win');
+    fs.writeFileSync(`${prefix}-dispatch-go`, '');
+    await eventually(() => fs.existsSync(`${prefix}-dispatch-lost`), 'second claim must lose while the winner has not started');
+    assert.equal(fs.existsSync(`${prefix}-dispatch-won`), false);
+    await dispatching; // finish the losing caller before releasing the winner into startTask
+  } finally {
+    fs.writeFileSync(`${prefix}-wait-go`, '');
+    fs.writeFileSync(`${prefix}-dispatch-go`, '');
+    fs.writeFileSync(`${prefix}-finish`, '');
+    await finished;
+  }
+  await waiting;
+  await dispatching;
+  const saved = readJson(f.taskFile(run, 'task'));
+  assert.equal(saved.attempt, 2);
+  assert.equal(saved.retries, 1);
+  assert.equal(saved.retryLog.length, 1);
+  const started = fs.readFileSync(launches, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(started.length, 1, 'only one relay can resume the shared session');
+  assert.equal(started[0].pid, saved.pid, 'the only retry relay is tracked');
+});
+
+test('a refused retry releases its claim so a later wait can start it', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'retry', { config: { status: 'failed', error: 'HTTP 503' } });
+  await f.finished(run, 'retry');
+  const blocker = await f.start(run, 'writer', { config: { hold: true } });
+  await f.ready(blocker);
+  const brief = path.join(run.dir, 'tasks', 'retry', 'retry-1.md');
+  const refused = await f.command(['wait', run.id, 'retry', '--timeout', '1s']);
+  assert.doesNotMatch(refused.stdout, /retried retry/);
+  assert.equal(readJson(f.taskFile(run, 'retry')).attempt, 1);
+  assert.equal(fs.existsSync(brief), false, 'a refused start must release the claim');
+  f.release(blocker);
+  await f.finished(run, 'writer');
+  assert.match((await f.command(['wait', run.id, 'retry', '--timeout', '10s'])).stdout, /retried retry/);
+  assert.equal(readJson(f.taskFile(run, 'retry')).attempt, 2);
+  assert.equal(fs.existsSync(brief), true, 'a successful retry keeps its claim');
+});
+
+test('a stale failure snapshot cannot retry a newer completed attempt', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'task', { flags: ['--read-only'], config: { status: 'failed', error: 'HTTP 503' } });
+  await f.finished(run, 'task');
+  const marker = path.join(f.root, 'stale-row');
+  const preload = path.join(f.root, 'stale-row.cjs');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const read = fs.readFileSync;
+let held = false;
+fs.readFileSync = function(file, ...args) {
+  if (!held && String(file) === ${JSON.stringify(f.taskFile(run, 'task'))} && new Error().stack.includes('/retry.mjs:')) {
+    held = true;
+    fs.writeFileSync(${JSON.stringify(marker)}, '');
+    const until = Date.now() + 12000;
+    while (!fs.existsSync(${JSON.stringify(marker + '.release')})) {
+      if (Date.now() > until) throw new Error('stale row handshake timed out');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  return read.call(this, file, ...args);
+};`);
+  const stale = f.command(['wait', run.id, '--timeout', '10s'], {
+    env: { NODE_OPTIONS: `--require=${preload}`, AGENT_ORCH_MAX_RETRIES: '2' },
+  });
+  const settled = Promise.allSettled([stale]);
+  try {
+    await eventually(() => fs.existsSync(marker), 'wait did not capture its old failure snapshot');
+    const winner = await f.command(['wait', run.id, '--timeout', '10s'], { env: { AGENT_ORCH_MAX_RETRIES: '2' } });
+    assert.match(winner.stdout, /retried task/);
+    assert.equal(readJson(f.taskFile(run, 'task')).attempt, 2);
+  } finally {
+    fs.writeFileSync(`${marker}.release`, '');
+    await settled;
+  }
+  assert.doesNotMatch((await stale).stdout, /retried task/);
+  const saved = readJson(f.taskFile(run, 'task'));
+  assert.equal(saved.attempt, 2);
+  assert.equal(saved.retries, 1);
+  assert.equal(fs.existsSync(path.join(run.dir, 'tasks/task/retry-2.md')), false);
 });

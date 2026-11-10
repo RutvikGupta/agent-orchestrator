@@ -198,7 +198,6 @@ function dispatchWave(args) {
   // A dry run changes nothing, so anyone may look.
   if (!dryRun) guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
   const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
-  if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
   const rows = listTasks(run);
   const progress = planProgress(plan, phaseMap(run, rows, plan));
   const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
@@ -295,6 +294,8 @@ function dispatchWave(args) {
 }
 
 export async function cmdDispatch(args) {
+  // Before anything revives a watcher, retries a task or writes state: a bad --max changes nothing.
+  if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
   const follow = Boolean(args.follow && !args["dry-run"]);
   const wake = follow ? inboxWake() : null;
   const started = [];
