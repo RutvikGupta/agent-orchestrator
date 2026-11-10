@@ -1,31 +1,47 @@
 # Agents: how each implementer behaves
 
-Facts come from each delegate skill's relay (`~/.agents/skills/<agent>-delegate/`). Its `SKILL.md`
-and `references/dispatch-and-poll.md` remain the authority on flags; check `relay.mjs --help` for
-the installed version. Which agent and tier to use is decided in `SKILL.md` ("Choose the agent and
-model"); the models themselves live in `../policy.json`.
+Read this before you brief or start an agent whose abilities, modes, flags or model ceiling matter,
+and before your first command task. Facts come from each delegate skill's relay
+(`~/.agents/skills/<agent>-delegate/`). Its `SKILL.md` and `references/dispatch-and-poll.md` remain
+the authority on flags; check `relay.mjs --help` for the installed version. Which agent and tier to
+use is decided in `SKILL.md` ("Choose the agent and model"); the models live in `../policy.json`.
+
+## What each agent can do
+
+These are hard limits of the relays on this machine:
+
+- **Run commands without editing** (reproduce a bug, run tests or scripts and report, read
+  `git log`): Codex `--read-only`. On Claude, use a write task whose brief forbids edits (see
+  `--read-only` below).
+- **Look things up on the live web:** only Codex, with `-- --web-search live`. The Claude relay
+  removes Claude's web tools.
+- **Review a diff on its own:** Codex can run `git diff`. A Claude reviewer needs the diff pasted
+  into its brief.
+- **Network access** (GitHub, package installs, APIs): every write task has it; a read-only Codex
+  task does not (see "Unavailable in the child" below).
+
+## Modes and flags
 
 | | Claude Code (`claude`) | Codex (`codex`) |
 | --- | --- | --- |
-| Model and effort | `--tier` is required for a new task. `light`: `claude-haiku-5-5`; `standard`: `claude-sonnet-5-5`; `complex` (also every babysitter's, implied by `--babysit`): `claude-opus-5-5`, all at `xhigh`; `frontier`: `claude-fable-5-2` at `high`, or `--effort medium`, never above | `--tier` is required. `light`: `gpt-6-luna`; `standard`: `gpt-6.1-terra`; `strong`: `gpt-6.1-sol`, all at `medium`; `complex`: `gpt-6-astra`, `high` |
+| Model and effort | `--tier` picks them (`SKILL.md`, "Choose the agent and model") | `--tier` picks them (`SKILL.md`, "Choose the agent and model") |
 | Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) |
-| Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; may commit, push without force, and write to GitHub (force pushes, admin merges, secrets, repository creation and deletion, and nested `claude` denied); `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
+| Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; publishes as `SKILL.md` ("Guardrails") allows, and nested `claude` is denied; `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
 | `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run |
-| Session id (for `-- --session`) | `sessionId`; a follow-up attempt keeps its tier unless `--tier` switches it (a task recorded before tiers resumes at `complex`) | `threadId`; a resumed thread may switch tier |
+| Session id (for `-- --session`) | `sessionId`; a follow-up attempt keeps its tier unless `--tier` switches it | `threadId`; a resumed thread may switch tier |
 | Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost |
 | Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` |
 | `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged |
 | Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged |
 | `--sandbox` | Write-task file tools stay in the working directory. Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access |
-| `--babysit` | Commits and non-force pushes allowed; `gh` replies allowed; force push, admin merge, closing, and repository settings denied | Not supported: babysitting runs on Claude |
+| `--babysit` | May publish to its pull request (`references/babysit.md`, "Start it") | Not supported: babysitting runs on Claude |
 | Unavailable in the child | MCP servers, skill invocation (it reads a skill's `SKILL.md` instead, as briefs ask for testing skills), slash commands, subagents, web tools | MCP servers it is not configured with; with `--sandbox` or `--read-only`, the network |
 | Login | `claude auth status` / `claude auth login` | `codex login status` / `codex login` |
 
 ## Practical notes
 
-- **No sandbox by default:** the user chose to run tasks outside the sandbox, so they reach the
-  network, SSH, the keychain, and tool state as the user does. `--sandbox` confines a task again;
-  `--offline` confines it and blocks the network. In Claude's sandbox the relay's own sandbox
+- **Sandboxing a task:** outside the sandbox, a task reaches SSH, the keychain and tool state as the
+  user does. `--sandbox` confines a task again; `--offline` confines it and blocks the network. In Claude's sandbox the relay's own sandbox
   settings replace any in the user's or the project's Claude settings, and its proxy refuses SSH,
   so `start` rewrites GitHub SSH remotes to HTTPS (environment `GIT_CONFIG_*`) for sandboxed
   Claude tasks.
@@ -36,51 +52,14 @@ model"); the models themselves live in `../policy.json`.
 - **Tool directories (`--sandbox` only):** a sandboxed Claude write task may also write `~/.cache`,
   `~/Library/Caches`, and `~/.local/share/uv`, so that uv, pre-commit, and similar gates can run.
   A sandboxed babysitter also gets Graphite's state directories.
-- **Host services:** gates that need Docker, a database, or other host services may be blocked by
-  either sandbox. Have the implementer skip them, and run them yourself during review.
-- **House rules:** each agent loads only its own instructions file, so restate the load-bearing
-  rules from both `CLAUDE.md` and `AGENTS.md` in every brief.
 - **Same-CLI delegation** is fine when you want parallel hands rather than a different
   perspective, for example Claude orchestrating three Claude implementers.
 
-## Memory and tests
-
-- Wrap Docker-based test suites, builds and container runs in `$ORCH heavy -- <command>`. Use
-  `--label "focused tests"` before `--` to name the work. Only heavy commands wait; this lane
-  never limits agents or sub-agents. Waiters enter in arrival order. A new message returns exit 6.
-- Prefer the narrowest test target that proves the change. Leave a full suite to one agent.
-  Reuse a running container instead of starting one per command when the project allows it.
-- Stop containers and daemons you started when done. `$ORCH reclaim --dry-run` lists forgotten
-  build daemons; `$ORCH reclaim` stops ones with no live workspace owner or running task.
-  Task cleanup only covers its managed worktree under the run folder; it never reclaims a main
-  checkout or an external worktree. The dashboard checks for orphans every five minutes.
-  `AGENT_ORCH_RECLAIM=off` disables it.
-- Reclaim recognizes `pantsd [/workspace]`. It skips Bazel and shared Gradle daemons: their
-  command lines do not reliably identify a workspace for this cleanup.
-- An empty heavy lane always starts a command immediately. While another command runs, admission
-  needs available memory above `AGENT_ORCH_HEAVY_MIN_FREE` (default `2.5GB`, or set bytes, MB or
-  GiB) and macOS pressure below critical (level 4). Warning pressure does not block admission.
-  macOS uses the kernel's available-memory percentage, falling back to free and speculative pages.
-  Linux uses `MemAvailable`, or free memory plus reclaimable slab when that field is absent;
-  inactive memory never counts. Admissions wait 20 seconds apart (`AGENT_ORCH_HEAVY_RAMP_MS`, in
-  milliseconds) only while the previously admitted command still runs, so its memory use can
-  settle. No agent count is capped.
-- Nested heavy calls run immediately. Suspended or dead holders do not block the queue. Process
-  start times prevent reused PIDs from retaining a slot. An unwritable lane or an unreadable process
-  start time prints one note and runs the command directly. Steering signals the outer heavy wrapper only; it forwards once,
-  waits for command cleanup, and never force-kills it. Commands keep the caller’s stdio but cannot
-  open `/dev/tty`. Dashboard lane counts refresh at most every five seconds.
-- Put optional local agent environment values in `~/.config/agent-orchestrator/agent-env.json`
-  (`$XDG_CONFIG_HOME/agent-orchestrator/agent-env.json` when set). It is a flat JSON object, for
-  example `{"PANTS_PANTSD_MAX_MEMORY_USAGE": "1GiB"}` to limit a Pants daemon. `start` merges it
-  over the inherited environment. Keys starting with `AGENT_ORCH_`, plus `XDG_STATE_HOME`, `HOME`,
-  `PATH` and `NODE_OPTIONS`, are ignored with a warning. Bad JSON warns once and does not block
-  the task. Keep this file local, outside the repository.
-
 ## Command tasks
 
-`start <run> <task> --agent command --why "<reason>" [--done "<marker>"] [--timeout DUR] [--cd DIR]
--- <command> [args...]` runs a command as a task, with no model and no brief.
+`start <run> <task> --agent command --why "<reason>" [--max-tier TIER] [--done "<marker>"]
+[--timeout DUR] [--cd DIR] -- <command> [args...]` runs a command as a task, with no model and no
+brief.
 `scripts/command-relay.mjs` runs it in place of a delegate relay.
 
 - **How it runs.** The words after `--` run as an argument vector, with no shell. Put variables in
@@ -113,6 +92,32 @@ model"); the models themselves live in `../policy.json`.
   `--babysit`.
 - **Never silent.** A script often prints nothing while the agent it started works, so a command
   task is never flagged silent. Give one that may hang a `--timeout`.
+- **Model ceiling.** `--max-tier <tier>` caps the agents the command starts ("Model ceilings").
+
+## Model ceilings
+
+A command task's `--max-tier` names a Claude tier (`light`, `standard`, `complex` or `frontier`).
+For Codex, the cap is the strongest Codex tier whose `rank` in `policy.json` is at or below that
+tier's.
+
+- **Default.** A command that a delegated task starts is capped at that task's own tier. One that a
+  main session starts has no cap.
+- **Inherited caps only go down.** A ceiling inherited from a parent can lower `--max-tier`, never
+  raise it.
+- **What the command gets.** Its environment holds the limits as `AGENT_ORCH_MAX_TIER`,
+  `AGENT_ORCH_MAX_MODEL_CLAUDE`, `AGENT_ORCH_MAX_MODEL_CODEX` and `AGENT_ORCH_MAX_EFFORT`. It also
+  sets Claude Code's own defaults (`ANTHROPIC_MODEL`, the `ANTHROPIC_DEFAULT_*_MODEL` aliases,
+  `CLAUDE_CODE_SUBAGENT_MODEL` with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, and
+  `CLAUDE_CODE_EFFORT_LEVEL`), so a Claude agent's nested Agent-tool and Workflow sub-agents stay
+  within the cap.
+- **For a script's own agent,** `$ORCH model --agent claude|codex [--tier TIER]` prints the model and
+  effort arguments, lowered to the inherited ceiling. Without `--tier` it uses the ceiling, or
+  `standard` when there is none. For Codex it prints the effort as `-c model_reasoning_effort="LEVEL"`,
+  not `--effort`.
+- **Codex has no environment variable** that selects its model or effort, so a script that runs
+  `codex exec` must pass what `$ORCH model` prints.
+- **These are defaults, not a lock.** An explicit `--model` on a top-level `claude` command, or a
+  changed environment, bypasses them. The dashboard warns when a known model above the cap runs.
 
 ## Native sub-agents
 
@@ -148,11 +153,12 @@ no `orch.mjs` command started (`scripts/lib/external.mjs`), every 2 seconds whil
 
 ## Cost and limits
 
+- **`$ORCH agents`** lists each CLI, its version, its login state, whether its delegate relay is
+  installed, and the model policy.
 - **Usage limits.** Both subscriptions meter use in a 5-hour window and a weekly window.
   `$ORCH agents` shows the share of each window that is used, and the dashboard header shows the same.
-  The reading is for information: no choice of agent weighs it, and even a window at 100% is not a
-  reached limit, because the team plans add usage beyond it. Only a task stopped by a usage-limit
-  error counts (SKILL.md, "Usage limits").
+  The reading is for information only, even a window at 100% or a limit status (`SKILL.md`, "Usage
+  limits").
   - Claude reports its limits in every headless session's stream (`rate_limit_event`). `orch.mjs`
     caches the newest reading it sees, and `agents --refresh` takes a fresh one with a minimal turn.
   - Codex writes its limits into its session logs (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`),
