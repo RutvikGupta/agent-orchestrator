@@ -162,6 +162,8 @@ test('every guarded command refuses another session\'s run, changes nothing and 
     ['worktree', run.id, 'added', '--no-prep'],
     ['brief', run.id, 'added', '--type', 'review'],
     ['verify', run.id, 'done', '--', 'true'],
+    ['review', run.id, 'done'],
+    ['rework', run.id, 'done'],
     ['inbox', run.id, 'busy', '--ack'],
     ['reply', run.id, 'busy', 'Done.'],
   ];

@@ -30,6 +30,11 @@ import { cmdStart } from "./lib/commands/start.mjs";
 import { cmdTell } from "./lib/commands/tell.mjs";
 import { cmdClose, cmdLog, cmdResult, cmdStop } from "./lib/commands/task.mjs";
 import { cmdVerdict, cmdVerify } from "./lib/commands/verify.mjs";
+import { cmdReview, cmdRework, syncReviewVerdicts } from "./lib/commands/review.mjs";
+
+// The commands before which a finished reviewer's verdict line is recorded as a review round of the
+// task it reviewed (review.mjs): those that show review rounds or act on them.
+const VERDICT_SYNC = new Set(["status", "wait", "result", "accept", "verdict", "start", "recover"]);
 
 const USAGE = `agent-orchestrator · orch.mjs
 
@@ -138,6 +143,26 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reviews.jsonl, with the verifications since the last round.
                                   changes: the next attempt is a rework; reject: close the task
                                   as rejected
+  review RUN TASK [--tier TIER] [--focus TEXT]
+                                  Start the other model (Codex on Claude's work, Claude on
+                                  Codex's) as a read-only reviewer of a finished task, named
+                                  review-TASK (review-TASK-2 and on for later rounds), with a brief
+                                  built from the task's brief, its diff since its work started
+                                  (uncommitted changes and new files included) and its final report.
+                                  A Codex reviewer also gets the git diff command to run. The diff
+                                  sets the tier: up to 150 changed lines in up to 3 files, none of
+                                  them an existing module that other files import, is standard;
+                                  more is complex. --tier overrides it; --why records the judgment.
+                                  --focus tells the reviewer what to look at hardest. The reviewer
+                                  ends with VERDICT: clean or changes, recorded as a review round of
+                                  TASK (as by verdict) when status, wait, result, accept, verdict or
+                                  start next runs on the run
+  rework RUN TASK [--from REVIEW_TASK] [--note TEXT]
+                                  Resume TASK's own session with the findings of its latest review
+                                  (or REVIEW_TASK's, which may be a reviewer started by hand), with
+                                  its scope and gates restated, as a rework attempt; records the
+                                  review round first. --note adds your decisions on which findings
+                                  to fix. Refuses when the review found nothing: accept TASK instead
   accept RUN TASK [--commit SHA] [--note TEXT]
                                   After reviewing a completed task and committing its work, record
                                   it as accepted (its checkout must be clean); SHA defaults to HEAD.
@@ -249,6 +274,8 @@ const specs = {
   accept: { value: ["commit", "note"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
+  review: { value: ["tier", "focus"], bool: ["adopt"] },
+  rework: { value: ["from", "note"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
   integrate: { value: ["into"], bool: ["dry-run", "adopt"] },
   recover: { bool: ["all"] },
@@ -286,6 +313,8 @@ const handlers = {
   accept: cmdAccept,
   verify: cmdVerify,
   verdict: cmdVerdict,
+  review: cmdReview,
+  rework: cmdRework,
   resolve: cmdResolve,
   integrate: cmdIntegrate,
   recover: cmdRecover,
@@ -301,5 +330,12 @@ if (command === "wait" && rest.includes("--help")) {
   const args = parseArgs(rest, specs[command]);
   // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
   gateCommand(command, args);
+  if (VERDICT_SYNC.has(command)) {
+    try {
+      syncReviewVerdicts(args._[0]);
+    } catch (error) {
+      process.stderr.write(`orch: could not record a reviewer's verdict: ${error.message}\n`);
+    }
+  }
   await handlers[command](args);
 }

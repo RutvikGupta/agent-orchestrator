@@ -492,7 +492,14 @@ function globRe(glob) {
   return new RegExp(`^${re}$`);
 }
 
-function lessonsSection(repo) {
+// The "Testing skills" section of a reviewer's brief for a task with plan entry `entry` (or none),
+// whose checkout is `root`; "" when the repository has no testing skill. `review` builds its
+// briefs with it (review.mjs).
+export function reviewTestingSection(root, repo, entry) {
+  return testingSection("review", testingSkills(root, repo, entry).skills);
+}
+
+export function lessonsSection(repo) {
   const { lessons } = readLessons(repo);
   if (!lessons.length) return "";
   return `## Known traps in this repository\n\n${lessons.map((lesson) => `- ${lesson.text}`).join("\n")}\n\nIf you hit a trap that is not listed and it is likely to recur, describe it under \`unresolved\` in your report so the orchestrator can record it.`;
