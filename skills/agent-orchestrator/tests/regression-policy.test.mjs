@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, readJson, writeJson } from './helpers.mjs';
-import { failureHistory } from '../scripts/lib/escalation.mjs';
+import { failureHistory, failureHint } from '../scripts/lib/escalation.mjs';
 
 const policy = readJson(new URL('../policy.json', import.meta.url));
 const tiersOf = (agent) => Object.entries(policy[agent].tiers);
@@ -381,23 +381,79 @@ test('failure receipts count aborted attempts and optional refused accepts witho
 
 const failedReport = '```orch-result\n{"outcome":"done","changed":[],"checks":[{"cmd":"npm test","result":"fail"}],"decisions":[],"unresolved":[]}\n```';
 
-test('one failed verify or reported check retains its hint and both signals count toward escalation', async (t) => {
+test('failed verify gates and reported checks drive hints without counting or automatic escalation', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   for (const source of ['verify', 'report']) {
     const first = await f.start(run, source, { flags: ['--tier', 'light'], config: source === 'report' ? { finalMessage: failedReport } : {} });
     await f.finished(run, source);
     if (source === 'verify') await f.command(['verify', run.id, source, '--', 'node', '-e', 'process.exit(1)'], { code: 1 });
+    await f.command(['accept', run.id, source, '--note', 'Known check failure accepted for this fixture']);
+    assert.equal((await f.json(['result', run.id, source])).failureCount, 0);
     const second = await f.command(['start', run.id, source, '--agent', 'claude', '--brief', f.brief(`${source}-again`, { finalMessage: failedReport })]);
-    assert.match(second.stdout, /attempt 1 at the light tier failed its review or gates; redo it one tier up, with --tier standard/);
+    const reason = source === 'verify' ? 'failed a verify gate' : 'reported a failing check';
+    assert.ok(second.stdout.includes(`attempt 1 at the light tier ${reason}; redo it one tier up, with --tier standard`), second.stdout);
     const kept = readJson(f.taskFile(run, source));
     assert.deepEqual([kept.why, kept.model], [first.why, first.model]);
     const row = await f.finished(run, source);
-    assert.equal(row.failureCount, 2);
-    const third = await f.json(['start', run.id, source, '--agent', 'claude', '--brief', f.brief(`${source}-up`)]);
-    assert.equal(third.tier, 'standard');
+    assert.equal(row.failureCount, 0);
+    const third = await f.json(['start', run.id, source, '--agent', 'claude', '--brief', f.brief(`${source}-kept`)]);
+    assert.equal(third.tier, 'light');
     await f.finished(run, source);
   }
+});
+
+test('runtime failure hints name the result status instead of claiming failed review or gates', () => {
+  const task = { attempt: 1, agent: 'claude', tier: 'light' };
+  for (const [state, reason] of [['failed', 'failed'], ['timeout', 'timed out'], ['aborted', 'was aborted']]) {
+    const history = failureHistory(task, [{ n: 1, agent: 'claude', state }]);
+    assert.equal(history.failureCount, 1);
+    const hint = failureHint(task, history.attempts, 'claude', 'light');
+    assert.equal(hint, `attempt 1 at the light tier ${reason}; redo it one tier up, with --tier standard and a new --why`);
+  }
+});
+
+test('event-only usage-limit stops stay excluded after later Codex attempts start', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'event-limit', { agent: 'codex', flags: ['--tier', 'light'], config: {
+    finalMessage: '', extraEvents: [{ type: 'turn.failed', error: { message: 'usage limit reached' } }],
+  } });
+  await f.finished(run, 'event-limit');
+  // The fixture completes after its extra event; model the real relay's failed receipt without
+  // adding a second synthetic turn.failed event that would overwrite the event-only error.
+  const file = path.join(first.outDir, 'result.json');
+  writeJson(file, { ...readJson(file), status: 'failed', exitCode: 1 });
+  const before = await f.json(['result', run.id, 'event-limit']);
+  assert.equal(before.limitHit, true);
+  assert.equal(before.failureCount, 0);
+  assert.equal(before.result.error, null);
+  assert.equal(before.result.finalMessage, '');
+  await f.command(['start', run.id, 'event-limit', '--agent', 'codex', '--brief', f.brief('after-limit')]);
+  const after = await f.finished(run, 'event-limit');
+  assert.equal(after.failureCount, 0);
+  assert.equal(after.attempts.find((a) => a.n === 1).limitHit, true);
+  await f.command(['verdict', run.id, 'event-limit', 'changes', '--note', 'One actual quality failure']);
+  const next = await f.json(['start', run.id, 'event-limit', '--agent', 'codex', '--brief', f.brief('quality')]);
+  assert.equal(next.tier, 'light');
+  assert.equal((await f.finished(run, 'event-limit')).failureCount, 1);
+});
+
+test('automatic escalation describes resume-last as continuing the session', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (let n = 0; n < 2; n++) {
+    await f.start(run, 'resume-last', { flags: ['--tier', 'light'], config: { status: 'failed' } });
+    await f.finished(run, 'resume-last');
+  }
+  const next = await f.command(['start', run.id, 'resume-last', '--agent', 'claude', '--brief', f.brief('continue'), '--', '--resume-last']);
+  assert.match(next.stdout, /continuing the same session/);
+  assert.doesNotMatch(next.stdout, /starts a fresh session/);
+  const task = readJson(f.taskFile(run, 'resume-last'));
+  await f.finished(run, 'resume-last');
+  const { argv } = readJson(path.join(task.outDir, 'invocation.json'));
+  assert.equal(argv.includes('--resume-last'), true);
+  assert.equal(argv.includes('--session'), false);
 });
 
 test('a failed turn continued by automatic retry is excluded before review feedback', async (t) => {

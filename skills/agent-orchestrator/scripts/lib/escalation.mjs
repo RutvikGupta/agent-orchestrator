@@ -39,7 +39,15 @@ export function failureHistory(task, facts, rounds = [], verifications = []) {
     const failedGate = [...lastGates.values()].some((v) => v.passed === false);
     // Gate-refused accept receipts are optional: older versions recorded no such refusal.
     const refusedAccept = (task.acceptRefusals || []).some((r) => r.attempt === n && ["missing-gates", "failed-gates"].includes(r.reason));
-    return { n, agent, tier, failed: !stopped && !continued && !fact.limitHit && (failedResult || failedReview || failedGate || fact.failedCheck || refusedAccept) };
+    const eligible = !stopped && !continued && !fact.limitHit;
+    const hintReasons = [
+      failedResult ? ({ failed: "failed", timeout: "timed out", aborted: "was aborted" })[fact.state] : null,
+      failedReview ? "failed its review" : null,
+      refusedAccept ? "was refused acceptance for missing or failed gates" : null,
+      failedGate ? "failed a verify gate" : null,
+      fact.failedCheck ? "reported a failing check" : null,
+    ].filter(Boolean);
+    return { n, agent, tier, failed: eligible && (failedResult || failedReview || refusedAccept), hintReason: eligible ? hintReasons.join(" and ") : null };
   });
   return { failureCount: attempts.filter((a) => a.failed).length, attempts };
 }
@@ -64,12 +72,12 @@ export function escalationFor(task, attempts) {
   return { tier: next, note: `automatically escalated ${agent} from ${tier} to ${next}: ${failures} counted failures at the ${tier} tier` };
 }
 
-// Preserve the advice after a single failed result, including failed gates and reported checks.
+// Gates and reported checks advise a stronger tier without adding to the failure count.
 export function failureHint(task, attempts, key, chosenTier) {
   const previous = attempts.find((a) => a.n === task.attempt);
-  if (!previous?.failed || previous.agent !== key) return null;
+  if (!previous?.hintReason || previous.agent !== key) return null;
   const order = tierOrder(key);
   const at = order.indexOf(previous.tier);
   if (at < 0 || at === order.length - 1 || order.indexOf(chosenTier) > at) return null;
-  return `attempt ${task.attempt} at the ${previous.tier} tier failed its review or gates; redo it one tier up, with --tier ${order[at + 1]} and a new --why`;
+  return `attempt ${task.attempt} at the ${previous.tier} tier ${previous.hintReason}; redo it one tier up, with --tier ${order[at + 1]} and a new --why`;
 }

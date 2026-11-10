@@ -510,7 +510,7 @@ function attemptsOf(task, seen, row) {
     const failed = !["completed", "needs-decision", "running", "prepared", "parked"].includes(state);
     return {
       n,
-      limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
+      limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (r && r.status !== "completed" && USAGE_LIMIT_RE.test(summary.error || "")) || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
       failedCheck: now ? Boolean(row.report?.checks?.some((c) => c?.result === "fail")) : Boolean(r?.failedCheck),
       reason: attemptReasonOf(task, n),
       agent,

@@ -229,7 +229,7 @@ export function startTask(args, extra = {}) {
   relayArgs.push(...args.passthrough);
   if (automatic?.tier) {
     const sessionAt = relayArgs.indexOf("--session");
-    const hasSession = (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
+    const hasSession = relayArgs.includes("--resume-last") || (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
     escalation += hasSession ? "; continuing the same session" : "; this attempt starts a fresh session";
   }
 
