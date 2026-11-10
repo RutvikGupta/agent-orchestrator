@@ -190,3 +190,29 @@ test('a run whose relay is alive stays on the board when 25 newer runs fill its 
   f.release(worker);
   await f.finished(long, 'worker');
 });
+
+// A finished run past the cap still shows while a task of it waits on someone: unclosed, and
+// finished within the idle window. A closed one does not.
+test('a finished run with an unclosed task stays on the board past the cap; a closed one does not', async (t) => {
+  const f = await fixture(t);
+  const waiting = await f.newRun('waiting-review');
+  await f.start(waiting, 'reviewer', { config: { finalMessage: 'Found one issue.' } });
+  await f.finished(waiting, 'reviewer');
+  const done = await f.newRun('all-closed');
+  await f.start(done, 'helper', { config: { finalMessage: 'Done.' } });
+  await f.finished(done, 'helper');
+  await f.command(['close', done.id, 'helper']);
+  const template = JSON.parse(fs.readFileSync(path.join(done.dir, 'run.json'), 'utf8'));
+  const start = Date.parse(template.createdAt) + 1000;
+  for (let i = 0; i < 25; i++) {
+    const createdAt = new Date(start + i * 1000).toISOString();
+    const id = `${createdAt.slice(0, 19).replaceAll(/[-:]/g, '').replace('T', '-')}-filler-${String(i).padStart(2, '0')}`;
+    const dir = path.join(f.state, 'runs', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'run.json'), JSON.stringify({ ...template, id, createdAt, goal: `Filler ${i}`, dir: undefined }));
+  }
+  const board = await f.dashboard();
+  const shown = new Set((await board.json('/api/state')).flatMap((s) => s.runs.map((r) => r.id)));
+  assert.ok(shown.has(waiting.id), 'the run whose task awaits review is on the board');
+  assert.ok(!shown.has(done.id), 'a run with every task closed stays capped');
+});

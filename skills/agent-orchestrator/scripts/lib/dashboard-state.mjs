@@ -151,6 +151,24 @@ function runStamp(run, ownsMain) {
   return latest;
 }
 
+// Whether a run past the board's cap still has a task nobody closed that changed within the idle
+// window: a result awaiting review or a decision that waits on someone. Reads task records only.
+function openWork(run, idleMs, now) {
+  let ids = [];
+  try { ids = fs.readdirSync(path.join(run.dir, "tasks")); } catch { return false; }
+  return ids.some((id) => {
+    const dir = path.join(run.dir, "tasks", id);
+    try {
+      const task = JSON.parse(fs.readFileSync(path.join(dir, "task.json"), "utf8"));
+      if (!task.attempt || task.closedAt) return false;
+      // The record changes when an attempt starts; its result file, when it ends.
+      const changed = [path.join(dir, "task.json"), path.join(dir, `attempt-${task.attempt}`, "result.json")]
+        .map((f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } });
+      return now - Math.max(...changed) < idleMs;
+    } catch { return false; }
+  });
+}
+
 // Whether any task of the run still has its relay process, or is parked, from the task records alone.
 function anyRelayAlive(run) {
   const dir = path.join(run.dir, "tasks");
@@ -459,7 +477,7 @@ export function buildDashboardState() {
   }
   let counted = 0;
   for (const run of runs) {
-    if (counted >= BOARD_RUNS && !live.has(run.id)) continue;
+    if (counted >= BOARD_RUNS && !live.has(run.id) && !openWork(run, idleMs, now)) continue;
     const ownsMain = newestOfSession.get(run.orchestrator?.sessionId) === run.id;
     // An idle run is checked again at most every IDLE_RECHECK_MS: stamping it stats every task.
     const idle = idleRuns.get(run.id);
