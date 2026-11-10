@@ -252,3 +252,35 @@ test('a same-choice follow-up reuses why and session, while changing the agent r
   assert.match(refused.stderr, /--why is required/);
   assert.equal(readJson(f.taskFile(run, 'followup')).attempt, 2);
 });
+
+test('a delegated task never starts a stronger tier than its own, on either agent; its own tier or lighter starts', async (t) => {
+  const f = await fixture(t);
+  const parent = await f.newRun('parent');
+  for (const [id, agent, tier] of [['luna', 'codex', 'light'], ['sol', 'codex', 'strong'], ['opus', 'claude', 'complex']]) {
+    await f.start(parent, id, { agent, flags: ['--tier', tier] });
+    await f.finished(parent, id);
+  }
+  const as = (task) => ({ AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: parent.id, AGENT_ORCH_TASK: task });
+  const cases = [
+    ['luna', 'claude', 'standard', 2, 'codex light (gpt-6-luna)'],
+    ['luna', 'codex', 'standard', 2, 'codex light (gpt-6-luna)'],
+    ['luna', 'claude', 'light', 0],
+    ['sol', 'claude', 'complex', 2, 'codex strong (gpt-6.1-sol)'],
+    ['sol', 'claude', 'standard', 0],
+    ['opus', 'claude', 'frontier', 2, 'claude complex (claude-opus-5-5)'],
+    ['opus', 'codex', 'complex', 0],
+  ];
+  for (const [caller, agent, tier, code, own] of cases) {
+    const run = await f.newRun(`from-${caller}`, as(caller));
+    const id = `${agent}-${tier}`;
+    const result = await f.command(['start', run.id, id, '--agent', agent, '--tier', tier, '--why', 'tier guard', '--brief', f.brief(id)], { code, env: as(caller) });
+    if (code) {
+      assert.ok(result.stderr.includes(`this command runs in task ${parent.id}/${caller}, on ${own}`), result.stderr);
+      assert.match(result.stderr, /never starts a stronger model than its own/);
+      assert.match(result.stderr, /orch\.mjs ask "/);
+      assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), [], 'nothing starts');
+    } else {
+      await f.finished(run, id);
+    }
+  }
+});

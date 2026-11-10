@@ -17,7 +17,7 @@ Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SK
 
 Size each piece on its own: the lightest tier that does it as well as the top one (its SKILL.md, "Choose the agent and model"). Running tests or gates, reproducing a bug, lookups, and mechanical edits fit \`light\`; small well-specified changes, docs, and reviews of small diffs fit \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
 
-Never hand your own task upward. Your tier was chosen for this task, so do not pass its hard core to a stronger model, directly or through a script that runs \`claude -p\` or \`codex exec\`. If it truly needs a stronger model, say so with \`node ${CLI_PATH} ask "<why>"\` and keep doing what you can. Start every agent through \`start\`, never with your host's own sub-agent tool.
+Never hand your own task upward. Your tier was chosen for this task, so do not pass its hard core to a stronger model, directly or through a script that runs \`claude -p\` or \`codex exec\`. \`start\` refuses a stronger tier than yours. If it truly needs a stronger model, say so with \`node ${CLI_PATH} ask "<why>"\` and keep doing what you can. Start every agent through \`start\`, never with your host's own sub-agent tool.
 
 A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. If an agent's own work has such parts, tell it in its brief to delegate them the same way. You are notified when an agent you started finishes, so do not poll.
 

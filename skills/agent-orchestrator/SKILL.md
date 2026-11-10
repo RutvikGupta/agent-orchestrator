@@ -69,7 +69,8 @@ agent alike:
 - **Never hand your own task upward.** You were given your task at a tier chosen for it. Never pass
   its hard core to a stronger model, directly or through a script. When it needs one, say so with
   `$ORCH ask` (or end with `NEEDS DECISION:`), so the agent that started you re-runs it on the right
-  tier.
+  tier. `start` refuses a tier stronger than your own task's, on either agent, by each tier's
+  `rank` in `policy.json`; a babysitter, whose tier is fixed, is exempt.
 - **Split only independent parts,** and give each agent everything its piece needs in its brief:
   goal, done criteria, scope, the constraints of your own brief, and its gates.
 

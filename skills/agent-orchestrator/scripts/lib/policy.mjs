@@ -50,6 +50,7 @@ export function policyProblems(policy) {
           problems.push(`${at}.effort must be one of ${at}.efforts`);
         }
       }
+      if (tier.rank !== undefined && !(Number.isInteger(tier.rank) && tier.rank > 0)) problems.push(`${at}.rank must be a positive whole number`);
       if (tier.use !== undefined && typeof tier.use !== "string") problems.push(`${at}.use must be a string`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
@@ -152,4 +153,32 @@ export function modelFor(key, args, previousTier = null) {
 export function modelLabel(task) {
   if (!task.model) return "-";
   return `${task.model.replace(/^(claude|gpt)-/, "")} ${task.effort || ""}`.trim();
+}
+
+// How strong a tier's model is, on one scale for both agents: policy.json's `rank`, or, for an agent
+// whose tiers have none, the tier's place in its list (lightest first, from 1). null for no tier.
+function rankOf(policy, key, name) {
+  const tiers = policy[key]?.tiers;
+  const tier = tiers && tierOf(tiers, name);
+  if (!tier) return null;
+  return Number.isInteger(tier.rank) ? tier.rank : Object.keys(tiers).indexOf(name) + 1;
+}
+
+// Whether a task that runs `own` ({ agent, tier }) may not start `wanted` ({ agent, tier }): true when
+// the wanted tier is stronger. A delegated agent was given its task at a tier chosen for it, so it
+// never passes the work to a stronger model. When either tier has no rank, the two compare only
+// within one agent, by their order.
+export function strongerThan(wanted, own) {
+  if (!own?.tier || !wanted?.tier) return false;
+  const policy = loadPolicy();
+  const ranked = (k, t) => Number.isInteger(tierOf(policy[k]?.tiers || {}, t)?.rank);
+  if (wanted.agent !== own.agent && !(ranked(wanted.agent, wanted.tier) && ranked(own.agent, own.tier))) return false;
+  const [w, o] = [rankOf(policy, wanted.agent, wanted.tier), rankOf(policy, own.agent, own.tier)];
+  return w !== null && o !== null && w > o;
+}
+
+// "claude complex (claude-opus-5-5)": a tier with its model, for messages.
+export function tierText(key, name) {
+  const tier = tierOf(loadPolicy()[key]?.tiers || {}, name);
+  return `${key} ${name}${tier ? ` (${tier.model})` : ""}`;
 }

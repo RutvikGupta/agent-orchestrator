@@ -4,17 +4,17 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AGENTS, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
+import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
 import { decisionNote, nestingNote, publishHoldNote } from "../briefs.mjs";
-import { startedByCaller, watchForFinish } from "../finish-notice.mjs";
+import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
 import { claimParked, keptEnd, reviveParked } from "../park.mjs";
 import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, tierOrder } from "../policy.mjs";
-import { commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
@@ -93,6 +93,30 @@ function commandOf(args, prev) {
   return { argv, done, timeout, reused };
 }
 
+// The tier of the task whose shell runs this command ({ run, task, agent, tier }), from AGENT_ORCH_RUN
+// and AGENT_ORCH_TASK; null for a session that no task started, and for a command task, which has no
+// tier. A Claude task recorded before Claude had tiers ran `complex`.
+function callerTier() {
+  const runId = process.env.AGENT_ORCH_RUN;
+  const taskId = process.env.AGENT_ORCH_TASK;
+  if (!runId || !taskId) return null;
+  const run = runById(runId);
+  const record = run && loadTask(run, taskId);
+  if (!record) return null;
+  const agent = attemptAgent(record, record.attempt) || record.agent;
+  const tier = record.tier || (agent === "claude" ? CLAUDE_DEFAULT_TIER : null);
+  return agent === COMMAND_AGENT || !tier ? null : { run: runId, task: taskId, agent, tier };
+}
+
+// A delegated agent never starts a stronger model than its own: it was given its task at a tier
+// chosen for that task, and handing the work to a stronger model defeats that choice. A babysitter's
+// tier is fixed by policy, so it is not checked.
+function refuseStronger(key, tier) {
+  const own = callerTier();
+  if (!own || !strongerThan({ agent: key, tier }, own)) return;
+  refuse(`refusing: this command runs in task ${own.run}/${own.task}, on ${tierText(own.agent, own.tier)}, and ${tierText(key, tier)} is stronger. A delegated agent never starts a stronger model than its own. Do the work at your tier, split it into pieces at your tier or lighter, or ask your orchestrator with \`node ${CLI_PATH} ask "<why it needs a stronger model>"\` (or end with NEEDS DECISION:) so it chooses.`, 2);
+}
+
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
 // record in the task, such as its plan entry. Returns the saved task and the text `start` prints.
 export function startTask(args, extra = {}) {
@@ -137,6 +161,7 @@ export function startTask(args, extra = {}) {
     throw error;
   }
   const { tier, model, effort } = choice;
+  if (!babysit) refuseStronger(key, tier);
   if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
