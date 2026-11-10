@@ -300,8 +300,10 @@ test('an attempt\'s notice still goes out, once, when the next attempt starts be
 test('ask falls back to a question for the user when the parent task will not read messages', async (t) => {
   const f = await fixture(t);
   const parent = await f.newRun('parent');
-  const lead = await f.start(parent, 'lead', { agent: 'codex', config: { hold: true }, flags: ['--read-only'] });
+  // Codex complex, so that the Claude complex task it starts is no stronger than itself.
+  const lead = await f.start(parent, 'lead', { agent: 'codex', config: { hold: true }, flags: ['--read-only', '--tier', 'complex'] });
   await f.ready(lead);
+  assert.equal(lead.tier, 'complex');
   // An attempt started before messages existed: its brief has no inbox note, so Codex never reads them.
   const brief = path.join(lead.outDir, 'orch-brief.md');
   fs.writeFileSync(brief, fs.readFileSync(brief, 'utf8').replace('## Messages from your orchestrator', '## Notes'));
