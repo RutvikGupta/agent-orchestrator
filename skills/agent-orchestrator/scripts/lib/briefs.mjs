@@ -25,6 +25,22 @@ Each agent's brief keeps every constraint of this brief (the agents you start ne
 `;
 }
 
+// What a babysitter's handoff note holds. A parked babysitter whose context has grown large is
+// resumed in a fresh session from this note (park.mjs), so it must say what the session knows.
+export const HANDOFF_RULES = "At most 60 lines: the pull request, branch and worktree; what each review round asked and the commit that answered it; each open thread and its state; each reviewer and where their review was requested; decisions taken and why; what is pending; and what was tried and failed.";
+
+// Appended to a babysitter's brief: where its handoff note lives, and why it keeps it current.
+export function handoffNote(file) {
+  return `
+
+---
+
+## Handoff note
+
+Keep a handoff note current at \`${file}\`, and update it before every park. Every call you make re-sends your whole context, so once it has grown large your watcher resumes you in a fresh session that knows only your brief, this note, and what changed on the pull request. Without a note updated in the attempt that parks, it has to keep the large session. ${HANDOFF_RULES}
+`;
+}
+
 // Appended when the user asked to review a task's work before it lands (start --no-publish).
 export function publishHoldNote() {
   return `

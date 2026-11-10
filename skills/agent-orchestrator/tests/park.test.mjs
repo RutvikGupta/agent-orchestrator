@@ -8,9 +8,9 @@ import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
 import { attentionOf } from '../scripts/lib/dashboard-state.mjs';
 // Pure: what a final message says about parking, and the brief that delivers messages.
 import { parkedSignal } from '../scripts/lib/runs.mjs';
-import { resumeBrief } from '../scripts/lib/park.mjs';
+import { handoffLimit, lastCallTokens, resumeBrief } from '../scripts/lib/park.mjs';
 // Pure: what changed between two pull-request snapshots, and whether it needs a model.
-import { quietItems, watchAttention } from '../scripts/lib/commands/pr-watch.mjs';
+import { agentWrote, quietItems, watchAttention } from '../scripts/lib/commands/pr-watch.mjs';
 import { decisionNote } from '../scripts/lib/briefs.mjs';
 
 const parkModule = new URL('../scripts/lib/park.mjs', import.meta.url).pathname;
@@ -38,9 +38,14 @@ const args = process.argv.slice(2);
 if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
 else if (args[0] === 'api' && args[1] === 'graphql') {
   // \`inQueue\` in the fixture (true or false) answers the merge-queue query; without it GitHub does not say.
-  const inQueue = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8')).inQueue;
-  const queue = args.join(' ').includes('mergeQueueEntry') && inQueue !== undefined ? { mergeQueueEntry: inQueue ? { state: 'QUEUED' } : null } : {};
-  console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}, ...queue}}}}));
+  const pr = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
+  const query = args.join(' ');
+  const list = (items) => ({ totalCount: items.length, nodes: items });
+  const queue = query.includes('mergeQueueEntry') && pr.inQueue !== undefined ? { mergeQueueEntry: pr.inQueue ? { state: 'QUEUED' } : null } : {};
+  // The bodies of the comments and reviews, and of each review's inline comments.
+  const bodies = query.includes('totalCount') ? { comments: list(pr.comments.map((c) => ({ body: c.body }))),
+    reviews: list(pr.reviews.map((r) => ({ body: r.body || '', comments: list(r.comments || []) }))) } : {};
+  console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}, ...queue, ...bodies}}}}));
 } else process.exit(91);
 `, { mode: 0o755 });
   f.env.PATH = `${bin}:${f.env.PATH}`;
@@ -150,6 +155,8 @@ test('a parked babysitter shows as parked, keeps wait waiting, and is resumed on
   const watch = await f.command(['pr-watch', '42', '--timeout', '1ms'], { code: 3, env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'sit' } });
   assert.match(watch.stdout, /park: end your turn with a final message whose first line is `PARKED: /);
 
+  // Its handoff note is current, but its context is far below the limit: the session is kept.
+  fs.writeFileSync(path.join(run.dir, 'tasks', 'sit', 'handoff.md'), 'Round 1 asked for a rename.\n');
   // A failed check is an event: the watcher resumes the same session once, at the same tier.
   set({ statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
   const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'the watcher did not resume', SLOW);
@@ -160,6 +167,8 @@ test('a parked babysitter shows as parked, keeps wait waiting, and is resumed on
   const brief = fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8');
   assert.match(brief, /Your parked watcher woke you/);
   assert.match(brief, /check failed: unit/);
+  assert.doesNotMatch(brief, /Your handoff note at/);
+  assert.equal(second.handoffs, undefined);
   assert.deepEqual([claims(run, 'sit', 1).at(-1).by, claims(run, 'sit', 1).at(-1).attempt], ['watcher', 2]);
   await eventually(() => watchers(run, 'sit', 1).length === 0, 'the resumed attempt\'s watcher did not exit', SLOW);
   // While it runs, nothing else resumes it.
@@ -208,6 +217,14 @@ test('stop ends a park; a dead watcher is reported and restarted once; a hand re
   await github(f);
   const run = await f.newRun();
   await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  // Under load a status call can start the first watcher before the finish watcher gets to it. Wait
+  // until the finish watcher has done its part: one that finds the watcher killed below would start
+  // the replacement itself, and leave `status` nothing to restart.
+  await eventually(() => {
+    const file = path.join(attemptDir(run, 'sit', 1), 'parent-notice.json');
+    return fs.existsSync(file) && readJson(file).parked === true;
+  }, 'the finish watcher did not record the park', SLOW);
   const row = await parkedRow(f, run, 'sit');
   const [first] = watchers(run, 'sit', 1);
   assert.equal(row.parked.watcherPid, first);
@@ -652,13 +669,13 @@ test('checks that go green while a review is missing wake no model; a failed che
   const run = await f.newRun();
   const pending = [{ __typename: 'CheckRun', name: 'unit', status: 'IN_PROGRESS', conclusion: null }];
   const green = [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }];
-  set({ statusCheckRollup: pending });
+  set({ statusCheckRollup: pending, reviewDecision: 'REVIEW_REQUIRED' });
   await babysit(f, run, 'sit');
   await parkedRow(f, run, 'sit');
   await checkedAgain(run, 'sit', 1, 1);
   const seen = path.join(f.state, 'prs', 'example_repo_42.json');
 
-  set({ statusCheckRollup: green });
+  set({ statusCheckRollup: green, reviewDecision: 'REVIEW_REQUIRED' });
   const quiet = await eventually(() => {
     const check = readJson(path.join(attemptDir(run, 'sit', 1), 'park-check.json'));
     return check.quiet ? check : null;
@@ -675,7 +692,7 @@ test('checks that go green while a review is missing wake no model; a failed che
   const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'approval with green checks did not resume it', SLOW);
   await f.ready(second);
   const brief = fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8');
-  assert.match(brief, /every check passed; review decision: none → APPROVED/);
+  assert.match(brief, /every check passed; review decision: REVIEW_REQUIRED → APPROVED/);
   assert.match(brief, /The pull request now .*checks: 1 passed, 0 failed, 0 pending; review: APPROVED/);
   // Let the held attempt end, parked again, before closing: nothing still writes at teardown.
   f.release(second);
@@ -683,16 +700,22 @@ test('checks that go green while a review is missing wake no model; a failed che
   await f.command(['close', run.id, 'sit']);
 });
 
-test('removal from the merge queue wakes a parked babysitter; sitting in the queue does not', async (t) => {
+test('entering the merge queue is remembered without waking anyone, so that a later removal wakes the babysitter', async (t) => {
   const f = await fixture(t);
   const set = await github(f);
   f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
   const run = await f.newRun();
   const green = [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }];
-  set({ reviewDecision: 'APPROVED', inQueue: true });
+  const seen = path.join(f.state, 'prs', 'example_repo_42.json');
+  // Parked while approved and outside the queue: that is the recorded state.
+  set({ reviewDecision: 'APPROVED', inQueue: false });
   await babysit(f, run, 'sit');
   await parkedRow(f, run, 'sit');
-  await checkedAgain(run, 'sit', 1, 1);
+  await eventually(() => fs.existsSync(seen) && readJson(seen).queued === false, 'no baseline was recorded', SLOW);
+  // It enters the queue: no event, but the record now says so.
+  set({ reviewDecision: 'APPROVED', inQueue: true });
+  await eventually(() => readJson(seen).queued === true, 'entering the queue was not remembered', SLOW);
+  assert.deepEqual(readJson(path.join(attemptDir(run, 'sit', 1), 'park-check.json')).events, []);
   // The queue's own checks passing is nothing to act on.
   set({ reviewDecision: 'APPROVED', inQueue: true, statusCheckRollup: green });
   await eventually(() => readJson(path.join(attemptDir(run, 'sit', 1), 'park-check.json')).quiet, 'the queue\'s green checks were not absorbed', SLOW);
@@ -709,6 +732,49 @@ test('removal from the merge queue wakes a parked babysitter; sitting in the que
   await f.command(['close', run.id, 'sit']);
 });
 
+test('green checks on a pull request that needs no review wake the babysitter, which may merge it', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  const run = await f.newRun();
+  set({ statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit', status: 'IN_PROGRESS', conclusion: null }] });
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  await checkedAgain(run, 'sit', 1, 1);
+  set({ statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
+  const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'green checks with no review required did not resume it', SLOW);
+  await f.ready(second);
+  assert.match(fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8'), /On the pull request: every check passed\./);
+  f.release(second);
+  await parkedRow(f, run, 'sit', 2);
+  await f.command(['close', run.id, 'sit']);
+});
+
+test('the babysitter\'s own replies and comments wake no one; a person\'s review does', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  const run = await f.newRun();
+  const mine = '🤖 *Generated by an AI coding agent*\n\nRenamed it in abc1234.';
+  set({ reviewDecision: 'REVIEW_REQUIRED' });
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  await checkedAgain(run, 'sit', 1, 1);
+  // A reply in a review thread arrives as a review with no body, holding the reply; plus a comment.
+  const own = { reviewDecision: 'REVIEW_REQUIRED', comments: [{ body: mine }], reviews: [{ body: '', comments: [{ body: mine }] }] };
+  set(own);
+  const check = await checkedAgain(run, 'sit', 1, 3);
+  assert.deepEqual(check.events, []);
+  assert.equal(readJson(f.taskFile(run, 'sit')).attempt, 1, 'its own replies woke it');
+  set({ ...own, reviews: [...own.reviews, { body: 'Please also handle the empty case.' }] });
+  const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'a person\'s review did not resume it', SLOW);
+  await f.ready(second);
+  assert.match(fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8'), /On the pull request: 1 new review\(s\)\./);
+  f.release(second);
+  await parkedRow(f, run, 'sit', 2);
+  await f.command(['close', run.id, 'sit']);
+});
+
 test('a moved base is an event, and only green checks with nothing else open need no model', () => {
   const checks = { total: 1, passed: 1, pending: 0, failed: [] };
   const s = { state: 'OPEN', head: 'a', base: 'main', mergeable: 'MERGEABLE', mergeState: 'CLEAN', reviewDecision: null, checks, comments: 0, reviews: 0, unresolvedThreads: 0, queued: null };
@@ -718,16 +784,94 @@ test('a moved base is an event, and only green checks with nothing else open nee
   assert.deepEqual(watchAttention({ ...s, base: 'release' }, s), ['base changed: main → release']);
   assert.match(watchAttention({ ...s, queued: false }, { ...s, queued: true })[0], /left the merge queue/);
   assert.deepEqual(watchAttention({ ...s, queued: false, state: 'MERGED' }, { ...s, queued: true }).length, 1, 'a merge is not a removal');
-  assert.equal(quietItems(s, ['every check passed']), true);
+  assert.equal(quietItems(s, ['every check passed']), false, 'no review decision does not mean a review is awaited');
+  assert.equal(quietItems({ ...s, reviewDecision: 'REVIEW_REQUIRED' }, ['every check passed']), true);
   assert.equal(quietItems({ ...s, reviewDecision: 'APPROVED' }, ['every check passed']), false);
   assert.equal(quietItems({ ...s, reviewDecision: 'APPROVED', queued: true }, ['every check passed']), true);
-  assert.equal(quietItems(s, ['every check passed', '1 new comment(s)']), false);
-  assert.equal(quietItems(s, ['every check finished, some failed']), false);
-  assert.equal(quietItems(s, []), false);
+  const waits = { ...s, reviewDecision: 'REVIEW_REQUIRED' };
+  assert.equal(quietItems(waits, ['every check passed', '1 new comment(s)']), false);
+  assert.equal(quietItems(waits, ['every check finished, some failed']), false);
+  assert.equal(quietItems(waits, []), false);
+  // New comments and reviews count only what people wrote, when both snapshots say what agents wrote.
+  const counted = { ...s, comments: 2, reviews: 3, ownComments: 1, ownReviews: 2 };
+  assert.deepEqual(watchAttention({ ...counted, comments: 4, ownComments: 3, reviews: 5, ownReviews: 3 }, counted), ['1 new review(s)']);
+  assert.deepEqual(watchAttention({ ...s, comments: 1, ownComments: 1 }, s), ['1 new comment(s)'], 'an older record without those counts compares totals');
+  assert.equal(agentWrote('🤖 *Generated by an AI coding agent*\n\nDone.'), true);
+  assert.equal(agentWrote('Done. 🤖 Generated by an AI coding agent'), false);
 });
 
 test('a babysitter waiting on an answer is told to park, not to hold its session open with nap', () => {
   assert.match(decisionNote(true), /when only that is left, park as your brief says/);
   assert.doesNotMatch(decisionNote(true), /nap 5m/);
   assert.match(decisionNote(false), /nap 5m/);
+});
+
+test('above the context limit a parked babysitter resumes in a fresh session, but only from a current handoff note', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  // The fake relay's last model call sends 120 tokens: above this limit, below the default.
+  f.env.AGENT_ORCH_BABYSIT_HANDOFF_TOKENS = '100';
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  const run = await f.newRun();
+  const first = await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  assert.equal(lastCallTokens(first.outDir), 120);
+  const note = path.join(run.dir, 'tasks', 'sit', 'handoff.md');
+  assert.ok(fs.readFileSync(path.join(first.outDir, 'orch-brief.md'), 'utf8').includes(`Keep a handoff note current at \`${note}\``), 'the brief gives the note\'s path');
+  const attempt = (n) => eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === n ? readJson(f.taskFile(run, 'sit')) : null), `attempt ${n} did not start`, SLOW);
+  const sessionOf = (task) => {
+    const argv = readJson(path.join(task.outDir, 'invocation.json')).argv;
+    return argv.includes('--session') ? argv[argv.indexOf('--session') + 1] : null;
+  };
+  const again = async (task, n) => {
+    f.release(task);
+    await parkedRow(f, run, 'sit', n);
+  };
+
+  // No note: the session is kept, and told to write one.
+  set({ statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
+  const second = await attempt(2);
+  await f.ready(second);
+  assert.equal(sessionOf(second), 'fixture-claude');
+  assert.match(fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8'), /Your handoff note at `[^`]*handoff\.md` does not exist\. Write it before you park again.*\(120 tokens at your last call\).*above 100 tokens.*At most 60 lines/);
+  assert.equal(second.handoffs, undefined);
+  await again(second, 2);
+
+  // A note from before the attempt that parked is stale: the session is kept again.
+  fs.writeFileSync(note, 'An old note.\n');
+  fs.utimesSync(note, new Date('2020-01-01'), new Date('2020-01-01'));
+  set({ comments: [{ body: 'Please rename this.' }] });
+  const third = await attempt(3);
+  await f.ready(third);
+  assert.equal(sessionOf(third), 'fixture-claude');
+  assert.match(fs.readFileSync(path.join(third.outDir, 'orch-brief.md'), 'utf8'), /Your handoff note at `[^`]*` was not updated in your last attempt\. Write it before you park again/);
+  await again(third, 3);
+
+  // A note updated in the attempt that parked: a fresh session, from the first brief, the note, and what changed.
+  fs.writeFileSync(note, 'HANDOFF_MARK round 1 asked for a rename, answered in abc1234.\n');
+  set({ comments: [{ body: 'Please rename this.' }, { body: 'One more thing.' }] });
+  const fourth = await attempt(4);
+  await f.ready(fourth);
+  assert.equal(sessionOf(fourth), null, 'the large session was resumed');
+  const brief = fs.readFileSync(path.join(fourth.outDir, 'orch-brief.md'), 'utf8');
+  const parts = [fs.readFileSync(f.brief('sit', { finalMessage: PARKED }), 'utf8').trim(), '## Handoff note from your previous session', 'had grown to 120 tokens',
+    'HANDOFF_MARK round 1 asked for a rename', '## What changed while the previous session was parked', 'On the pull request: 1 new comment(s).', '## Handoff note\n'].map((part) => brief.indexOf(part));
+  assert.ok(parts.every((at, i) => at >= 0 && (i === 0 || at > parts[i - 1])), `the brief's parts are out of order: ${parts}`);
+  assert.deepEqual([fourth.handoffs[4].fromAttempt, fourth.handoffs[4].contextTokens, fourth.handoffs[4].limit], [3, 120, 100]);
+  assert.deepEqual([fourth.babysit, fourth.tier, fourth.pr.number], [true, 'complex', 42]);
+  // The first brief is kept as it was given, for the next handoff.
+  assert.equal(fs.readFileSync(path.join(run.dir, 'tasks', 'sit', 'babysit-brief.md'), 'utf8'), fs.readFileSync(f.brief('sit', { finalMessage: PARKED }), 'utf8'));
+  const row = await rowOf(f, run, 'sit');
+  assert.equal(row.handoff.contextTokens, 120);
+  assert.match((await f.command(['status', run.id])).stdout, /fresh session from a handoff at 120 tokens/);
+  await parkedRow(f, run, 'sit', 4);
+  assert.match((await f.command(['result', run.id, 'sit'])).stdout, /fresh session: attempt 4 started from the handoff note, since attempt 3's context had grown to 120 tokens \(limit 100\)/);
+  await f.command(['close', run.id, 'sit']);
+});
+
+test('the handoff limit comes from AGENT_ORCH_BABYSIT_HANDOFF_TOKENS, and defaults to 150000', () => {
+  assert.equal(handoffLimit('100'), 100);
+  assert.equal(handoffLimit(undefined), 150000);
+  assert.equal(handoffLimit('lots'), 150000);
+  assert.equal(handoffLimit('0'), 150000);
 });

@@ -104,6 +104,7 @@ export function cmdResult(args) {
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
     `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,
     session ? `session: ${session}  (resume with: start ... -- --session ${session})` : null,
+    d.handoff ? `fresh session: attempt ${d.attempt} started from the handoff note, since attempt ${d.handoff.fromAttempt}'s context had grown to ${d.handoff.contextTokens} tokens (limit ${d.handoff.limit})` : null,
     d.limitHit ? `USAGE LIMIT: ${d.agent} reached a usage limit. Ping the user once, and resume the task on the other agent if it is ready (SKILL.md, "Usage limits")` : null,
     d.decisions ? `NEEDS DECISION: decide what the user's request covers and resume this session with the answer; ask the user only about scope, security posture, or cost${d.decisions.map((q) => `\n  - ${q}`).join("")}` : null,
     Array.isArray(r?.touchedFiles) ? `touched (${r.touchedFiles.length}):${r.touchedFiles.map((f) => `\n  ${f}`).join("")}` : null,

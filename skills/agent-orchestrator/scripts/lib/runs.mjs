@@ -627,6 +627,8 @@ export function describe(run, task) {
     limitHit,
     result,
     ...(parked ? { parked } : {}),
+    // Set when this attempt began a fresh session from the babysitter's handoff note (park.mjs).
+    ...(task.handoffs?.[task.attempt] ? { handoff: task.handoffs[task.attempt] } : {}),
   };
   const reported = { ...row, ...reportFields(run, task, row) };
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
