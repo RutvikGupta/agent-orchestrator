@@ -121,7 +121,8 @@ function seed(source, run, id, { agent = 'codex', tier = 'light', firstTier = ti
   writeJson(path.join(dir, 'task.json'), { ...readJson(path.join(source, 'task.json')), id, tier, model: tiers[tier].model,
     effort: tiers[tier].effort, attempt: attempts, outDir: path.join(dir, `attempt-${attempts}`), babysit, pid: deadPid,
     startedAt: new Date(started).toISOString(), ...stamp,
-    ...(attemptTiers ? { attemptTiers: Object.fromEntries(Array.from({ length: attempts }, (_, i) => [i + 1, i === 0 ? firstTier : tier])) } : {}) });
+    // `start` records each attempt's tier itself now, so a task from before that has the field removed.
+    attemptTiers: attemptTiers ? Object.fromEntries(Array.from({ length: attempts }, (_, i) => [i + 1, i === 0 ? firstTier : tier])) : undefined });
 }
 
 // No installed agent CLI: `agents` then lists the relays without starting a CLI, whatever this machine has.
