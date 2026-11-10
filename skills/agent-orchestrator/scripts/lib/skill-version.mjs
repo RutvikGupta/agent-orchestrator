@@ -9,6 +9,7 @@
 // costs a few stat calls and no hashing, and only a file whose stat differs is read and hashed. When
 // the fingerprint differs, the command prints a notice on stderr (never stdout, so `--json` stays
 // valid) and runs on. `orch.mjs skill --loaded` records the current fingerprint and ends the notice.
+// The check runs before the help text too, so a session whose first command is `--help` is recorded.
 //
 // A file edited in place with the same size and the same modification time goes unseen; no editor
 // or checkout does that.
@@ -18,7 +19,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CACHE_PATH, CLI_PATH, SKILL_DIR, STATE_ROOT } from "./config.mjs";
-import { detectOrchestrator } from "./runs.mjs";
+import { callerIdentity } from "./ownership.mjs";
 import { readJson, writeJson } from "./util.mjs";
 
 const RECORD_VERSION = 1;
@@ -93,28 +94,30 @@ export function diffFiles(before = {}, after = {}) {
   return { changed, added, removed };
 }
 
-// Who is calling, as { key, label }, or null for a caller with no identity (a plain terminal). A
-// delegated task is named by AGENT_ORCH_RUN and AGENT_ORCH_TASK; a main session by its Claude Code
-// or Codex session id. When both hosts' variables are set (a Codex session started from Claude Code
-// inherits Claude's), the nearest host decides, as detectOrchestrator finds it; that costs a `ps`,
-// so it is asked only then.
-export function skillCaller(env = process.env) {
+// The callers an environment can name, as { key, label }, without finding out which one is running:
+// the delegated task that AGENT_ORCH_RUN and AGENT_ORCH_TASK name, else a session for each host
+// variable that is set (Claude Code's and Codex's). A Codex process started from Claude Code inherits
+// Claude's variable, so a variable alone does not say whose session this is.
+function namedCallers(env = process.env) {
   if (env.AGENT_ORCH_DEPTH) {
     const { AGENT_ORCH_RUN: run, AGENT_ORCH_TASK: task } = env;
-    return run && task ? { key: `task:${run}/${task}`, label: `task ${task} of run ${run}` } : null;
+    return run && task ? [{ key: `task:${run}/${task}`, label: `task ${task} of run ${run}` }] : [];
   }
-  const claude = env.CLAUDE_CODE_SESSION_ID || null;
-  const codex = env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || null;
-  let agent = null;
-  let id = null;
-  if (claude && codex) {
-    const found = detectOrchestrator();
-    ({ agent, sessionId: id } = found);
-  } else if (claude || codex) {
-    agent = claude ? "claude" : "codex";
-    id = claude || codex;
-  }
-  return id && agent ? { key: `${agent}:${id}`, label: `${agent} session ${id}` } : null;
+  const sessions = [["claude", env.CLAUDE_CODE_SESSION_ID], ["codex", env.CODEX_THREAD_ID || env.CODEX_SESSION_ID]];
+  return sessions.filter(([, id]) => id).map(([agent, id]) => ({ key: `${agent}:${id}`, label: `${agent} session ${id}` }));
+}
+
+// Who is calling, as { key, label }, or null for a caller with no identity (a plain terminal). A
+// delegated task is named by AGENT_ORCH_RUN and AGENT_ORCH_TASK. A main session is the one
+// detectOrchestrator finds (through callerIdentity, so a guarded command reuses the answer): the
+// nearest Claude Code or Codex process above this one decides the host, and only that host's own
+// session variable names the session. A Codex process that inherits only Claude's variable has none,
+// so it never takes the Claude session's identity. Finding the host reads the process table.
+export function skillCaller(env = process.env) {
+  if (env.AGENT_ORCH_DEPTH) return namedCallers(env)[0] || null;
+  if (!namedCallers(env).length) return null;
+  const { kind, record } = callerIdentity();
+  return kind === "session" && record.sessionId ? { key: `${record.agent}:${record.sessionId}`, label: `${record.agent} session ${record.sessionId}` } : null;
 }
 
 // Whether commands check on their own. AGENT_ORCH_SKILL_NOTICE=0|off turns the check off and =1|on
@@ -270,28 +273,45 @@ export const noticeText = (state) => [
   `After you have read it, run: node ${CLI_PATH} skill --loaded (this notice repeats on every orch.mjs command until then).`,
 ].join("\n  ") + "\n";
 
-// The check every command runs first, before its own output. Never fails the command. The first
-// command of a caller writes its record; a later one with a different fingerprint prints the notice
-// (not for `skill`, which reports the same thing itself).
-export function checkSkill(command, { dir = SKILL_DIR, env = process.env } = {}) {
+// What a check does for a record it found current: remember the new stat of a file that was touched
+// or rewritten with the same content (so the next check does not read it again), and renew a record
+// in use, so that it is not removed after 30 days. The record keeps its own time and commit. While
+// the skill differs from the record (`same` false) its files stay as they were: they are what the
+// notice compares with.
+function keepRecord(file, record, current, same = true) {
+  if (same && current.hashed) writeJson(file, { ...record, files: current.files });
+  else if (Date.now() - fs.statSync(file).mtimeMs > REFRESH_AFTER_MS) fs.utimesSync(file, new Date(), new Date());
+}
+
+// The common case, answered without finding out who the caller is: every caller the environment could
+// name has a record, and the skill matches each. Whoever the caller is, there is then nothing to
+// record and nothing to say, and the check costs a few stat calls and no process table read.
+function nothingToDo(dir) {
+  const callers = namedCallers();
+  if (!callers.length) return true; // no identity is possible
+  const files = callers.map((caller) => recordFile(caller, dir));
+  const records = callers.map((caller) => readRecord(caller, dir));
+  if (!records.every(Boolean)) return false;
+  const current = scan(dir, records[0].files);
+  if (!records.every((record) => record.fingerprint === current.fingerprint)) return false;
+  records.forEach((record, i) => keepRecord(files[i], record, current));
+  return true;
+}
+
+// The check every command runs first, before its own output and the help text. Never fails the
+// command. The first command of a caller writes its record; a later one with a different fingerprint
+// prints the notice (not for `skill`, which reports the same thing itself).
+export function checkSkill(command, { dir = SKILL_DIR } = {}) {
   try {
-    if (!noticeEnabled(env)) return;
-    const caller = skillCaller(env);
+    if (!noticeEnabled() || nothingToDo(dir)) return;
+    const caller = skillCaller();
     if (!caller) return;
     const state = skillState(dir, caller);
     if (!state.recorded) {
       saveRecord(caller, state.current, dir);
       return;
     }
-    const file = recordFile(caller, dir);
-    if (!state.changed) {
-      // Same content, but a file was touched or rewritten: remember its new stat, so the next check
-      // does not read it again. The record keeps its own time and commit.
-      if (state.current.hashed) writeJson(file, { ...state.recorded, files: state.current.files });
-      else if (Date.now() - fs.statSync(file).mtimeMs > REFRESH_AFTER_MS) fs.utimesSync(file, new Date(), new Date());
-      return;
-    }
-    if (Date.now() - fs.statSync(file).mtimeMs > REFRESH_AFTER_MS) fs.utimesSync(file, new Date(), new Date());
-    if (command !== "skill") process.stderr.write(noticeText(state));
+    keepRecord(recordFile(caller, dir), state.recorded, state.current, !state.changed);
+    if (state.changed && command !== "skill") process.stderr.write(noticeText(state));
   } catch {}
 }

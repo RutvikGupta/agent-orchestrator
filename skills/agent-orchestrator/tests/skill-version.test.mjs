@@ -10,6 +10,24 @@ import { diffFiles, headCommit, scan } from '../scripts/lib/skill-version.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const NOTICE = 'the skill changed since this session loaded it';
 
+// Fake Claude Code and Codex processes: a copy of node named after the host, running a script that runs
+// the CLI as its child. The CLI finds its host by looking for such a process above it (the way
+// detectOrchestrator does), so a test names the host instead of depending on what runs the tests.
+function hosts(f) {
+  const dir = path.join(f.root, 'hosts');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir);
+    for (const name of ['claude', 'codex']) fs.symlinkSync(process.execPath, path.join(dir, name));
+    fs.writeFileSync(path.join(dir, 'run-cli.mjs'), [
+      "import { spawnSync } from 'node:child_process';",
+      "const r = spawnSync(process.argv[2], process.argv.slice(3), { stdio: 'inherit' });",
+      'process.exit(r.status ?? 1);',
+    ].join('\n'));
+  }
+  // The command that runs `argv` (node's arguments) under the host, or, for no host, by itself.
+  return (host, argv) => (host ? [path.join(dir, host), [path.join(dir, 'run-cli.mjs'), process.execPath, ...argv]] : [process.execPath, argv]);
+}
+
 // A private copy of the skill (its CLI and instruction files), so a test can edit SKILL.md without
 // touching the real one. The copy's CLI sees the copy as its skill folder.
 function skillCopy(f, name = 'skill') {
@@ -19,14 +37,19 @@ function skillCopy(f, name = 'skill') {
   fs.cpSync(path.join(root, 'references'), path.join(dir, 'references'), { recursive: true });
   for (const file of ['SKILL.md', 'policy.json']) fs.copyFileSync(path.join(root, file), path.join(dir, file));
   const cli = path.join(dir, 'scripts', 'orch.mjs');
+  const underHost = hosts(f);
   const copy = {
-    dir, cli,
+    dir, cli, underHost,
     // Runs the copy's CLI with the fixture's environment, the notice switched on as a test asks for
     // it, and `env` on top (a session or task identity); a value of undefined removes a variable.
-    run(args, env = {}) {
+    // A caller with a session variable runs under a fake host: Codex when CODEX_THREAD_ID is set, else
+    // Claude Code, unless `host` names one ('claude' or 'codex'; false for none).
+    run(args, env = {}, host = undefined) {
       const merged = { ...f.env, AGENT_ORCH_SKILL_NOTICE: '1', ...env };
       for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
-      const r = spawnSync(process.execPath, [cli, ...args], { cwd: f.repo, env: merged, encoding: 'utf8', timeout: 15_000 });
+      const named = merged.CLAUDE_CODE_SESSION_ID || merged.CODEX_THREAD_ID;
+      const [file, argv] = underHost(host === undefined ? (named ? (merged.CODEX_THREAD_ID ? 'codex' : 'claude') : null) : host || null, [cli, ...args]);
+      const r = spawnSync(file, argv, { cwd: f.repo, env: merged, encoding: 'utf8', timeout: 15_000 });
       assert.equal(r.status, 0, `node orch.mjs ${args.join(' ')}\n${r.stdout}\n${r.stderr}`);
       return r;
     },
@@ -114,7 +137,8 @@ test('the notice comes before the command\'s own output', async (t) => {
   skill.run(['runs'], SESSION);
   skill.edit('SKILL.md');
   // One stream, so the order of the writes shows.
-  const r = spawnSync('/bin/sh', ['-c', 'exec "$0" "$@" 2>&1', process.execPath, skill.cli, 'runs'], {
+  const [file, argv] = skill.underHost('claude', [skill.cli, 'runs']);
+  const r = spawnSync('/bin/sh', ['-c', 'exec "$0" "$@" 2>&1', file, ...argv], {
     cwd: f.repo, env: { ...f.env, AGENT_ORCH_SKILL_NOTICE: '1', ...SESSION }, encoding: 'utf8',
   });
   assert.equal(r.status, 0);
@@ -342,4 +366,97 @@ test('the commit a checkout is at is read without git, and agrees with git', asy
   assert.notEqual(headCommit(path.join(linked, 'skills', 'one')), headCommit(sub));
   git(repo, 'checkout', '-q', '--detach');
   assert.equal(headCommit(sub), git(repo, 'rev-parse', 'HEAD'), 'a detached HEAD');
+});
+
+test('a session is named by its own host\'s variable: a Codex process that inherits only Claude\'s has no identity', async (t) => {
+  const f = await fixture(t);
+  const skill = skillCopy(f);
+  const parent = { CLAUDE_CODE_SESSION_ID: 'parent' };
+  skill.run(['runs'], parent, 'claude');
+  assert.equal(skill.records().length, 1);
+  skill.edit('SKILL.md');
+
+  // A Codex process started from the Claude session inherits only Claude's variable. It is not that
+  // session: it has no identity, so it is told nothing, records nothing, and its `skill --loaded`
+  // does not acknowledge the change for the Claude session.
+  const inheriting = JSON.parse(skill.run(['skill', '--json'], parent, 'codex').stdout);
+  assert.equal(inheriting.caller, null);
+  assert.equal(inheriting.recorded, null);
+  assert.equal(skill.run(['runs'], parent, 'codex').stderr, '');
+  const loaded = JSON.parse(skill.run(['skill', '--loaded', '--json'], parent, 'codex').stdout);
+  assert.equal(loaded.loaded, false);
+  assert.equal(skill.records().length, 1, 'nothing was recorded for it');
+  assert.match(skill.run(['runs'], parent, 'claude').stderr, new RegExp(NOTICE), 'the Claude session is still told');
+  assert.equal(JSON.parse(skill.run(['skill', '--json'], parent, 'claude').stdout).changed, true);
+
+  // The host that runs the command decides, so each session with its own variable is its own caller,
+  // whatever else it inherited.
+  const key = (env, host) => JSON.parse(skill.run(['skill', '--json'], env, host).stdout).caller?.key;
+  assert.equal(key({ ...parent, CODEX_THREAD_ID: 'thread-x' }, 'codex'), 'codex:thread-x');
+  assert.equal(key({ ...parent, CODEX_THREAD_ID: 'thread-x' }, 'claude'), 'claude:parent');
+  assert.equal(key({ CODEX_THREAD_ID: 'thread-x' }, 'claude'), undefined, 'a Claude process with only a Codex id has none');
+  assert.equal(key({ CODEX_THREAD_ID: 'thread-x' }, 'codex'), 'codex:thread-x');
+});
+
+test('a Codex session that inherited Claude\'s variable still gets its own record at its first command', async (t) => {
+  const f = await fixture(t);
+  const skill = skillCopy(f);
+  const parent = { CLAUDE_CODE_SESSION_ID: 'parent' };
+  const child = { ...parent, CODEX_THREAD_ID: 'thread-y' };
+  skill.run(['runs'], parent, 'claude');
+  assert.equal(skill.run(['runs'], child, 'codex').stderr, '');
+  assert.equal(skill.records().length, 2, 'the Codex session has a record of its own, beside the Claude session\'s');
+  skill.edit('SKILL.md');
+  assert.match(skill.run(['runs'], child, 'codex').stderr, new RegExp(NOTICE));
+  skill.run(['skill', '--loaded'], child, 'codex');
+  assert.equal(skill.run(['runs'], child, 'codex').stderr, '');
+  assert.match(skill.run(['runs'], parent, 'claude').stderr, new RegExp(NOTICE), 'acknowledging in one session leaves the other told');
+});
+
+test('the check runs before the help text: --help records a first caller and reports a change', async (t) => {
+  const f = await fixture(t);
+  const skill = skillCopy(f);
+  const first = skill.run(['--help'], SESSION);
+  assert.match(first.stdout, /^agent-orchestrator · orch\.mjs/);
+  assert.equal(first.stderr, '');
+  assert.equal(skill.records().length, 1, 'the first command was help, and it recorded the caller');
+  skill.run(['runs'], { CLAUDE_CODE_SESSION_ID: 'session-two' });
+  skill.edit('SKILL.md');
+
+  // The session whose first command was help is told at its next command, not given the new skill as its baseline.
+  assert.match(skill.run(['runs'], SESSION).stderr, new RegExp(NOTICE));
+  assert.match(skill.run(['runs'], { CLAUDE_CODE_SESSION_ID: 'session-two' }).stderr, new RegExp(NOTICE));
+
+  // Every way to ask for help reports it, with the help text unchanged on stdout.
+  for (const [args, text] of [[['--help'], /^agent-orchestrator · orch\.mjs/], [['help'], /^agent-orchestrator · orch\.mjs/], [['-h'], /^agent-orchestrator · orch\.mjs/], [[], /^agent-orchestrator · orch\.mjs/], [['wait', '--help'], /^ {2}wait RUN/]]) {
+    const r = skill.run(args, SESSION);
+    assert.ok(r.stderr.startsWith(`orch: ${NOTICE}.`), `${args.join(' ') || '(no command)'}: ${r.stderr}`);
+    assert.match(r.stdout, text);
+    assert.doesNotMatch(r.stdout, /skill changed/);
+  }
+  // A caller with no identity gets none for help either.
+  assert.equal(skill.run(['--help']).stderr, '');
+});
+
+test('an unchanged skill is checked without reading the process table', async (t) => {
+  const f = await fixture(t);
+  const skill = skillCopy(f);
+  // A `ps` that logs each call and runs the real one.
+  const shim = path.join(f.root, 'shim');
+  const log = path.join(f.root, 'ps-calls');
+  const real = spawnSync('sh', ['-c', 'command -v ps'], { env: f.env, encoding: 'utf8' }).stdout.trim();
+  fs.mkdirSync(shim);
+  fs.writeFileSync(path.join(shim, 'ps'), `#!/bin/sh\necho "$@" >> '${log}'\nexec '${real}' "$@"\n`, { mode: 0o755 });
+  const env = { ...SESSION, PATH: `${shim}:${f.env.PATH}` };
+  const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length : 0);
+
+  skill.run(['runs'], env);
+  assert.ok(calls() > 0, 'the first command finds its host, to know whose record to write');
+  fs.rmSync(log, { force: true });
+  for (let i = 0; i < 3; i++) assert.equal(skill.run(['runs'], env).stderr, '');
+  assert.equal(calls(), 0, 'later commands against an unchanged skill read no process table');
+
+  skill.edit('SKILL.md');
+  assert.match(skill.run(['runs'], env).stderr, new RegExp(NOTICE));
+  assert.ok(calls() > 0, 'a changed skill needs the caller\'s identity');
 });

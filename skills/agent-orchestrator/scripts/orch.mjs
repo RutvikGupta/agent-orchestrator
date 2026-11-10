@@ -223,13 +223,15 @@ owner. A run launched from a terminal is the user's. The user at a terminal and 
 act on any run, and the owner is told. When every owner of a run has gone and it has been unused
 for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.
 
-Skill changes: the first orch.mjs command of a Claude Code or Codex session, or of a delegated task,
-records a fingerprint of SKILL.md, references/ and policy.json. When they differ on a later command, a
-notice on stderr (stdout and --json are untouched) names the changed files, the commits since (at most
-5, in a git checkout) and the file to read again, and the command still runs. The notice repeats until
-\`skill --loaded\`. A caller with no session or task identity (a plain terminal) gets none, and records
-older than 30 days are removed. AGENT_ORCH_SKILL_NOTICE=0 turns it off; it is off while
-AGENT_ORCH_SKILLS_DIR is set (tests) unless AGENT_ORCH_SKILL_NOTICE=1.`;
+Skill changes: the first orch.mjs command of a Claude Code or Codex session, or of a delegated task
+(--help included), records a fingerprint of SKILL.md, references/ and policy.json. When they differ on
+a later command, a notice on stderr (stdout and --json are untouched) names the changed files, the
+commits since (at most 5, in a git checkout) and the file to read again, and the command still runs.
+The notice repeats until \`skill --loaded\`. A session is named by the session id of the Claude Code or
+Codex process that runs the command, never by one it inherited from another host. A caller with no
+session or task identity (a plain terminal) gets none, and records older than 30 days are removed.
+AGENT_ORCH_SKILL_NOTICE=0 turns it off; it is off while AGENT_ORCH_SKILLS_DIR is set (tests) unless
+AGENT_ORCH_SKILL_NOTICE=1.`;
 
 const [command, ...rest] = process.argv.slice(2);
 const specs = {
@@ -286,6 +288,7 @@ const handlers = {
   cleanup: cmdCleanup,
   runs: cmdRuns,
   stats: cmdStats,
+  skill: cmdSkill,
   "pr-watch": cmdPrWatch,
   brief: cmdBrief,
   send: cmdSend,
@@ -308,21 +311,18 @@ const handlers = {
   recover: cmdRecover,
 };
 
+// A changed skill is reported on stderr before anything else is printed, the help text included, and
+// a caller's first command records its fingerprint whatever that command is (lib/skill-version.mjs).
+checkSkill(command);
+
 if (command === "wait" && rest.includes("--help")) {
   process.stdout.write(`${USAGE.slice(USAGE.indexOf("  wait RUN"), USAGE.indexOf("  plan RUN"))}`);
 } else if (!command || command === "help" || command === "--help" || command === "-h") {
   process.stdout.write(`${USAGE}\n`);
-} else if (command === "skill") {
-  // The caller's own record, no run: nothing for an ownership check to guard (lib/ownership.mjs).
-  const args = parseArgs(rest, specs.skill);
-  checkSkill(command);
-  cmdSkill(args);
 } else if (!handlers[command]) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
   const args = parseArgs(rest, specs[command]);
-  // A changed skill is reported on stderr before the command's own output (lib/skill-version.mjs).
-  checkSkill(command);
   // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
   gateCommand(command, args);
   await handlers[command](args);
