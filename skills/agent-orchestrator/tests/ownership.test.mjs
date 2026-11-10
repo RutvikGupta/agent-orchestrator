@@ -165,7 +165,8 @@ test('every guarded command refuses another session\'s run, changes nothing and 
     ['inbox', run.id, 'busy', '--ack'],
     ['reply', run.id, 'busy', 'Done.'],
   ];
-  assert.deepEqual(Object.keys(GUARDED_COMMANDS).filter((c) => !refused.some((args) => args[0] === c)), [], 'a guarded command has no refusal case here');
+  // `gc` takes no run: it skips other sessions' runs inside its own report, which gc.test.mjs covers.
+  assert.deepEqual(Object.keys(GUARDED_COMMANDS).filter((c) => c !== 'gc' && !refused.some((args) => args[0] === c)), [], 'a guarded command has no refusal case here');
   for (const args of refused) {
     const r = await f.command(args, { code: 4, env: B });
     assert.match(r.stderr, OWNER_A, args.join(' '));

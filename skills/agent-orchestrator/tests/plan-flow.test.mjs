@@ -230,6 +230,10 @@ test('a prior integration receipt does not hide later commits merged by hand', a
   await accept(f, run, 'writer');
   await f.command(['integrate', run.id, 'writer']);
   const oldReceipt = readJson(f.taskFile(run, 'writer')).integratedCommit;
+  // Integrating collected the worktree and kept its branch: a resume says how to restore it.
+  const gone = await f.command(['start', run.id, 'writer', '--agent', 'claude', '--tier', 'complex', '--why', 'resume', '--brief', f.brief('writer')], { code: 1 });
+  assert.match(gone.stderr, /worktree was collected .* Restore the folder with `node \S+ worktree \S+ writer`/);
+  await f.command(['worktree', run.id, 'writer', '--no-prep']);
   await f.start(run, 'writer');
   await f.finished(run, 'writer');
   const tip = await commit(f, task.cd, 'later.txt');

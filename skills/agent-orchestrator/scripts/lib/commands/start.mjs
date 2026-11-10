@@ -110,6 +110,16 @@ function refuseStronger(key, tier, ignoreCaller = false) {
   }
 }
 
+// Why a task cannot start in `cd`, which is gone. A worktree that cleanup collected after its task
+// was closed or integrated keeps its branch, so the message says how to bring the folder back.
+function missingDirectory(run, id, prev, cd) {
+  const collected = prev?.removedWorktree;
+  if (collected && path.resolve(collected.path || "") === cd) {
+    return `task ${id}'s worktree was collected after the task was closed or integrated; its branch ${collected.branch} is kept. Restore the folder with \`node ${CLI_PATH} worktree ${run.id} ${id}\`, then start again`;
+  }
+  return `--cd does not exist: ${cd}`;
+}
+
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
 // record in the task, such as its plan entry. Returns the saved task and the text `start` prints.
 export function startTask(args, extra = {}) {
@@ -201,7 +211,7 @@ export function startTask(args, extra = {}) {
   refuseStronger(key, tier, babysit);
   if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
-  if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
+  if (!fs.existsSync(cd)) refuse(missingDirectory(run, id, prev, cd));
   // The orchestrator chooses the agent and tier by assessing the task; record why. A follow-up
   // attempt with the same agent and tier keeps the earlier reason unless a new one is given.
   const keepsChoice = sameAgent && prevTier === tier;
@@ -468,7 +478,7 @@ function startCommand(run, id, args, extra) {
   const { argv, done, timeout, reused } = commandOf(args, prev);
   if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
-  if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
+  if (!fs.existsSync(cd)) refuse(missingDirectory(run, id, prev, cd));
   const sameAgent = Boolean(prev.attempt && prev.agent === COMMAND_AGENT);
   const line = commandText(argv);
   const why =

@@ -25,7 +25,7 @@ export function gcTasks(run) {
   return fs.readdirSync(dir).flatMap((id) => {
     const task = loadTask(run, id);
     if (!task) return [];
-    const running = relayAlive(task.pid, task.startedAt) || isParked(run, task);
+    const running = relayAlive(task.pid, task.startedAt, task.outDir) || isParked(run, task);
     const result = task.outDir ? readJson(path.join(task.outDir, 'result.json')) : null;
     const evidence = task.outDir ? readJson(path.join(task.outDir, 'evidence.json')) : null;
     const eventTime = latestAttemptActivity(task.outDir);
