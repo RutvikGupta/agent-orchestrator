@@ -76,8 +76,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);margi
 .ev.error .k,.ev.error pre{color:var(--bad)}.ev.output pre{color:var(--muted)}
 .ev.thinking pre{color:var(--muted);font-style:italic}
 .empty{padding:40px;text-align:center}
-/* Agents that a task's own shell started: one block each, after the task's events. */
-section.inner{margin-top:18px;padding-left:10px;border-left:3px solid var(--ask)}section.inner>h3:first-child{margin-top:0}
+/* The line in a task's details that lists the agents its own shell started; each links to its row. */
+.ctx .agentlink{border:0;background:none;color:var(--review);font:inherit;cursor:pointer;padding:0}.ctx .agentlink:hover{text-decoration:underline}.ctx .agentlink:focus-visible{outline:2px solid var(--review);outline-offset:1px}
 /* The attention lane, above the run sections, and its count in the header. */
 #need{font-size:12px;font-weight:600;color:var(--ask);cursor:pointer}#need[hidden]{display:none}
 .lane{border:1px solid var(--line);border-radius:8px;background:var(--card);margin-bottom:16px;overflow:hidden}

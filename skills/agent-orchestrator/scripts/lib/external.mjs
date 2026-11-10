@@ -281,11 +281,15 @@ export function externalAgents(sinceMs, keep = null) {
   return out.sort((a, b) => a.startedMs - b.startedMs);
 }
 
-// The board row of an outside agent, read from its own transcript like a native sub-agent's.
+// The board row of an outside agent, read from its own transcript like a native sub-agent's. One that a
+// task's own shell started says so in `why`; `kind` is the command it ran ("claude -p" or "codex exec").
 export function externalRow(x, id, parent) {
   const summary = !x.file ? newSummary() : x.agent === "codex" ? summarizeRollout(x.file) : summarizeEvents("claude", x.file, x.cwd);
+  const kind = x.agent === "codex" ? "codex exec" : "claude -p";
   const how = x.agent === "codex" ? "codex exec" : "headless claude -p";
-  const why = `started outside the orchestrator (${how})${x.launcher ? ` by ${x.launcher}` : ""}`;
+  const why = x.parent?.run && x.parent?.task
+    ? `started by the shell of task ${x.parent.task}, not by orch.mjs (${how})${x.launcher ? ` through ${x.launcher}` : ""}`
+    : `started outside the orchestrator (${how})${x.launcher ? ` by ${x.launcher}` : ""}`;
   const row = nativeRow({ id, agent: x.agent, parent, startedMs: x.startedMs, lastMs: x.lastMs, running: x.alive, summary, sessionId: null, file: x.file, why });
   const cut = !x.alive && summary.busy; // ended in the middle of a turn
   // `codex exec review` does its work in a sub-thread; count it here, since sub-threads get no rows.
@@ -303,6 +307,8 @@ export function externalRow(x, id, parent) {
     ...row,
     external: true,
     mode: "external",
+    kind,
+    launcher: x.launcher || null,
     session: x.sessionId,
     state: x.alive ? "running" : cut ? "stopped" : row.decisions ? "needs-decision" : "completed",
     now: cut ? `stopped without finishing; last: ${row.now}` : row.now,
@@ -310,41 +316,18 @@ export function externalRow(x, id, parent) {
   };
 }
 
-// An agent that a task's own shell started (a script that runs `claude -p` or `codex exec`), as the
-// task's details list it: the board's row of the agent, without the row's tree fields. The summary
-// behind it is the incremental one in events.mjs, so a build reads only what the agent appended; the
-// panel reads the agent's events itself, from `file` (api/transcript). A finished agent's row cannot
-// change, so it is kept until its transcript or state does.
+// The board row of an agent that a task's own shell started (a script that runs `claude -p` or `codex
+// exec`); the board nests it under that task (dashboard-state.mjs). The summary behind it is the
+// incremental one in events.mjs, so a build reads only what the agent appended; the panel reads the
+// agent's events itself, from its `outDir` (api/transcript). A finished agent's row cannot change, so
+// it is kept until its transcript or state does.
 const INNER_KEEP = 200;
 const innerMemo = new Map(); // record key -> { sig, value }
 export function innerAgent(x) {
   const sig = [x.alive, x.lastMs, x.file, x.startedMs].join("|");
   const memo = !x.alive && innerMemo.get(x.key);
   if (memo?.sig === sig) return memo.value;
-  const row = externalRow(x, x.name, null);
-  const value = {
-    key: x.key,
-    agent: x.agent,
-    kind: x.agent === "codex" ? "codex exec" : "claude -p",
-    name: x.name,
-    launcher: x.launcher,
-    session: x.sessionId,
-    state: row.state,
-    model: row.model,
-    modelLabel: row.modelLabel,
-    startedAt: row.startedAt,
-    startedMs: x.startedMs,
-    lastActiveMs: row.lastActiveMs,
-    elapsed: row.elapsed,
-    steps: row.steps,
-    now: row.now,
-    tokensIn: row.tokensIn,
-    tokensCached: row.tokensCached,
-    tokensOut: row.tokensOut,
-    tokensExact: row.tokensExact,
-    cd: x.cwd,
-    file: x.file,
-  };
+  const value = externalRow(x, x.name, null);
   if (!x.alive) {
     innerMemo.delete(x.key);
     innerMemo.set(x.key, { sig, value });

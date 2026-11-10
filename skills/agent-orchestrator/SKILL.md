@@ -611,13 +611,12 @@ whose tab was opened another way.
   in between. Any edit, other command or success ends it. It shows in the lane, `status` and `watch`,
   and wakes `wait`; nothing acts on the agent. Read its log, then `send` a hint, `steer` or stop it.
 - A task whose own shell starts headless agents (a wrapper script that runs `claude -p` or `codex
-  exec`, such as a review script) shows them in its details panel, each as a block "Inside this
-  task: <kind> · <model> · <state>" with its own events (read from its transcript, newest last) and
-  tokens. The task keeps one row, and those tokens stay out of its totals. After a resume, each
-  block says which attempt its agent started in. While the task's own latest event is a tool call
-  that has waited 30 seconds for its result, and an agent of its current attempt runs, the row's
-  activity shows that agent's latest, after "inner:"; a newer event of the task's own shows instead.
-  A finished agent stays listed while the row shows. `/api/state` carries them as the row's `inner`.
+  exec`, such as a review script) gets one row per agent, nested under the task like a delegated
+  task. The row shows the agent's own kind, model, state, steps, tokens and activity, and its details
+  show its events, read from its transcript. Its tokens count in the section's totals, not in the
+  task's own cell. After a resume, the row says which attempt started it. A finished agent stays
+  listed while its task shows. The agent's own Agent-tool sub-agents, and any run it launches, nest
+  under its row. The task's details list its agents in one line, each linking to its row.
 - **Escalation.** A user's item that stays unhandled for `AGENT_ORCH_ESCALATE_AFTER`
   (default 10m), or a decision or question for `AGENT_ORCH_DECISION_ESCALATE_AFTER` (default 2m,
   or the first when that is shorter; checked every tenth of the shorter, from 1 to 10 seconds),
