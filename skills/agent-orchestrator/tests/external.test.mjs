@@ -765,6 +765,25 @@ test('a Codex task whose shell runs a claude -p agent shows two rows: the agent 
   await f.finished(run, 'standards-r4');
 });
 
+test('an agent a command task runs directly is named for itself, not for the orchestrator\'s command relay', async (t) => {
+  const { f, fakes } = await setup(t);
+  const run = await f.newRun();
+  const task = await f.start(run, 'live-cmd', { config: { hold: true }, flags: ['--read-only'] });
+  await f.ready(task);
+  transcript(f, 'direct-agent', false);
+  const relay = path.join(f.root, 'home', '.agents', 'skills', 'agent-orchestrator', 'scripts', 'command-relay.mjs');
+  fs.mkdirSync(path.dirname(relay), { recursive: true });
+  fs.writeFileSync(relay, "import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)(process.env.FAKE_AGENT);\n");
+  fakes.start(fakes.node('relay', relay, [fakes.claude('direct', 'direct-agent', { env: innerEnv(run, 'live-cmd') })]));
+  await fakes.ready('direct');
+  const board = await f.dashboard();
+
+  const { agents } = await withAgents(board, run, 'live-cmd');
+  assert.deepEqual([agents[0].id, agents[0].launcher, agents[0].session], ['claude-headless', null, 'direct-agent']);
+  f.release(task);
+  await f.finished(run, 'live-cmd');
+});
+
 test('a finished task still shows the agents its shell ran, finished, with their events', async (t) => {
   const { f, fakes } = await setup(t);
   const run = await f.newRun();

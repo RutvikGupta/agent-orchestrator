@@ -58,8 +58,10 @@ function nearestAgent(pid, table) {
 }
 
 // The script that started the agent, such as `bash codex_review.sh ...`: the nearest process above
-// it that runs a file, below the session that ran the command.
+// it that runs a file, below the session that ran the command. An orchestrator relay is not such a
+// script: an agent a command task runs directly has no launcher, so it is not named after the relay.
 const SCRIPT = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
+const RELAY = /skills\/(agent-orchestrator|claude-delegate|codex-delegate)\/scripts\/(command-relay|relay)\.mjs$/;
 const INTERPRETER = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
 function launcher(pid, table) {
   for (let p = table.get(pid)?.ppid, hops = 0; p > 1 && hops < 6; hops++) {
@@ -67,6 +69,7 @@ function launcher(pid, table) {
     if (!row || isAgent(row.command)) return null;
     const w = words(row.command);
     const file = SCRIPT.test(w[0]) ? w[0] : INTERPRETER.test(base(w[0])) && w[1] && !w[1].startsWith("-") ? w[1] : null;
+    if (file && RELAY.test(file)) return null;
     if (file) return { name: base(file).replace(/\.[a-z]+$/, ""), command: row.command };
     p = row.ppid;
   }
