@@ -195,42 +195,65 @@ function attemptState(dir, task, n) {
   return { result: readJson(file), ended: true };
 }
 
+// When an attempt that left no result ended: the newest file time in its folder (its event log, its
+// error log), which a crash leaves behind. null when the folder holds no file.
+function newestFileTime(dir) {
+  let newest = null;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const ms = fs.statSync(path.join(dir, entry.name)).mtimeMs;
+      if (newest === null || ms > newest) newest = ms;
+    }
+  } catch {
+    // A folder that is gone has no file time.
+  }
+  return newest;
+}
+
+// How a task's first attempt ran, as { model, effort, tier }, for the tier it counts toward. Its
+// result names the model. Without one (a crash), the tier recorded for that attempt when it started
+// (`attemptTiers`, which a task from before that record lacks), else a one-attempt task's own
+// record, else the attempt's event log, whose model a Claude log names and a Codex log does not.
+function firstRan(task, result, summary) {
+  if (result?.model) return { model: result.model, effort: result.effort || null, tier: null };
+  const tier = task.attemptTiers?.[1];
+  if (typeof tier === "string" && tier) return { model: null, effort: null, tier };
+  if (task.attempt === 1) return { model: task.model || null, effort: task.effort || null, tier: task.tier || null };
+  return { model: summary.model || null, effort: summary.effort || null, tier: null };
+}
+
 // The tier summary reads far less of a task than `stats` does: its verdict, how its first attempt
 // ran and ended, and the input tokens of its attempts. This is that record as
-// { settled, at, item }. `item` is null when the task is not dispatched, or its first attempt has
-// not ended. `at` is when the task finished (ms), which places it in the window: its last result's
-// time, or the start of a last attempt that left none, or now while a later attempt runs.
-// `settled` is false while a later attempt still runs, so that its record is read again next time.
-// A task that finished before `cutoff` is placed by its time alone: its event logs are not read.
+// { settled, at, item }. A task is finished only when its last attempt has ended: while a retry
+// still runs, `item` is null and `settled` false, so that the record is read again next time.
+// `item` is also null when the task is not dispatched. `at` is when the task finished (ms), which
+// places it in the window: its last result's time, or, for a last attempt that left none, the
+// newest file time in that attempt's folder. A task that finished before `cutoff` is placed by its
+// time alone: its event logs are not read.
 function tierItem(dir, cutoff) {
   const task = dispatchedTask(dir);
   if (!task) return { settled: true, at: null, item: null };
   const attempts = Array.from({ length: task.attempt }, (_, i) => attemptState(dir, task, i + 1));
   const [first] = attempts;
   const last = attempts[attempts.length - 1];
-  if (!first.ended) return { settled: false, at: null, item: null };
-  const finished = last.ended ? Date.parse(last.result?.finishedAt || task.startedAt || task.createdAt) : Date.now();
-  const at = Number.isFinite(finished) ? finished : null;
-  if (at === null || at < cutoff) return { settled: last.ended, at, item: null };
+  if (!last.ended) return { settled: false, at: null, item: null };
+  let at = Date.parse(last.result?.finishedAt);
+  if (!Number.isFinite(at)) at = newestFileTime(path.join(dir, `attempt-${task.attempt}`)) ?? Date.parse(task.startedAt || task.createdAt);
+  at = Number.isFinite(at) ? at : null;
+  if (at === null || at < cutoff) return { settled: true, at, item: null };
   let tokensIn = 0;
   let firstSummary = null;
   attempts.forEach((attempt, i) => {
-    if (!attempt.ended) return;
     const summary = summarizeEvents(attemptAgent(task, i + 1), path.join(dir, `attempt-${i + 1}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
     if (i === 0) firstSummary = summary;
   });
-  // How the first attempt ran: its result says; without one, a one-attempt task's own record does,
-  // and for a task that moved on, the attempt's event log.
-  const ran = first.result?.model ? first.result
-    : task.attempt === 1 ? task : { model: firstSummary.model, effort: firstSummary.effort };
-  return { settled: last.ended, at,
+  return { settled: true, at,
     item: { ...baseItem(task, first.result), tokensIn,
       // A babysitter's tier is fixed, not chosen, so the tier summary leaves it out.
       chosen: !task.babysit,
-      first: { agent: attemptAgent(task, 1), model: ran.model || null, effort: ran.effort || null,
-        // The tier recorded on a one-attempt task, for a first attempt that names no model.
-        tier: task.attempt === 1 ? task.tier || null : null },
+      first: { agent: attemptAgent(task, 1), ...firstRan(task, first.result, firstSummary) },
       // The first attempt's outcome is known once it was accepted or rejected, once the task needed
       // another attempt, or once the attempt itself failed: a result that is not "completed", or none
       // at all. A task closed with no verdict says nothing about its tier.
@@ -252,7 +275,7 @@ function statKey(file) {
 // their own. A task that finished before the window keeps only its time, so that the file holds
 // no record of work the summary no longer counts. A task whose last attempt still runs is not kept.
 const EVIDENCE_CACHE = path.join(STATE_ROOT, "tier-evidence.json");
-const EVIDENCE_VERSION = 2;
+const EVIDENCE_VERSION = 3;
 
 // The tier summary over the tasks that finished in the last EVIDENCE_DAYS days, in every run (an old
 // run may hold a task that finished today). null when it cannot be read: callers then print no

@@ -92,11 +92,13 @@ async function template(f, run, agent = 'codex') {
 }
 
 // A task in `run` whose relay is gone. `firstTier` is the tier attempt 1 ran at, `tier` the last
-// attempt's; it finished `age` ms ago after running `elapsed` ms. `verdict`: accepted on the first or
-// the last attempt, or rejected. `model` replaces the first attempt's model in its result; `status`
-// its status; `crashed` removes its result, as when a relay exits without one.
+// attempt's; it finished `age` ms ago after running `elapsed` ms, which is also the time of every
+// file in its attempt folders. `verdict`: accepted on the first or the last attempt, or rejected.
+// `model` replaces the first attempt's model in its result; `status` its status; `crashed` removes
+// its result, as when a relay exits without one; `attemptTiers` records each attempt's tier on the
+// task, as `start` does.
 function seed(source, run, id, { agent = 'codex', tier = 'light', firstTier = tier, attempts = 1, elapsed = 60000, age = 3600000,
-  verdict = null, babysit = false, model, status, crashed = false } = {}) {
+  verdict = null, babysit = false, model, status, crashed = false, attemptTiers = false } = {}) {
   const tiers = policy[agent].tiers;
   const dir = path.join(run.dir, 'tasks', id);
   fs.cpSync(source, dir, { recursive: true });
@@ -109,12 +111,17 @@ function seed(source, run, id, { agent = 'codex', tier = 'light', firstTier = ti
       startedAt: new Date(started).toISOString(), finishedAt: new Date(started + elapsed).toISOString() });
   }
   if (crashed) fs.rmSync(path.join(dir, 'attempt-1', 'result.json'));
+  const written = new Date(started + elapsed);
+  for (let n = 1; n <= attempts; n++) {
+    for (const name of fs.readdirSync(path.join(dir, `attempt-${n}`))) fs.utimesSync(path.join(dir, `attempt-${n}`, name), written, written);
+  }
   const stamp = { first: { acceptedAt: new Date(started + elapsed + 1000).toISOString(), acceptedAttempt: 1 },
     last: { acceptedAt: new Date(started + elapsed + 1000).toISOString(), acceptedAttempt: attempts },
     rejected: { rejectedAt: new Date(started + elapsed + 1000).toISOString(), rejectedAttempt: attempts } }[verdict];
   writeJson(path.join(dir, 'task.json'), { ...readJson(path.join(source, 'task.json')), id, tier, model: tiers[tier].model,
     effort: tiers[tier].effort, attempt: attempts, outDir: path.join(dir, `attempt-${attempts}`), babysit, pid: deadPid,
-    startedAt: new Date(started).toISOString(), ...stamp });
+    startedAt: new Date(started).toISOString(), ...stamp,
+    ...(attemptTiers ? { attemptTiers: Object.fromEntries(Array.from({ length: attempts }, (_, i) => [i + 1, i === 0 ? firstTier : tier])) } : {}) });
 }
 
 // No installed agent CLI: `agents` then lists the relays without starting a CLI, whatever this machine has.
@@ -249,6 +256,57 @@ test('a first attempt that failed, or ended with no result, is a finished task t
   const claudeLight = entryOf(list, 'claude', 'light');
   assert.deepEqual([claudeLight.tasks, claudeLight.reviewed, claudeLight.firstAttemptAccepted, claudeLight.firstAttemptAcceptance], [5, 4, 3, 0.75]);
   assert.equal(entryOf(list, 'claude', 'standard').tasks, 0);
+});
+
+test('a crashed first attempt is counted at the tier recorded for it, when the task moved on to another tier', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const source = await template(f, run);
+  seed(source, run, 'a1', { verdict: 'first' });
+  seed(source, run, 'a2', { verdict: 'first' });
+  // The first attempt at light left no result, and Codex's event log names no model, so only the tier
+  // recorded when it started says where it ran. The retry ran at standard.
+  seed(source, run, 'retried', { tier: 'standard', firstTier: 'light', attempts: 2, crashed: true, attemptTiers: true, verdict: 'last' });
+  // A task from before tiers were recorded per attempt has nothing to read, and stays out.
+  seed(source, run, 'older', { tier: 'standard', firstTier: 'light', attempts: 2, crashed: true, verdict: 'last' });
+  const list = await evidence(f);
+  const light = entryOf(list, 'codex', 'light');
+  assert.deepEqual([light.tasks, light.reviewed, light.firstAttemptAccepted, light.accepted], [3, 3, 2, 3]);
+  assert.equal(entryOf(list, 'codex', 'standard').tasks, 0, 'the retry\'s tier does not get the task');
+});
+
+test('a task whose last attempt crashed finished when its newest file was written, not when it started', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const source = await template(f, run);
+  for (const n of [1, 2, 3]) seed(source, run, `a${n}`, { verdict: 'first' });
+  // Started 31 days ago and crashed an hour ago: inside the window. Crashed 40 days ago: outside it.
+  seed(source, run, 'long', { crashed: true, elapsed: 31 * DAY, age: 3600000 });
+  seed(source, run, 'ancient', { crashed: true, elapsed: 60000, age: 40 * DAY });
+  const light = entryOf(await evidence(f), 'codex', 'light');
+  assert.deepEqual([light.tasks, light.reviewed], [4, 4]);
+});
+
+test('a task whose retry still runs is not finished: left out until its last attempt ends, with all its tokens', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const source = await template(f, run);
+  for (let n = 1; n <= 5; n++) seed(source, run, `a${n}`, { verdict: 'first' });
+  const lightOf = async () => entryOf(await evidence(f), 'codex', 'light');
+  // A real task: its first attempt ends, and it counts.
+  await f.start(run, 'retry', { agent: 'codex', flags: ['--tier', 'light'] });
+  await f.finished(run, 'retry');
+  assert.equal((await lightOf()).tasks, 6);
+  // Its retry starts and holds: the task is not finished, however its first attempt ended.
+  const again = await f.start(run, 'retry', { agent: 'codex', config: { hold: true }, flags: ['--tier', 'light'] });
+  await f.ready(again);
+  assert.equal((await lightOf()).tasks, 5);
+  // The retry ends: the task counts again, with the input tokens of both attempts (240 beside the
+  // five accepted tasks' 120 each, over the five accepted).
+  f.release(again);
+  await f.finished(run, 'retry');
+  const light = await lightOf();
+  assert.deepEqual([light.tasks, light.accepted, light.tokensInPerAccepted], [6, 5, 168]);
 });
 
 test('the summary keeps one record per task and reads again only the tasks that changed', async (t) => {
