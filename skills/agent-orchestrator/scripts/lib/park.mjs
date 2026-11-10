@@ -7,11 +7,14 @@
 // seconds it compares the size of the task's inbox with the last size it saw; when the inbox grows,
 // and otherwise once per interval (AGENT_ORCH_PARK_INTERVAL, default 60s), it runs this file's
 // `check`, a short Node process (about 50 MB for a second or two) that reads the pull request with
-// the same snapshot and comparison as `pr-watch` without recording anything as seen, reads the
-// unread messages, and resumes the task when either has something. The resumed babysitter runs
-// `pr-watch` first, which reports the same items and records them. The messages go, whole, into
-// park-messages.md in the new attempt's folder (the brief quotes short ones), and only those are
-// marked read.
+// the same snapshot and comparison as `pr-watch`, reads the unread messages, and resumes the task
+// when either has something. All the waiting is done here, with no model: the babysitter's own
+// `pr-watch` returns at once, and a change that needs no judgment (the checks went green and nothing
+// else is open; pr-watch.mjs, quietItems) is recorded as seen without waking anyone. A resume's
+// brief states what changed and the pull request's state now, and the watcher records that state as
+// seen, so the resumed session acts on the items without reading the pull request again. The
+// messages go, whole, into park-messages.md in the new attempt's folder (the brief quotes short
+// ones), and only those are marked read.
 //
 // The finish watcher that `start` runs beside every babysitter's relay (finish-notice.mjs) starts
 // the first watcher once the relay ends parked. Each parked attempt's folder keeps its watchers'
@@ -33,12 +36,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH } from "./config.mjs";
-import { prAttention, prSnapshot } from "./github.mjs";
 import { INBOX_FILE, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
 import { PARK_CHECK_FILE, exists, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
-import { aheadOfPr, readSeen, recordSeen } from "./commands/pr-watch.mjs";
+import { aheadOfPr, quietItems, readSeen, recordSeen, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const LOG = "park-watcher.log";
@@ -351,6 +353,9 @@ export function resumeBrief(run, task, parked, pr, messages, messagesFile = null
     "",
   ];
   if (pr?.attention?.length) lines.push(`- On the pull request: ${pr.attention.join("; ")}.`);
+  // The state the watcher read, so the session need not read the pull request again to find it.
+  if (pr?.now) lines.push(`- The pull request now (read ${pr.at}): ${stateLine(pr.now)}.`);
+  if (pr?.before) lines.push(`- When you last looked: ${stateLine(pr.before)}.`);
   if (messages.length) {
     lines.push(`- ${messages.length === 1 ? "A message arrived" : `${messages.length} messages arrived`}. Read ${messages.length === 1 ? "it" : "every one"} in full in \`${messagesFile}\` before anything else.`, "");
     for (const m of messages) {
@@ -360,9 +365,12 @@ export function resumeBrief(run, task, parked, pr, messages, messagesFile = null
       if (m.from === "user") lines.push(`    ${replyHint(run.id, task.id)}`, "");
     }
   }
+  const acts = pr?.attention?.length
+    ? `The items above are everything that changed on the pull request, and they are recorded as seen: do not run a watch or read the pull request's state again to find them. Go straight to step 2 of your loop ("Loop" in the babysitter brief you started with) and handle each one, reading only what an item needs (a failed check's log, the new comments).`
+    : `Nothing changed on the pull request, so do not read its state again.`;
   lines.push(
     "",
-    `Go back to your loop ("Loop" in the babysitter brief you started with). First run \`${watch}\` with its usual timeout: it prints the pull-request items above and records them as seen. Handle every item and every message, push, and reply as your rules say. ${messages.length ? "The messages are marked read once this brief starts. " : ""}Park again only when a watch finds nothing new, nothing is unpushed, and every item is handled.`,
+    `${acts} Handle every ${messages.length ? "item and every message" : "item"}, push, and reply as your rules say. ${messages.length ? "The messages are marked read once this brief starts. " : ""}Then run \`${watch}\`, which returns at once, and park again when it finds nothing new, nothing is unpushed, and every item is handled.`,
   );
   return `${lines.join("\n")}\n`;
 }
@@ -392,14 +400,21 @@ export async function checkPark(dir, generation) {
   const ref = task.pr?.url || (task.pr?.number ? String(task.pr.number) : null);
   if (ref) {
     const cwd = task.cd && fs.existsSync(task.cd) ? task.cd : run.repo;
-    const s = prSnapshot(cwd, ref);
+    const s = watchSnapshot(cwd, ref);
     if (s.error) record.error = s.error;
     else {
       const seen = readSeen(s);
-      const attention = prAttention(s, seen);
+      let attention = watchAttention(s, seen);
       if (!seen && !attention.length) recordSeen(s);
+      // A change that needs no judgment wakes no model: record it as seen and keep waiting. With a
+      // message to deliver the babysitter wakes anyway, and is told about it.
+      if (!messages.length && quietItems(s, attention)) {
+        recordSeen(s);
+        record.quiet = attention;
+        attention = [];
+      }
       if (aheadOfPr(cwd, s)) attention.push("this checkout has commits the pull request lacks: push them");
-      pr = { number: s.number, state: s.state, attention };
+      pr = { number: s.number, state: s.state, attention, now: s, before: seen, at: record.at };
     }
   }
   record.events = [...(pr?.attention || []), ...messages.map((m) => `message ${m.id}`)];
@@ -432,6 +447,8 @@ export async function checkPark(dir, generation) {
     writeJson(file, { ...record, waiting: error.message });
     return 0;
   }
+  // The brief told the session what changed, so that state is now the last one reported.
+  if (pr?.attention.length) recordSeen(pr.now);
   // Only the messages written in full into the new attempt's folder were delivered.
   markRead(taskDir(run, id), messages.map((m) => m.id), { attempt: started.attempt });
   writeJson(file, { ...record, resumed: started.attempt });

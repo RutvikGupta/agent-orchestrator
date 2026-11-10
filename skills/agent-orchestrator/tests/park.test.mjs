@@ -9,6 +9,9 @@ import { attentionOf } from '../scripts/lib/dashboard-state.mjs';
 // Pure: what a final message says about parking, and the brief that delivers messages.
 import { parkedSignal } from '../scripts/lib/runs.mjs';
 import { resumeBrief } from '../scripts/lib/park.mjs';
+// Pure: what changed between two pull-request snapshots, and whether it needs a model.
+import { quietItems, watchAttention } from '../scripts/lib/commands/pr-watch.mjs';
+import { decisionNote } from '../scripts/lib/briefs.mjs';
 
 const parkModule = new URL('../scripts/lib/park.mjs', import.meta.url).pathname;
 const runsModule = new URL('../scripts/lib/runs.mjs', import.meta.url).pathname;
@@ -33,8 +36,12 @@ async function github(f) {
 import fs from 'node:fs';
 const args = process.argv.slice(2);
 if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-else process.exit(91);
+else if (args[0] === 'api' && args[1] === 'graphql') {
+  // \`inQueue\` in the fixture (true or false) answers the merge-queue query; without it GitHub does not say.
+  const inQueue = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8')).inQueue;
+  const queue = args.join(' ').includes('mergeQueueEntry') && inQueue !== undefined ? { mergeQueueEntry: inQueue ? { state: 'QUEUED' } : null } : {};
+  console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}, ...queue}}}}));
+} else process.exit(91);
 `, { mode: 0o755 });
   f.env.PATH = `${bin}:${f.env.PATH}`;
   f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
@@ -159,8 +166,12 @@ test('a parked babysitter shows as parked, keeps wait waiting, and is resumed on
   const again = await f.command(['start', run.id, 'sit', '--agent', 'claude', '--brief', f.brief('again'), '--', '--session', 'fixture-claude'], { code: 1 });
   assert.match(again.stderr, /already running/);
 
-  // The babysitter consumes the event with pr-watch, then parks again: no further resume.
-  await f.command(['pr-watch', '42', '--timeout', '1ms']);
+  // The brief states what changed and the state now, and the watcher recorded that state as seen:
+  // the session need not run a watch to find the items, and a watch reports nothing new.
+  assert.match(brief, /The pull request now \(read \S+\): open, head \w{8} into base; checks: 0 passed, 1 failed \(unit\), 0 pending; review: none/);
+  assert.match(brief, /When you last looked: open, head \w{8} into base; checks: none reported/);
+  assert.match(brief, /recorded as seen: do not run a watch or read the pull request's state again/);
+  await f.command(['pr-watch', '42', '--timeout', '1ms'], { code: 3 });
   f.release(second);
   await parkedRow(f, run, 'sit', 2);
   const check = await checkedAgain(run, 'sit', 2);
@@ -619,4 +630,104 @@ test('wait restarts a parked task\'s dead watcher while it waits', async (t) => 
   await f.command(['wait', run.id, 'sit', '--timeout', '1s'], { code: 3 });
   assert.equal(watchers(run, 'sit', 1).length, 1);
   assert.equal((await parkedRow(f, run, 'sit')).parked.generation, 2);
+});
+
+test('a babysitter\'s pr-watch polls once whatever its timeout, and tells it to park', async (t) => {
+  const f = await fixture(t);
+  await github(f);
+  const run = await f.newRun();
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  const before = Date.now();
+  const watch = await f.command(['pr-watch', '42', '--timeout', '4m'], { code: 3, env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'sit' } });
+  assert.ok(Date.now() - before < 60_000, 'the watch waited instead of returning at once');
+  assert.match(watch.stdout, /a babysitter's watch does not wait.*park: end your turn/);
+});
+
+test('checks that go green while a review is missing wake no model; a failed check after them does', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  const run = await f.newRun();
+  const pending = [{ __typename: 'CheckRun', name: 'unit', status: 'IN_PROGRESS', conclusion: null }];
+  const green = [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  set({ statusCheckRollup: pending });
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  await checkedAgain(run, 'sit', 1, 1);
+  const seen = path.join(f.state, 'prs', 'example_repo_42.json');
+
+  set({ statusCheckRollup: green });
+  const quiet = await eventually(() => {
+    const check = readJson(path.join(attemptDir(run, 'sit', 1), 'park-check.json'));
+    return check.quiet ? check : null;
+  }, 'the watcher did not absorb the green checks', SLOW);
+  assert.deepEqual([quiet.quiet, quiet.events], [['every check passed'], []]);
+  assert.equal(readJson(seen).checks.passed, 1, 'the green state is recorded as seen');
+  const later = await checkedAgain(run, 'sit', 1);
+  assert.deepEqual([later.quiet, later.events], [undefined, []]);
+  assert.equal(readJson(f.taskFile(run, 'sit')).attempt, 1, 'no model was started');
+  assert.equal((await rowOf(f, run, 'sit')).phase, 'parked');
+
+  // Green checks on an approved pull request may be the moment to merge: that wakes the babysitter.
+  set({ statusCheckRollup: green, reviewDecision: 'APPROVED', headRefOid: 'f'.repeat(40) });
+  const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'approval with green checks did not resume it', SLOW);
+  await f.ready(second);
+  const brief = fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8');
+  assert.match(brief, /every check passed; review decision: none → APPROVED/);
+  assert.match(brief, /The pull request now .*checks: 1 passed, 0 failed, 0 pending; review: APPROVED/);
+  // Let the held attempt end, parked again, before closing: nothing still writes at teardown.
+  f.release(second);
+  await parkedRow(f, run, 'sit', 2);
+  await f.command(['close', run.id, 'sit']);
+});
+
+test('removal from the merge queue wakes a parked babysitter; sitting in the queue does not', async (t) => {
+  const f = await fixture(t);
+  const set = await github(f);
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  const run = await f.newRun();
+  const green = [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  set({ reviewDecision: 'APPROVED', inQueue: true });
+  await babysit(f, run, 'sit');
+  await parkedRow(f, run, 'sit');
+  await checkedAgain(run, 'sit', 1, 1);
+  // The queue's own checks passing is nothing to act on.
+  set({ reviewDecision: 'APPROVED', inQueue: true, statusCheckRollup: green });
+  await eventually(() => readJson(path.join(attemptDir(run, 'sit', 1), 'park-check.json')).quiet, 'the queue\'s green checks were not absorbed', SLOW);
+  assert.equal(readJson(f.taskFile(run, 'sit')).attempt, 1);
+  set({ reviewDecision: 'APPROVED', inQueue: false, statusCheckRollup: green });
+  const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'the removal did not resume it', SLOW);
+  await f.ready(second);
+  const brief = fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8');
+  assert.match(brief, /left the merge queue without merging/);
+  assert.match(brief, /in the merge queue: no/);
+  // Let the held attempt end, parked again, before closing: nothing still writes at teardown.
+  f.release(second);
+  await parkedRow(f, run, 'sit', 2);
+  await f.command(['close', run.id, 'sit']);
+});
+
+test('a moved base is an event, and only green checks with nothing else open need no model', () => {
+  const checks = { total: 1, passed: 1, pending: 0, failed: [] };
+  const s = { state: 'OPEN', head: 'a', base: 'main', mergeable: 'MERGEABLE', mergeState: 'CLEAN', reviewDecision: null, checks, comments: 0, reviews: 0, unresolvedThreads: 0, queued: null };
+  assert.deepEqual(watchAttention(s, s), []);
+  assert.deepEqual(watchAttention({ ...s, mergeState: 'BEHIND' }, s), ['behind main: the base moved']);
+  assert.deepEqual(watchAttention({ ...s, mergeState: 'BEHIND' }, { ...s, mergeState: 'BEHIND' }), [], 'reported once per head');
+  assert.deepEqual(watchAttention({ ...s, base: 'release' }, s), ['base changed: main → release']);
+  assert.match(watchAttention({ ...s, queued: false }, { ...s, queued: true })[0], /left the merge queue/);
+  assert.deepEqual(watchAttention({ ...s, queued: false, state: 'MERGED' }, { ...s, queued: true }).length, 1, 'a merge is not a removal');
+  assert.equal(quietItems(s, ['every check passed']), true);
+  assert.equal(quietItems({ ...s, reviewDecision: 'APPROVED' }, ['every check passed']), false);
+  assert.equal(quietItems({ ...s, reviewDecision: 'APPROVED', queued: true }, ['every check passed']), true);
+  assert.equal(quietItems(s, ['every check passed', '1 new comment(s)']), false);
+  assert.equal(quietItems(s, ['every check finished, some failed']), false);
+  assert.equal(quietItems(s, []), false);
+});
+
+test('a babysitter waiting on an answer is told to park, not to hold its session open with nap', () => {
+  assert.match(decisionNote(true), /when only that is left, park as your brief says/);
+  assert.doesNotMatch(decisionNote(true), /nap 5m/);
+  assert.match(decisionNote(false), /nap 5m/);
 });

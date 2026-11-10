@@ -49,10 +49,12 @@ fix is waiting:
 
 ## Loop
 
-1. Run `node <orch-path> pr-watch <PR number or URL> --repo . --timeout 4m`, with the Bash tool's
-   timeout set to 600000.
+1. Run `node <orch-path> pr-watch <PR number or URL> --repo .`. For you it reads the pull request
+   once and returns at once: you never wait for a pull request yourself. Do not wait with `nap`,
+   `sleep`, `gh run watch` or `gh pr checks --watch` either. Every call you make after a wait pays
+   for your whole context again, and your parked watcher waits for free.
    - Exit 0 prints what needs you: handle it (step 2).
-   - Exit 3 means nothing new happened: park (see "Park").
+   - Exit 3 means nothing new happened: park (see "Park"), also while checks are still running.
    - Exit 4 means this checkout has commits that the pull request lacks: push them, then watch again.
    - Exit 6 means a message arrived: Claude receives it as context when the command returns;
      otherwise read it with `node <orch-path> inbox <run> <task> --ack`. Act on it, then watch again.
@@ -67,6 +69,8 @@ fix is waiting:
      stop rules and "Decisions" at the end of this brief).
    - **Conflict with the base:** merge the base branch in (do not rebase), resolve the conflict,
      run the gates, and push.
+   - **Merge-queue removal or a moved base:** find out why the queue removed the pull request and
+     fix that; when the branch is behind its base, merge the base in, run the gates, and push.
    - **Every check passed, and only a human review is missing:** nothing to do; watch again, and
      park when the watch finds nothing new.
 3. After every push, confirm that the pull request's head is your local head:
@@ -81,10 +85,18 @@ fix is waiting:
 ## Park
 
 When a watch finds nothing new (exit 3), park instead of watching again: end your turn, so that
-your session stops holding memory. A small watcher then checks the pull request every minute and
-your inbox every few seconds. On the first new check result, review, comment, conflict, change of
-state, unpushed commit or message, it resumes this same session with a short brief that says what
-it saw. Then go back to step 1: the watch prints those items again and records them as seen.
+your session spends no tokens and holds no memory while it waits. A small watcher with no model
+then checks the pull request every minute and your inbox every few seconds. It resumes this same
+session on the first event that needs you: a failed check, a new review, comment or unresolved
+thread, a changed review decision, a conflict, a moved base, removal from the merge queue, a
+change of state, an unpushed commit, or a message. Checks that all pass while the pull request
+still waits for a review, or sits in the merge queue, need nothing from you, so the watcher notes
+them and keeps waiting.
+
+The brief that resumes you lists what changed and gives the pull request's state at that moment,
+already recorded as seen. Act on those items directly, from step 2: do not run a watch or read the
+pull request's state again to find them. Read only what an item needs, such as a failed check's
+log or the new comments. Then go back to step 1.
 
 Park only when all of these hold:
 
