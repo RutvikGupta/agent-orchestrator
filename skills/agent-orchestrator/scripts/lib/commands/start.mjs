@@ -171,6 +171,9 @@ export function startTask(args, extra = {}) {
   let choice;
   try {
     choice = modelFor(key, tierArgs, babysit ? null : prevTier);
+    if (process.env.AGENT_ORCH_MAX_EFFORT !== undefined) {
+      choice.effort = lowerEffort(choice.effort, process.env.AGENT_ORCH_MAX_EFFORT);
+    }
   } catch (error) {
     // A refused start, not an exit: `dispatch` goes on with its other tasks.
     if (error instanceof ModelRefused) refuse(error.message, error.code);
@@ -215,6 +218,17 @@ export function startTask(args, extra = {}) {
 
   checkSlots(run, id, args, cd, { writes: !args["read-only"] });
   const agentEnv = readAgentEnv();
+  // Claude's effort environment overrides --effort, including values from agent-env.json.
+  // Lower those overrides too, so the relay's bounded choice remains effective.
+  if (process.env.AGENT_ORCH_MAX_EFFORT !== undefined) {
+    for (const name of ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SUBAGENT_EFFORT"]) {
+      const inherited = agentEnv[name] ?? process.env[name];
+      if (inherited) {
+        const bounded = lowerEffort(inherited, process.env.AGENT_ORCH_MAX_EFFORT);
+        if (bounded !== inherited) agentEnv[name] = bounded;
+      }
+    }
+  }
 
   // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
   // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
@@ -408,13 +422,15 @@ function startCommand(run, id, args, extra) {
     if (error instanceof ModelRefused) refuse(error.message, error.code);
     throw error;
   }
+  const agentEnv = readAgentEnv();
+  const inheritedEnv = { ...process.env, ...agentEnv };
   let maxTier, defaults;
   try {
     const own = callerTier();
     maxTier = lowerCeiling(args["max-tier"] ?? prev.maxTier, process.env.AGENT_ORCH_MAX_TIER, callerCeiling(own));
-    defaults = ceilingEnv(maxTier);
+    defaults = ceilingEnv(maxTier, inheritedEnv);
     if (own?.effort) defaults = ceilingEnv(maxTier, {
-      ...process.env,
+      ...inheritedEnv,
       AGENT_ORCH_MAX_EFFORT: lowerEffort(defaults.AGENT_ORCH_MAX_EFFORT, own.effort),
     });
   } catch (error) {
@@ -432,8 +448,6 @@ function startCommand(run, id, args, extra) {
     (sameAgent ? prev.why : null) ||
     refuse("--why is required: one line on why this work runs as a command with no model watching it (see SKILL.md, \"Choose the agent and model\")", 2);
   checkSlots(run, id, args, cd, { writes: false });
-  const agentEnv = readAgentEnv();
-
   const attempt = (prev.attempt || 0) + 1;
   const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
   const attemptReason = extra.attemptReason

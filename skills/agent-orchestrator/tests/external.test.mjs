@@ -1078,6 +1078,14 @@ test('folded command warnings include native descendants and unrecognized models
   assert.equal(result.find((r) => r.id === 'native').parent, 'work');
 });
 
+test('folded command warnings check native rows sharing an id', () => {
+  const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'standard' };
+  const lead = { run: 'r', id: 'outer', parent: 'work', taskAgent: true, agent: 'claude', model: 'claude-sonnet-5-5' };
+  const native = { run: 'r', id: 'same', parent: 'outer', native: true, agent: 'claude' };
+  const result = foldCommandAgents([task, lead, { ...native, model: 'claude-haiku-5-5' }, { ...native, model: 'claude-opus-5-5' }]);
+  assert.equal(result[0].now, '⚠ same (claude claude-opus-5-5) exceeds the standard ceiling');
+});
+
 test('stale ceilings and invalid policy do not fail the board', (t) => {
   const task = { run: 'r', id: 'work', agent: 'command', maxTier: 'removed' };
   const agent = { run: 'r', id: 'outer', parent: 'work', taskAgent: true, agent: 'claude', model: 'claude-opus-5-5' };

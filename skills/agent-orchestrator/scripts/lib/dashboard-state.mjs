@@ -435,6 +435,7 @@ export function foldCommandAgents(rows, policyReader = readPolicy) {
         const policy = policyReader();
         const ceiling = ceilingFor(task.maxTier, policy);
         const parents = new Set(agents.map((a) => `${a.run}/${a.id}`));
+        const collected = new Set();
         const descendants = [];
         // Native children can occur in any row order, including beneath other native children.
         let added;
@@ -442,8 +443,9 @@ export function foldCommandAgents(rows, policyReader = readPolicy) {
           added = false;
           for (const row of rows) {
             const key = `${row.run}/${row.id}`;
-            if (row.native && !parents.has(key) && parents.has(`${row.run}/${row.parent}`)) {
+            if (row.native && !collected.has(row) && parents.has(`${row.run}/${row.parent}`)) {
               parents.add(key);
+              collected.add(row);
               descendants.push(row);
               added = true;
             }

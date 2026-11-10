@@ -272,7 +272,7 @@ export function ceilingEnv(name, env = process.env) {
   const lowered = {};
   // A ceiling does not select a model or effort for a script. Only lower existing choices;
   // leaving effort unset lets a script's --effort and cheaper model defaults keep working.
-  for (const key of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"]) {
+  for (const key of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]) {
     if (rankOfModel(env[key]) > cap.rank) lowered[key] = cap.claude.model;
   }
   for (const key of ["CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SUBAGENT_EFFORT"]) {
@@ -285,7 +285,6 @@ export function ceilingEnv(name, env = process.env) {
     AGENT_ORCH_MAX_MODEL_CODEX: cap.codex.model,
     AGENT_ORCH_MAX_EFFORT: effort || "",
     ...lowered,
-    CLAUDE_CODE_SUBAGENT_MODEL: undefined,
-    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: undefined,
   };
 }

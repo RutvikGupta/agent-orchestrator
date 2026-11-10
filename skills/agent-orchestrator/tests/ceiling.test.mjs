@@ -36,7 +36,7 @@ test('command ceilings are absent by default and set CLI defaults when selected'
     ANTHROPIC_MODEL: null,
     ANTHROPIC_DEFAULT_MODEL: null,
     CLAUDE_CODE_SUBAGENT_MODEL: null,
-    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: null,
     CLAUDE_CODE_SUBAGENT_EFFORT: null,
     CLAUDE_CODE_EFFORT_LEVEL: null,
   });
@@ -118,22 +118,23 @@ test('rank comparisons and effort limits are independent', () => {
   assert.equal(boundedModel('claude', 'light', { AGENT_ORCH_MAX_TIER: 'frontier' }).effort, 'high');
 });
 
-test('higher ceilings preserve lighter model and effort choices and clear a forced child model', async (t) => {
+test('higher ceilings preserve lighter model, subagent and effort choices without forcing child models', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   const { vars } = await command(f, run, 'cheaper', ['--max-tier', 'complex'], {
     ANTHROPIC_MODEL: policy.claude.tiers.light.model,
     ANTHROPIC_DEFAULT_MODEL: policy.claude.tiers.light.model,
     ANTHROPIC_DEFAULT_OPUS_MODEL: policy.claude.tiers.light.model,
-    CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.complex.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.light.model,
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
     CLAUDE_CODE_EFFORT_LEVEL: 'low',
     CLAUDE_CODE_SUBAGENT_EFFORT: 'low',
   });
   assert.equal(vars.ANTHROPIC_MODEL, policy.claude.tiers.light.model);
   assert.equal(vars.ANTHROPIC_DEFAULT_MODEL, policy.claude.tiers.light.model);
   assert.equal(vars.ANTHROPIC_DEFAULT_OPUS_MODEL, policy.claude.tiers.light.model);
-  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL, null);
-  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
+  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL, policy.claude.tiers.light.model);
+  assert.equal(vars.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, null);
   assert.equal(vars.CLAUDE_CODE_EFFORT_LEVEL, 'low');
   assert.equal(vars.CLAUDE_CODE_SUBAGENT_EFFORT, 'low');
 });
@@ -183,4 +184,90 @@ test('an empty equals ceiling and stale caller tiers fail closed', async (t) => 
     '--', 'true'], { env, code: 2 });
   assert.match(result.stderr, /caller tier claude removed-tier is missing from policy/);
   assert.equal(fs.existsSync(f.taskFile(child, 'child')), false);
+});
+
+test('an inherited child model is preserved at the ceiling and lowered only above it', () => {
+  const cheaper = ceilingEnv('standard', { CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.light.model });
+  const equal = ceilingEnv('standard', { CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.standard.model });
+  assert.equal(Object.hasOwn(cheaper, 'CLAUDE_CODE_SUBAGENT_MODEL'), false);
+  assert.equal(Object.hasOwn(equal, 'CLAUDE_CODE_SUBAGENT_MODEL'), false);
+  assert.equal(ceilingEnv('standard', { CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.complex.model })
+    .CLAUDE_CODE_SUBAGENT_MODEL, policy.claude.tiers.standard.model);
+});
+
+test('command ceilings include agent-env values without raising its cheaper choices', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const config = path.join(f.root, 'config');
+  const file = path.join(config, 'agent-orchestrator', 'agent-env.json');
+  const expensive = {
+    ANTHROPIC_MODEL: policy.claude.tiers.complex.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.complex.model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: policy.claude.tiers.complex.model,
+    CLAUDE_CODE_EFFORT_LEVEL: 'max', CLAUDE_CODE_SUBAGENT_EFFORT: 'high',
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+  };
+  writeJson(file, expensive);
+  const env = { XDG_CONFIG_HOME: config, AGENT_ORCH_MAX_EFFORT: 'medium' };
+  const capped = (await command(f, run, 'capped-env', ['--max-tier', 'standard'], env)).vars;
+  assert.equal(capped.ANTHROPIC_MODEL, policy.claude.tiers.standard.model);
+  assert.equal(capped.CLAUDE_CODE_SUBAGENT_MODEL, policy.claude.tiers.standard.model);
+  assert.equal(capped.ANTHROPIC_DEFAULT_OPUS_MODEL, policy.claude.tiers.standard.model);
+  assert.equal(capped.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
+  assert.equal(capped.CLAUDE_CODE_SUBAGENT_EFFORT, 'medium');
+  assert.equal(capped.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, null);
+  writeJson(file, {
+    ANTHROPIC_MODEL: policy.claude.tiers.light.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: policy.claude.tiers.light.model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: policy.claude.tiers.light.model,
+    CLAUDE_CODE_EFFORT_LEVEL: 'low', CLAUDE_CODE_SUBAGENT_EFFORT: 'low',
+  });
+  const cheaper = (await command(f, run, 'cheaper-env', ['--max-tier', 'standard'], env)).vars;
+  assert.equal(cheaper.ANTHROPIC_MODEL, policy.claude.tiers.light.model);
+  assert.equal(cheaper.CLAUDE_CODE_SUBAGENT_MODEL, policy.claude.tiers.light.model);
+  assert.equal(cheaper.ANTHROPIC_DEFAULT_OPUS_MODEL, policy.claude.tiers.light.model);
+  assert.equal(cheaper.CLAUDE_CODE_EFFORT_LEVEL, 'low');
+  assert.equal(cheaper.CLAUDE_CODE_SUBAGENT_EFFORT, 'low');
+  await f.start(run, 'lead', { agent: 'codex', flags: ['--tier', 'light'] });
+  await f.finished(run, 'lead');
+  writeJson(file, expensive);
+  const caller = { ...env, AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'lead' };
+  const child = await f.newRun('child', caller);
+  const delegated = (await command(f, child, 'inherited-env', [], caller)).vars;
+  assert.equal(delegated.ANTHROPIC_MODEL, policy.claude.tiers.light.model);
+  assert.equal(delegated.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
+});
+
+test('modeled starts lower tier and explicit effort to the inherited effort ceiling', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (const [agent, flags] of [['claude', ['--tier', 'complex']], ['codex', ['--tier', 'complex']],
+    ['claude', ['--tier', 'frontier', '--effort', 'high']]]) {
+    const id = `effort-${agent}-${flags[1]}`;
+    const task = await f.start(run, id, { agent, flags, env: { AGENT_ORCH_MAX_EFFORT: 'medium' } });
+    await f.finished(run, id);
+    assert.equal(task.effort, 'medium');
+    const { argv } = readJson(path.join(task.outDir, 'invocation.json'));
+    assert.equal(argv[argv.indexOf('--effort') + 1], 'medium');
+  }
+  const lower = await f.start(run, 'already-medium', { agent: 'codex', flags: ['--tier', 'light'],
+    env: { AGENT_ORCH_MAX_EFFORT: 'high' } });
+  await f.finished(run, 'already-medium');
+  assert.equal(lower.effort, 'medium');
+});
+
+test('modeled effort ceilings also lower native overrides from the merged environment', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const config = path.join(f.root, 'config');
+  writeJson(path.join(config, 'agent-orchestrator', 'agent-env.json'), { CLAUDE_CODE_SUBAGENT_EFFORT: 'max' });
+  const seen = path.join(f.root, 'native-effort.json');
+  const preload = path.join(f.root, 'native-effort.cjs');
+  fs.writeFileSync(preload, `if(process.argv[1]?.endsWith('relay.mjs'))require('fs').writeFileSync(${JSON.stringify(seen)},JSON.stringify({lead:process.env.CLAUDE_CODE_EFFORT_LEVEL,child:process.env.CLAUDE_CODE_SUBAGENT_EFFORT}));`);
+  await f.start(run, 'native-overrides', { flags: ['--tier', 'standard'], env: {
+    AGENT_ORCH_MAX_EFFORT: 'medium', CLAUDE_CODE_EFFORT_LEVEL: 'xhigh',
+    XDG_CONFIG_HOME: config, NODE_OPTIONS: `--require=${preload}`,
+  } });
+  await f.finished(run, 'native-overrides');
+  assert.deepEqual(readJson(seen), { lead: 'medium', child: 'medium' });
 });
