@@ -198,6 +198,12 @@ test('stop ends a park; a dead watcher is reported and restarted once; a hand re
   const run = await f.newRun();
   await babysit(f, run, 'sit');
   const row = await parkedRow(f, run, 'sit');
+  // Status can create the first watcher before the finish-notice bootstrap has
+  // run. Let that bootstrap finish before testing revival by status alone.
+  await eventually(() => {
+    const notice = readClaim(path.join(attemptDir(run, 'sit', 1), 'parent-notice.json'));
+    return notice.parked && notice.skipped;
+  }, 'the parked finish notice did not finish', SLOW);
   const [first] = watchers(run, 'sit', 1);
   assert.equal(row.parked.watcherPid, first);
 

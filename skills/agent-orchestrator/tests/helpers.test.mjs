@@ -1,8 +1,93 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture } from './helpers.mjs';
+
+test('fixtures copy the initial repository without sharing writable Git state', async (t) => {
+  const one = await fixture(t);
+  const two = await fixture(t);
+  assert.equal(await one.git(['rev-parse', 'HEAD']), await two.git(['rev-parse', 'HEAD']));
+  await one.git(['config', 'fixture.private', 'one']);
+  await one.git(['checkout', '-qb', 'private-branch']);
+  fs.writeFileSync(path.join(one.repo, 'README.md'), 'Changed in one fixture.\n');
+  assert.equal(await two.git(['branch', '--show-current']), 'main');
+  assert.equal(await two.git(['status', '--porcelain']), '');
+  assert.equal((await two.git(['config', '--list'])).includes('fixture.private'), false);
+});
+
+test('fixture launchers stop at the test worker instead of the user session', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  assert.equal(run.orchestrator.agent, 'codex');
+  assert.equal(run.orchestrator.pid, process.pid);
+  assert.equal(run.orchestrator.sessionId, null);
+  assert.ok(run.orchestrator.started);
+});
+
+test('test entry point clears session variables and accepts a named file', async (t) => {
+  const f = await fixture(t);
+  const file = path.join(f.root, 'session.test.mjs');
+  fs.writeFileSync(file, `import assert from 'node:assert/strict';
+import test from 'node:test';
+test('clean session', () => {
+  for (const key of ['AGENT_ORCH_DEPTH', 'AGENT_ORCH_RUN', 'AGENT_ORCH_TASK', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID']) assert.equal(process.env[key], undefined, key);
+});\n`);
+  const script = fileURLToPath(new URL('../../../tools/test.sh', import.meta.url));
+  const result = spawnSync('bash', [script, file], { encoding: 'utf8', timeout: 10_000, env: {
+    ...f.env, AGENT_ORCH_DEPTH: '3', AGENT_ORCH_RUN: 'parent', AGENT_ORCH_TASK: 'child',
+    CLAUDE_CODE_SESSION_ID: 'session', CODEX_THREAD_ID: 'thread',
+  } });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /clean session/);
+});
+
+test('wait polling defaults to three seconds and accepts a shorter configured interval', async (t) => {
+  const f = await fixture(t);
+  const config = new URL('../scripts/lib/config.mjs', import.meta.url).href;
+  for (const [value, expected] of [[undefined, 3000], ['100', 100], ['0', 3000], ['-1', 3000], ['invalid', 3000]]) {
+    const env = { ...f.env };
+    delete env.AGENT_ORCH_WAIT_POLL_MS;
+    if (value !== undefined) env.AGENT_ORCH_WAIT_POLL_MS = value;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `import { WAIT_POLL_MS } from ${JSON.stringify(config)}; console.log(WAIT_POLL_MS);`],
+      { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Number(result.stdout.trim()), expected, `configured interval: ${value}`);
+  }
+});
+
+test('test entry point bounds file workers and permits an explicit override', async (t) => {
+  const f = await fixture(t);
+  const bin = path.join(f.root, 'node-bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+  const script = fileURLToPath(new URL('../../../tools/test.sh', import.meta.url));
+  for (const [extra, workers] of [[{}, 4], [{ AGENT_ORCH_TASK: 'child' }, 2],
+    [{ AGENT_ORCH_TASK: 'child', AGENT_ORCH_TEST_CONCURRENCY: '1' }, 1]]) {
+    const result = spawnSync('bash', [script, '--quick'], { encoding: 'utf8', timeout: 5000,
+      env: { ...f.env, PATH: `${bin}${path.delimiter}${f.env.PATH}`, ...extra } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`^--test-concurrency=${workers}$`, 'm'));
+  }
+  const invalid = spawnSync('bash', [script, '--quick'], { encoding: 'utf8', timeout: 5000,
+    env: { ...f.env, AGENT_ORCH_TEST_CONCURRENCY: '0' } });
+  assert.equal(invalid.status, 2);
+  assert.match(invalid.stderr, /positive integer/);
+  const all = spawnSync('bash', [script], { encoding: 'utf8', timeout: 5000,
+    env: { ...f.env, PATH: `${bin}${path.delimiter}${f.env.PATH}` } });
+  assert.equal(all.status, 0, all.stderr);
+  const files = all.stdout.trim().split('\n').filter((arg) => arg.startsWith('tests/'));
+  const imported = ['memory-heavy.test.mjs', 'memory-reclaim.test.mjs'];
+  const expected = fs.readdirSync(new URL('./', import.meta.url))
+    .filter((name) => name.endsWith('.test.mjs') && !imported.includes(name)).map((name) => `tests/${name}`);
+  assert.deepEqual([...files].sort(), expected.sort(), 'every test group is scheduled exactly once');
+  const memory = fs.readFileSync(new URL('./memory.test.mjs', import.meta.url), 'utf8');
+  for (const name of imported) assert.ok(memory.includes(`import './${name}'`), `${name} must run through the memory group`);
+  assert.ok(files.includes('tests/memory.test.mjs'), 'the memory aggregate is scheduled');
+});
 
 for (const [name, config, health, limited] of [
   ['provider error', { finalMessage: 'API Error: 529 overloaded', error: 'claude returned an error result' }, 'transient-error', false],

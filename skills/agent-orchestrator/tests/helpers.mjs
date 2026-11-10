@@ -6,9 +6,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { after } from 'node:test';
 
 const cli = fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url));
 const relay = fileURLToPath(new URL('./fixtures/relay.mjs', import.meta.url));
+// Make the test worker the nearest fake host. CLI children stop here instead of
+// walking the user's session ancestry; explicit fake hosts below it still win.
+// All process scans keep using the real table, including PID and group checks.
+process.title = 'codex';
+let baseRepository;
+let baseRoot;
+after(() => { if (baseRoot) fs.rmSync(baseRoot, { recursive: true, force: true }); });
 export const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 export function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -67,6 +75,7 @@ export async function fixture(t) {
     PATH: process.env.PATH, HOME: home, TMPDIR: path.join(root, 'tmp'),
     LANG: 'C', LC_ALL: 'C', TZ: 'UTC',
     AGENT_ORCH_HOME: state, AGENT_ORCH_SKILLS_DIR: skills,
+    AGENT_ORCH_WAIT_POLL_MS: '100',
     CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
@@ -215,9 +224,20 @@ export async function fixture(t) {
       }
     }
   });
-  await f.git(['init', '-q', '--initial-branch=main']);
-  fs.writeFileSync(path.join(repo, 'README.md'), 'Temporary fixture repository.\n');
-  await f.git(['add', 'README.md']);
-  await f.git(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fixture base']);
+  // Build the immutable initial commit once per test file. Copy its files, rather than
+  // sharing a checkout or hard links: each fixture may change refs, config and objects.
+  const initializesBase = !baseRepository;
+  if (initializesBase) {
+    baseRepository = (async () => {
+      await f.git(['init', '-q', '--initial-branch=main']);
+      fs.writeFileSync(path.join(repo, 'README.md'), 'Temporary fixture repository.\n');
+      await f.git(['add', 'README.md']);
+      await f.git(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fixture base']);
+      baseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-base-'));
+      fs.cpSync(repo, baseRoot, { recursive: true });
+    })();
+  }
+  await baseRepository;
+  if (!initializesBase) fs.cpSync(baseRoot, repo, { recursive: true });
   return f;
 }

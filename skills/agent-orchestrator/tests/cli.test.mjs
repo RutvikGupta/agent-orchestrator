@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fixture, readJson } from './helpers.mjs';
 
 test('new records the repository and worktree prepares an isolated branch', async (t) => {
@@ -88,7 +89,8 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   const started = await f.start(run, 'writer');
   const brief = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
   const note = brief.slice(brief.indexOf('## Delegating further'), brief.indexOf('## Decisions'));
-  assert.ok(note.length > 0 && note.length < 2500, `the note stays short: ${note.length} characters`);
+  const noteLength = note.replaceAll(fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url)), '<cli>').length;
+  assert.ok(noteLength > 0 && noteLength < 2500, `the note stays short: ${noteLength} characters`);
   // Delegate through the skill, rather than doing parts one after another.
   assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
   assert.match(note, /run it as a command task with no model .*never as an agent that runs it and waits/);
