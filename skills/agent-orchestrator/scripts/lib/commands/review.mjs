@@ -62,7 +62,7 @@ export function cmdReview(args) {
   if (notReviewable) die(notReviewable, 2);
   const row = describe(run, author);
   if (row.state === "running" || row.state === "prepared") die(`task ${id} is ${row.state}; review it once it finishes (${CLI} wait ${run.id} ${id})`);
-  const live = reviewTasks(run, id).find((t) => relayAlive(t.pid, t.startedAt));
+  const live = reviewTasks(run, id).find((t) => relayAlive(t.pid, t.startedAt, t.outDir));
   if (live) die(`${live.id} is still reviewing ${id}; wait for it (${CLI} wait ${run.id} ${live.id}), or stop it first`);
 
   const change = changeOf(run, author);
