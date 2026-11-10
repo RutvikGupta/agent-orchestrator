@@ -12,6 +12,8 @@ $ORCH brief <run> <task-id> [--type implement|review|research|debug|babysit] [--
 - It writes a draft from `references/briefs/<type>.md` to the plan's `brief` path (by default
   `<run-dir>/briefs/<task-id>.md`), or to `--out`, and prints the path.
 - It refuses to overwrite a brief without `--force`. `--type` defaults to the plan's type.
+- To review one finished task, use `$ORCH review` instead, which writes the reviewer's brief itself
+  (`references/review.md`). `--type review` is for other reviews, such as a combined diff.
 - It fills in what `plan.json` says about the task: the goal, the owned paths (and what other tasks
   own), `uses`, `produces`, `resources`, and the tasks it builds on.
 - The role line follows the type and the read-only mode: the plan's `readOnly`, `--read-only`, or

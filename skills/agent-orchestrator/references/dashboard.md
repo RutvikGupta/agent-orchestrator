@@ -65,26 +65,60 @@ attention as soon as `wait` exits 5.
 
 ## Agents it finds on its own
 
-- **Agents a task's shell starts.** A task whose shell starts headless agents (a wrapper script that
-  runs `claude -p` or `codex exec`, such as a review script) gets one row per agent, nested under the
-  task. The row shows the agent's own kind, model, state, steps, tokens and activity, and its details
-  show its events, read from its transcript. Its tokens count in the section's totals, not in the
-  task's own cell. After a resume, the row says which attempt started it. A finished agent stays
-  listed while its task shows. The agent's own Agent-tool sub-agents, and any run it launches, nest
-  under its row. The task's details list its agents in one line, each linking to its row.
+- **Agents a task's shell starts.** A task whose shell starts headless agents (a script that runs
+  `claude -p` or `codex exec`, such as a review script) shows them, whatever the script or model.
+  A finished agent stays listed while its task shows. Which agents are seen with no dashboard
+  running is in `references/agents.md`, "Agents started outside the orchestrator".
+  - **A command task** has no model, so the agents its command runs are its work, and they get no
+    rows. Once the board finds one, the task's row shows it:
+    - The model, session and event log are those of the lead agent: the one of the latest
+      attempt, a running one first, then the most recently active. When its agents ran more than
+      one model, the model reads `+N` for the others.
+    - The steps and tokens include the agents', and the section's totals count them once.
+    - The activity is the lead agent's while it and the task both run, and the command's latest
+      output line otherwise.
+    - The details list each agent: its kind, model, state and session.
+    - The log of an earlier attempt is the command's own output.
+    - The agents' own Agent-tool sub-agents, and any run they launch, nest under the task's row.
+  - **Any other task** gets one row per agent, nested under the task. The row shows the agent's own
+    kind, model, state, steps, tokens and activity, and its details show its events, read from its
+    transcript. Its tokens count in the section's totals, not in the task's own cell. After a
+    resume, the row says which attempt started it. The agent's own Agent-tool sub-agents, and any
+    run it launches, nest under its row. The task's details list its agents in one line, each
+    linking to its row.
 - **Native sub-agents.** It lists, as `native`, the sub-agents that the launching session or its
   tasks started with their host's own tool. It sums Codex's automatic approval reviews into one row
   per parent, as `status` and `watch` do. Other Claude Code sessions whose sub-agents ran recently
   get a section too: a personal `SubagentStart` hook starts the dashboard and opens it unless a tab
   shows it. `references/agents.md` ("Native sub-agents") says how they are found.
 - **External agents.** It lists, as `external`, the headless Codex and Claude Opus agents
-  (`codex exec`, `claude -p`) that a skill's script started from a session, outside the
-  orchestrator, such as a review script's `codex exec review`. Each goes under the session that ran
-  the script, named after the script (`codex-review`), and stays listed after it exits. One started
-  from a task's shell is not a row of its own: the task's row stands for it. Such an agent takes no
-  messages and skips the model policy, so start agents through `$ORCH start` when they can take a
-  brief. A script that must run its own `codex exec` or `claude -p` needs no runner task to be seen.
+  (`codex exec`, `claude -p`) that a script under `~/.agents/`, `~/.claude/` or a skills folder
+  started from a session, outside the orchestrator, such as a review script's `codex exec review`.
+  Each goes under the session that ran the script, named after the script (`codex-review`), and
+  stays listed after it exits. Its own sub-agents get no rows, and a Codex agent's sub-threads
+  count in its tokens. One started from a task's shell is not an external row: the first bullet
+  covers it. Such an agent takes no messages and skips the model policy, so start agents through
+  `$ORCH start` when they can take a brief. A script that must run its own `codex exec` or
+  `claude -p` is seen with no dashboard running when it runs as a command task.
   `references/agents.md` ("Agents started outside the orchestrator") says how they are found.
+
+## Model ceiling warnings
+
+A command task that has a ceiling (`references/agents.md`, "Model ceilings") shows a warning in its
+activity column, after its current activity, for each agent that goes past it:
+
+- `⚠ <agent> (<cli> <model>) exceeds the <tier> ceiling`: `policy.json` lists the model for that
+  CLI, and it is stronger than the ceiling.
+- `⚠ <agent> (<cli> <model>) unrecognized model`: `policy.json` does not list the model for that
+  CLI, so it cannot be compared with the ceiling.
+
+The warning covers every agent that the command ran, in any attempt, and the Agent-tool
+sub-agents of its Claude agents, at any depth. An agent whose model is not known yet gets none. A
+Codex agent's sub-threads and a Claude Workflow's agents have no rows, so they are not checked. A
+task with no ceiling gets no warning, and neither does an agent task.
+
+The warning only informs: nothing is stopped. It stays while the agent is listed. To clear it, find
+where the script or sub-agent names that model, and change it.
 
 ## Idle runs
 
