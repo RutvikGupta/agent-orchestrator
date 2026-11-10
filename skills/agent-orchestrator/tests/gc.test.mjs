@@ -511,3 +511,22 @@ test('round three: restored previously integrated work needs fresh acceptance an
   assert.ok(Date.parse(readJson(f.taskFile(run, 'feature')).integratedAt) >= Date.parse(restored.restoredAt));
   assert.equal(await f.git(['rev-parse', wt.branch]), tip);
 });
+
+test('idle gc collects a restored worktree whose task was resumed and only read afterwards, and a dry run agrees', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'feature');
+  finished(f, run, 'feature', 1, { closedAt: daysAgo(1), closedBy: 'previous coordinator' });
+  await f.command(['cleanup', run.id]);
+  await f.command(['worktree', run.id, 'feature', '--no-prep']);
+  idleRun(f, run);
+  // Restored five days ago, then resumed as attempt 2, whose result was read three days ago: closed, not explicitly.
+  const task = readJson(f.taskFile(run, 'feature'));
+  patch(f, run, 'feature', { attempt: 2, closedAt: daysAgo(3), closedExplicitlyAttempt: 1, worktree: { ...task.worktree, restoredAt: daysAgo(5) } });
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0, 'cleanup still needs an explicit close');
+  idleRun(f, run); // the cleanup above counted as activity
+  const dry = await f.json(['gc', '--dry-run']);
+  assert.equal(dry.totals.removed, 1, `the dry run counts it: ${JSON.stringify(dry.runs)}`);
+  assert.equal(fs.existsSync(wt.path), true);
+  assert.equal((await f.json(['gc'])).totals.removed, 1);
+  assert.equal(fs.existsSync(wt.path), false);
+});

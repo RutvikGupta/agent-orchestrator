@@ -60,7 +60,7 @@ function registration(run, wt) {
 export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   const wt = task.worktree?.path;
   if (!wt) return 'worktree path missing';
-  if (isParked(run, task) || relayAlive(task.pid, task.startedAt)) return 'task still running';
+  if (isParked(run, task) || relayAlive(task.pid, task.startedAt, task.outDir)) return 'task still running';
   try {
     const root = fs.existsSync(wt) ? fs.realpathSync(wt) : path.resolve(wt);
     if (runningDirectories().some((dir) => dir === root || dir.startsWith(root + path.sep))) return 'worktree is used by a running or parked task';
@@ -72,7 +72,8 @@ export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   if (exists) {
     if (task.worktree.restoredAt) {
       const restoredAt = Date.parse(task.worktree.restoredAt);
-      const closedAfterRestore = task.closedExplicitlyAttempt === (task.attempt || 0) && Date.parse(task.closedAt) >= restoredAt;
+      // Idle-run GC also counts a result that was only read after the restore.
+      const closedAfterRestore = (allowReadClosed || task.closedExplicitlyAttempt === (task.attempt || 0)) && Date.parse(task.closedAt) >= restoredAt;
       const integratedAfterRestore = acceptedNow(task) && Date.parse(task.acceptedAt) >= restoredAt && Date.parse(task.integratedAt) >= restoredAt;
       if (!closedAfterRestore && !integratedAfterRestore) return 'restored worktree awaits a new explicit close or acceptance and integration';
     }
@@ -117,7 +118,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
-    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: 'expired', closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed });
+    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed });
     if (reason) { report.kept.push({ ...entry, reason }); continue; }
     let g;
     if (!dryRun) {
