@@ -53,6 +53,26 @@ reviews, and research.
 - Usage limits play no part in these choices ("Usage limits"). Pull-request babysitters (step 8)
   follow their own rule.
 
+**Delegate well.** These rules hold at every level, for the user's session and for a delegated
+agent alike:
+
+- **Delegate work, never waiting.** A command or script whose output you only need to check runs as
+  a command task, with no model: `$ORCH start <run> <task> --agent command --why "..." -- <argv>`.
+  Never start an agent just to run a command and wait for it.
+- **Start every agent through `$ORCH start`,** never with your host's own sub-agent tool, and never
+  through a script that runs `claude -p` or `codex exec` on its own. Only then does it show on the
+  board, run a tier you chose, and report back when it ends. When a script must start its own
+  agent, set that agent's model and effort explicitly, by the same tier rules.
+- **Size each piece, not the whole.** Give each piece the lightest tier that does it as well as the
+  top one ("Choose the agent and model"): a delegated agent's test runs and lookups go to `light`
+  even when the agent itself runs `complex`.
+- **Never hand your own task upward.** You were given your task at a tier chosen for it. Never pass
+  its hard core to a stronger model, directly or through a script. When it needs one, say so with
+  `$ORCH ask` (or end with `NEEDS DECISION:`), so the agent that started you re-runs it on the right
+  tier.
+- **Split only independent parts,** and give each agent everything its piece needs in its brief:
+  goal, done criteria, scope, the constraints of your own brief, and its gates.
+
 ## Setup (once per session)
 
 `<skill-dir>` is the folder containing this `SKILL.md` (Claude Code prints it as "Base directory for

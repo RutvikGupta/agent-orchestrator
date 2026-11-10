@@ -9,12 +9,15 @@ export function nestingNote(depth) {
 
 ## Delegating further
 
-Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, then \`new\` a run and \`start\` each agent) rather than doing things one after another:
+Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, above all "Delegate well", then \`new\` a run and \`start\` each agent) rather than doing things one after another:
 
 - When the task has two or more independent parts, split it and start one agent per part.
 - When it has slow side work (test suites, gates, builds, deploys, long runs, reviews, the other model's opinion), start an agent for it and keep working.
+- When you only need a command's or script's output, run it as a command task with no model (\`start <run> <task> --agent command --why "..." -- <argv>\`), never as an agent that runs it and waits.
 
-Pick the lightest tier that does each piece as well as the top one (its SKILL.md, "Choose the agent and model"): running tests or gates, reproducing a bug, lookups, mechanical edits, small well-specified changes, docs and reviews of small diffs usually fit \`light\` or \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
+Size each piece on its own: the lightest tier that does it as well as the top one (its SKILL.md, "Choose the agent and model"). Running tests or gates, reproducing a bug, lookups, and mechanical edits fit \`light\`; small well-specified changes, docs, and reviews of small diffs fit \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
+
+Never hand your own task upward. Your tier was chosen for this task, so do not pass its hard core to a stronger model, directly or through a script that runs \`claude -p\` or \`codex exec\`. If it truly needs a stronger model, say so with \`node ${CLI_PATH} ask "<why>"\` and keep doing what you can. Start every agent through \`start\`, never with your host's own sub-agent tool.
 
 A test-running agent can work on your uncommitted code in this directory: start it with \`--force\` and a brief that forbids editing files. If an agent's own work has such parts, tell it in its brief to delegate them the same way. You are notified when an agent you started finishes, so do not poll.
 

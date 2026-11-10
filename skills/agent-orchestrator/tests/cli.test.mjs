@@ -90,12 +90,14 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   const note = brief.slice(brief.indexOf('## Delegating further'), brief.indexOf('## Decisions'));
   assert.ok(note.length > 0 && note.length < 2500, `the note stays short: ${note.length} characters`);
   // Delegate through the skill, rather than doing parts one after another.
-  assert.match(note, /orch\.mjs`; read its SKILL\.md first, then `new` a run and `start` each agent\) rather than doing things one after another/);
+  assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
+  assert.match(note, /run it as a command task with no model .*never as an agent that runs it and waits/);
+  assert.match(note, /Never hand your own task upward\. .*say so with `node .*orch\.mjs ask/);
   assert.match(note, /two or more independent parts, split it and start one agent per part/);
   assert.match(note, /slow side work \(test suites, gates, builds, deploys, long runs, reviews/);
   // The lightest tier for each piece, with the deciding factor in --why.
-  assert.match(note, /Pick the lightest tier that does each piece as well as the top one/);
-  assert.match(note, /running tests or gates, reproducing a bug, lookups, mechanical edits, small well-specified changes, docs and reviews of small diffs usually fit `light` or `standard`/);
+  assert.match(note, /Size each piece on its own: the lightest tier that does it as well as the top one/);
+  assert.match(note, /Running tests or gates, reproducing a bug, lookups, and mechanical edits fit `light`; small well-specified changes, docs, and reviews of small diffs fit `standard`/);
   assert.match(note, /Name the deciding factor in `--why`/);
   // Pass it on, one sentence on the automatic notice, and the safety lines that stay.
   assert.match(note, /tell it in its brief to delegate them the same way/);
