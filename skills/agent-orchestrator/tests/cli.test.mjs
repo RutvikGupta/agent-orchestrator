@@ -92,7 +92,7 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   // Delegate through the skill, rather than doing parts one after another.
   assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
   assert.match(note, /run it as a command task with no model .*never as an agent that runs it and waits/);
-  assert.match(note, /Delegate pieces, never your whole task: .*any tier.*say so with `node .*orch\.mjs ask/);
+  assert.match(note, /Never forward your whole task to a single agent.*split it, or do it yourself.*say so with `node .*orch\.mjs ask/);
   assert.match(note, /two or more independent parts, split it and start one agent per part/);
   assert.match(note, /slow side work \(test suites, gates, builds, deploys, long runs, reviews/);
   // The lightest tier for each piece, with the deciding factor in --why.

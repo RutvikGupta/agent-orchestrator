@@ -56,6 +56,10 @@ reviews, and research.
 **Delegate well.** These rules hold at every level, for the user's session and for a delegated
 agent alike, except the last two, which are for a delegated agent only:
 
+- **Break your task down and delegate the pieces, at every level.** When your task breaks into
+  several tasks that would help (independent parts, slow side work, test runs, lookups, reviews),
+  start an agent for each and assign it, whether you are the user's session or a delegated agent.
+  Review and integrate what each hands back.
 - **Delegate work, never waiting.** A command or script whose output you only need to check runs as
   a command task, with no model: `$ORCH start <run> <task> --agent command --why "..." -- <argv>`.
   Never start an agent just to run a command and wait for it.
@@ -68,10 +72,9 @@ agent alike, except the last two, which are for a delegated agent only:
   even when the agent itself runs `complex`.
 - **Split only independent parts,** and give each agent everything its piece needs in its brief:
   goal, done criteria, scope, the constraints of your own brief, and its gates.
-- **A delegated agent delegates pieces, never its whole task.** Delegate parts of your task as
-  they need it: independent parts, slow side work, test runs and lookups. The task itself stays
-  yours: never pass all of it, or its hard core, to an agent of any tier and wait for its answer.
-  A main session, which no task started, hands whole tasks to agents: that is how it delegates.
+- **A delegated agent never forwards its whole task to a single agent.** That only adds a
+  middleman: split it into pieces as above, or do it yourself. A main session, which no task
+  started, may hand a whole task to one agent.
 - **A delegated agent never hands its task to a stronger model.** You were given your task at a
   tier chosen for it. Never pass its work to a stronger model, directly or through a script. When
   it needs one, say so with `$ORCH ask` (or end with `NEEDS DECISION:`), so the agent that started
