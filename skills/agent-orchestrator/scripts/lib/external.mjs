@@ -1,8 +1,8 @@
 // Agents that a command started outside the orchestrator: headless `claude -p` and `codex exec`
 // processes that neither an orch.mjs relay nor orch.mjs itself started, such as the review scripts
 // a session runs from its shell. The dashboard finds them in the process table while they run and
-// records each in <state root>/external.jsonl, so a finished one stays on the board; one that
-// starts and ends while no dashboard runs is never seen.
+// records each in <state root>/external.jsonl, so a finished one stays on the board. Command
+// relays also record their agents, including sessions recovered after a short process exits.
 //
 // Each record names who started the agent, from the variables it inherited: AGENT_ORCH_RUN and
 // AGENT_ORCH_TASK (a task's shell), CLAUDE_CODE_SESSION_ID (a Claude Code session's shell) and
@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLAUDE_SESSIONS, CODEX_HOME, EXTERNAL_FILE } from "./config.mjs";
 import { codexMeta } from "./codex.mjs";
+import { appendExternalRecord, compactExternalRecords } from "./command-group.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
 import { shortText, slug } from "./format.mjs";
 import { codexNativeAgents, nativeRow } from "./native.mjs";
@@ -167,19 +168,19 @@ function describe(pid, kind, row, table) {
 }
 
 function append(record) {
-  fs.mkdirSync(path.dirname(EXTERNAL_FILE), { recursive: true });
-  fs.appendFileSync(EXTERNAL_FILE, `${JSON.stringify(record)}\n`);
+  appendExternalRecord(EXTERNAL_FILE, record);
 }
 
 // Records by key, the latest line winning; a resumed session (`codex exec resume`) keeps its first
-// start. Reread only when the file grows.
-let loaded = { size: -1, records: new Map() };
+// start. Reread when the file is replaced or changes.
+let loaded = { signature: null, records: new Map() };
 function records() {
-  let size = -1;
+  let signature = "missing";
   try {
-    size = fs.statSync(EXTERNAL_FILE).size;
+    const stat = fs.statSync(EXTERNAL_FILE);
+    signature = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
   } catch {}
-  if (size === loaded.size) return loaded.records;
+  if (signature === loaded.signature) return loaded.records;
   const map = new Map();
   let text = "";
   try {
@@ -193,7 +194,7 @@ function records() {
       map.set(r.key, prev ? { ...r, startedMs: Math.min(prev.startedMs, r.startedMs) } : r);
     } catch {}
   }
-  loaded = { size, records: map };
+  loaded = { signature, records: map };
   return map;
 }
 
@@ -210,10 +211,7 @@ export function watchExternalAgents() {
   // Keep the record file small: drop agents last seen more than a week ago.
   try {
     if (fs.statSync(EXTERNAL_FILE).size < 256 * 1024) return;
-    const kept = [...records().values()].filter((r) => Date.now() - r.seenMs < KEEP_MS);
-    const tmp = `${EXTERNAL_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, kept.map((r) => `${JSON.stringify(r)}\n`).join(""));
-    fs.renameSync(tmp, EXTERNAL_FILE);
+    compactExternalRecords(EXTERNAL_FILE, Date.now() - KEEP_MS);
   } catch {}
 }
 

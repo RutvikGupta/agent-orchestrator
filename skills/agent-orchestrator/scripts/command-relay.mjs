@@ -26,12 +26,12 @@
 // the same way before the result is written. Exit codes: 2 for a usage error, before result.json;
 // otherwise 0 when completed, else the command's exit code (or 1).
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
+import { appendExternalRecord, GRACE_MS, endGroup, processStart, readGroup, writeGroup } from "./lib/command-group.mjs";
 
 const SCHEMA = "orch-command.result.v1";
 const TAIL_LINES = 40; // lines of output kept as the final message
@@ -91,6 +91,175 @@ const logPath = path.join(outDir, "relay.log");
 const eventsPath = path.join(outDir, "events.jsonl");
 const resultPath = path.join(outDir, "result.json");
 const startedAt = new Date().toISOString();
+
+// Session files outlive a quick agent. Pair them with process-group observations while the
+// command runs, then sweep once more after it exits; the dashboard need not have been running.
+// Recovery accepts new sessions only in the command's directory tree or a directory actually
+// observed in its group. A live process outside the group is never adopted by directory alone.
+function commandAgents() {
+  const claude = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const codex = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const state = process.env.AGENT_ORCH_HOME || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'agent-orchestrator');
+  const file = path.join(state, 'external.jsonl');
+  const since = Date.parse(startedAt);
+  const known = new Map();
+  const directories = new Set([real(cwd)]);
+  const saved = new Map();
+  const excluded = new Set();
+  let lastFiles = 0;
+  let warned = false;
+  function real(dir) { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } }
+  function json(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
+  function kind(command) {
+    let w = command.trim().split(/\s+/);
+    if (['node', 'bun'].includes(path.basename(w[0]))) w = w.slice(1);
+    const name = path.basename(w[0] || '');
+    if (name === 'claude' && (w.includes('-p') || w.includes('--print'))) return 'claude';
+    if (/^codex(\.js|-(aarch64|x86_64|arm64)\S*)?$/.test(name)) {
+      for (let i = 1; i < Math.min(w.length, 60); i++) {
+        if (w[i] === 'exec') return 'codex';
+        if (!w[i].startsWith('-') && !(w[i - 1].startsWith('-') && !w[i - 1].includes('='))) break;
+      }
+    }
+    return null;
+  }
+  function list(dir, depth) {
+    const files = [];
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const name = path.join(dir, entry.name);
+        if (entry.isDirectory() && depth > 0) files.push(...list(name, depth - 1));
+        else if (entry.isFile() && /\.jsonl?$/.test(entry.name)) files.push(name);
+      }
+    } catch {}
+    return files;
+  }
+  function header(file, agent) {
+    let fd;
+    try {
+      if (fs.statSync(file).mtimeMs < since) return null;
+      fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(256 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+        let e;
+        try { e = JSON.parse(line); } catch { continue; }
+        if (agent === 'codex' && e.type === 'session_meta') return e.payload;
+        if (agent === 'claude' && e.cwd && e.timestamp && !e.isSidechain) return e;
+      }
+    } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
+    return null;
+  }
+  function accepts(dir) {
+    if (!dir) return false;
+    const resolved = real(dir);
+    return [...directories].some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  }
+  function record(agent, sessionId, meta, transcript, observed = null) {
+    const startedMs = Number(meta.startedAt) || Date.parse(meta.timestamp);
+    if (!sessionId || !Number.isFinite(startedMs)) return;
+    if (!observed && (startedMs < since || startedMs > Date.now() || !accepts(meta.cwd))) return;
+    const pid = observed?.pid || meta.pid || null;
+    // A stale PID file can survive its process. Never attach a currently unrelated process.
+    if (pid && live.has(pid) && !members.has(pid)) return;
+    const command = observed?.command?.slice(0, 300) || (agent === 'claude' ? 'claude -p' : 'codex exec');
+    const launcher = observed?.launcher || null;
+    const r = {
+      key: `${agent}:${sessionId}`, agent, sessionId, file: transcript, cwd: meta.cwd || observed?.cwd || cwd,
+      pid, command, startedMs, seenMs: Date.now(),
+      name: launcher ? path.basename(launcher.split(/\s+/).find((w) => /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/.test(w)) || '').replace(/\.[a-z]+$/, '').replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 28) : agent === 'claude' ? 'claude-headless' : 'codex-exec',
+      launcher: launcher?.slice(0, 160) || null,
+      parent: { run: process.env.AGENT_ORCH_RUN || null, task: process.env.AGENT_ORCH_TASK || null,
+        claude: process.env.CLAUDE_CODE_SESSION_ID || null, codex: process.env.CODEX_THREAD_ID || null, nearest: null },
+    };
+    // A final file sweep must not replace a live observation with guessed process metadata.
+    const prior = saved.get(r.key);
+    if (prior && (!observed || prior.pid === pid && prior.file === transcript)) return;
+    appendExternalRecord(file, r);
+    saved.set(r.key, r);
+  }
+  let live = new Map(), members = new Set();
+  function processes(pgid) {
+    const r = spawnSync('ps', ['-Aww', '-o', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8', timeout: 5000, maxBuffer: 16 << 20 });
+    if (r.error || r.status !== 0) return;
+    live = new Map();
+    members = new Set();
+    for (const line of r.stdout.split('\n')) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+      if (!m) continue;
+      const row = { pid: +m[1], ppid: +m[2], pgid: +m[3], command: m[4] };
+      live.set(row.pid, row);
+      if (row.pgid === pgid) members.add(row.pid);
+    }
+    if (!members.size) return;
+    const open = spawnSync('lsof', ['-nP', '-Fpcfn', '-p', [...members].join(',')], { encoding: 'utf8', timeout: 5000, maxBuffer: 16 << 20 });
+    if (!open.error) {
+      let row, descriptor;
+      for (const line of (open.stdout || '').split('\n')) {
+        if (line[0] === 'p') row = live.get(Number(line.slice(1)));
+        else if (line[0] === 'f') descriptor = line.slice(1);
+        else if (line[0] === 'n' && row && members.has(row.pid)) {
+          if (descriptor === 'cwd') { row.cwd = line.slice(1); directories.add(real(row.cwd)); }
+          else if (/[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) row.rollout = line.slice(1);
+        }
+      }
+    }
+    for (const pid of members) {
+      const row = live.get(pid);
+      // /proc is also useful on hosts without lsof.
+      try { row.cwd ||= fs.readlinkSync(`/proc/${pid}/cwd`); directories.add(real(row.cwd)); } catch {}
+      const agent = kind(row.command);
+      if (!agent || kind(live.get(row.ppid)?.command || '') === agent) continue;
+      for (let p = row.ppid, hops = 0; members.has(p) && hops < 6; hops++) {
+        const parent = live.get(p);
+        if (kind(parent.command)) break;
+        const words = parent.command.split(/\s+/);
+        const script = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
+        const interpreter = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
+        if (script.test(words[0]) || interpreter.test(path.basename(words[0])) && script.test(words[1] || '')) { row.launcher = parent.command; break; }
+        p = parent.ppid;
+      }
+      if (!row.rollout) row.rollout = [...live.values()].find((p) => p.ppid === pid && p.rollout)?.rollout;
+      known.set(pid, { ...known.get(pid), ...row, agent });
+    }
+  }
+  return (pgid, final = false) => {
+    try {
+      processes(pgid);
+      for (const [pid, row] of known) {
+        if (row.agent === 'claude') {
+          const s = json(path.join(claude, 'sessions', `${pid}.json`));
+          if (s?.sessionId && s.entrypoint !== 'cli') record('claude', s.sessionId, s, null, row);
+        } else if (row.rollout) {
+          const m = header(row.rollout, 'codex');
+          if (m?.id) record('codex', m.id, m, row.rollout, row);
+        }
+      }
+      if (!final && Date.now() - lastFiles < 2000) return;
+      lastFiles = Date.now();
+      for (const f of list(path.join(claude, 'sessions'), 0)) {
+        const s = json(f);
+        if (!s?.sessionId) continue;
+        const pid = Number(s.pid || path.basename(f, '.json'));
+        if (s.entrypoint === 'cli' || live.has(pid) && !members.has(pid)) { excluded.add(s.sessionId); continue; }
+        record('claude', s.sessionId, { ...s, pid }, null, known.get(pid));
+      }
+      for (const f of list(path.join(claude, 'projects'), 1)) {
+        const m = header(f, 'claude');
+        const id = m?.sessionId || path.basename(f, '.jsonl');
+        if (m && !excluded.has(id)) record('claude', id, m, f);
+      }
+      for (const f of list(path.join(codex, 'sessions'), 3)) {
+        const m = header(f, 'codex');
+        if (m && (m.originator === 'codex_exec' || m.source === 'exec')) record('codex', m.id, m, f);
+      }
+    } catch (error) {
+      if (!warned) fs.appendFileSync(logPath, `\ncommand-relay: could not record an agent: ${error.message}\n`);
+      warned = true;
+    }
+  };
+}
+const captureAgents = commandAgents();
 
 function writeEvent(event) {
   fs.appendFileSync(eventsPath, `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}\n`);
@@ -278,7 +447,9 @@ function settle({ code = null, signal = null, error = null, left = null } = {}) 
 function onExit(code, signal) {
   exited = true;
   clearTimeout(killTimer);
+  captureAgents(child.pid);
   const left = endGroup(child.pid, GRACE_MS);
+  captureAgents(child.pid, true);
   try {
     writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
   } catch {}
@@ -311,7 +482,8 @@ child.on("exit", onExit);
 if (child.pid) {
   writeGroup(outDir, { pgid: child.pid, leaderStarted: processStart(child.pid), relay: process.pid, recordedAt: new Date().toISOString() });
   writeEvent({ type: "command.started", command: opts.command, cwd, pid: child.pid, done: opts.done, timeout: opts.timeout });
-  poll = setInterval(() => readOutput(), POLL_MS);
+  captureAgents(child.pid);
+  poll = setInterval(() => { readOutput(); captureAgents(child.pid); }, POLL_MS);
   if (timeoutMs) {
     timeoutTimer = setTimeout(() => {
       timedOut = true;

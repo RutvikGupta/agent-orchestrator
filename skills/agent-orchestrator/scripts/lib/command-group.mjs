@@ -113,3 +113,112 @@ export function endRecordedGroup(dir) {
   writeGroup(dir, { ...record, endedAt: new Date().toISOString(), leftover: ended.found, killed: ended.killed, cleared: true, clearedBy: "stop or close" });
   return { pgid, ...ended };
 }
+
+// Serialize external record read-modify-write operations across the dashboard and relays.
+// A dead owner's lock is reclaimed; the age guard also covers a crash before owner.json exists.
+function withExternalLock(file, action) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lock = `${file}.lock`;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      // Only one contender may reclaim a dead lock. Recheck after claiming the guard,
+      // so a second contender cannot rename a newly acquired lock.
+      const guard = `${lock}.reap`;
+      let guarding = false;
+      try {
+        try { fs.mkdirSync(guard); guarding = true; } catch (e) {
+          if (e.code !== "EEXIST") throw e;
+          // A crashed reaper cannot block writers forever.
+          try { if (Date.now() - fs.statSync(guard).mtimeMs > 30000) fs.rmSync(guard, { recursive: true, force: true }); }
+          catch (err) { if (err.code !== "ENOENT") throw err; }
+        }
+        if (guarding) {
+          const stat = fs.statSync(lock);
+          if (Date.now() - stat.mtimeMs > 2000) {
+            let owner;
+            try { owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); } catch {}
+            let alive = false;
+            if (Number.isInteger(owner?.pid) && owner.pid > 0) {
+              try { process.kill(owner.pid, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; }
+            }
+            if (!alive) fs.rmSync(lock, { recursive: true, force: true });
+          }
+        }
+      } catch (e) { if (e.code !== "ENOENT") throw e; }
+      finally { if (guarding) fs.rmSync(guard, { recursive: true, force: true }); }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for external record lock: ${lock}`);
+      Atomics.wait(pause, 0, 0, 10);
+    }
+  }
+  try {
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
+    return action();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function mergeExternal(previous, next) {
+  if (!previous) return next;
+  const merged = { ...previous };
+  const recovery = previous.pid != null && next.pid == null;
+  for (const [key, value] of Object.entries(next)) {
+    if (recovery && ["pid", "command", "name", "launcher"].includes(key)) continue;
+    if (value === null || value === undefined || value === "") continue;
+    if (key === "parent" && typeof value === "object" && !Array.isArray(value)) {
+      merged.parent = mergeExternal(previous.parent || {}, value);
+    } else merged[key] = value;
+  }
+  const starts = [previous.startedMs, next.startedMs].filter((n) => Number.isFinite(n));
+  if (starts.length) merged.startedMs = Math.min(...starts);
+  const seen = [previous.seenMs, next.seenMs].filter((n) => Number.isFinite(n));
+  if (seen.length) merged.seenMs = Math.max(...seen);
+  return merged;
+}
+
+function readExternal(file) {
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch (e) { if (e.code === "ENOENT") return new Map(); throw e; }
+  const records = new Map();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      if (record && typeof record.key === "string") records.set(record.key, mergeExternal(records.get(record.key), record));
+    } catch {} // Ignore malformed legacy lines, as the dashboard reader does.
+  }
+  return records;
+}
+
+function writeExternal(file, records) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, [...records.values()].map((r) => `${JSON.stringify(r)}\n`).join(""));
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
+// One line per session key, merging recovery metadata without losing known values.
+export function appendExternalRecord(file, record) {
+  if (!record || typeof record.key !== "string" || !record.key) throw new TypeError("external record needs a key");
+  return withExternalLock(file, () => {
+    const records = readExternal(file);
+    records.set(record.key, mergeExternal(records.get(record.key), record));
+    writeExternal(file, records);
+  });
+}
+
+// Drop expired records while holding the same lock used by writers.
+export function compactExternalRecords(file, sinceMs) {
+  return withExternalLock(file, () => {
+    const records = readExternal(file);
+    for (const [key, record] of records) if (!(record.seenMs > sinceMs)) records.delete(key);
+    writeExternal(file, records);
+  });
+}

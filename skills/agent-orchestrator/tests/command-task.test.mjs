@@ -349,3 +349,123 @@ test('a review script\'s headless claude -p is linked to the command task throug
   assert.deepEqual(fs.readFileSync(path.join(work, 'claude-record.txt'), 'utf8').trim().split('\n'),
     [run.id, 'standards', '1', '-p Review the change --output-format text']);
 });
+
+// These fakes write the durable files the CLIs leave, then exit immediately. The transcript
+// case removes Claude's live PID file before exit, as a clean shutdown does.
+function quickAgent(f, agent) {
+  const dir = path.join(f.root, 'quick-agents');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, agent);
+  fs.writeFileSync(file, `
+const fs = require('node:fs');
+const path = require('node:path');
+const agent = ${JSON.stringify(agent)};
+const sessionId = process.env.QUICK_SESSION;
+const cwd = process.cwd();
+const startedAt = Date.now();
+const timestamp = new Date(startedAt).toISOString();
+const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value) + '\\n'); };
+let liveFile;
+if (agent === 'claude') {
+  liveFile = path.join(process.env.CLAUDE_CONFIG_DIR, 'sessions', process.pid + '.json');
+  write(liveFile, { sessionId, cwd, startedAt, pid: process.pid, entrypoint: 'sdk-cli' });
+  write(path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), sessionId + '.jsonl'),
+    { type: 'user', sessionId, cwd, timestamp, message: { role: 'user', content: 'Review.' } });
+} else {
+  const file = path.join(process.env.CODEX_HOME, 'sessions', '2026', '11', '10', 'rollout-' + sessionId + '.jsonl');
+  write(file, { type: 'session_meta', timestamp, payload: { id: sessionId, cwd, timestamp, originator: 'codex_exec', source: 'exec' } });
+  fs.openSync(file, 'a');
+}
+const finish = () => {
+  if (liveFile && process.env.QUICK_REMOVE_SESSION) fs.unlinkSync(liveFile);
+  write(process.env.QUICK_DONE, { pid: process.pid, durationMs: Date.now() - startedAt });
+};
+if (process.env.QUICK_RELEASE) {
+  write(process.env.QUICK_READY, { pid: process.pid });
+  const parent = process.ppid;
+  const timer = setInterval(() => {
+    if (process.ppid !== parent || !fs.existsSync(path.dirname(process.env.QUICK_RELEASE))) process.exit(0);
+    if (fs.existsSync(process.env.QUICK_RELEASE)) { clearInterval(timer); finish(); }
+  }, 10);
+} else finish();
+`);
+  return file;
+}
+
+for (const agent of ['claude', 'codex']) {
+  test(`the relay records a subsecond ${agent} with its session and parent without a dashboard`, async (t) => {
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const bin = quickAgent(f, agent);
+    const doneFile = path.join(f.root, `${agent}-done.json`);
+    const id = agent === 'codex' ? '11111111-2222-4333-8444-555555555555' : 'quick-claude';
+    // A wrapper starts the agent in a child directory, and waits for it, as review scripts do.
+    const childDir = path.join(f.repo, 'child');
+    fs.mkdirSync(childDir);
+    const wrapper = path.join(f.root, `run-${agent}.cjs`);
+    fs.writeFileSync(wrapper, `require('node:child_process').spawnSync(process.execPath, ${JSON.stringify([bin, agent === 'claude' ? '-p' : 'exec', 'review'])}, { cwd: ${JSON.stringify(childDir)}, env: process.env, stdio: 'inherit' });`);
+    await startCommand(f, run, 'quick', [process.execPath, wrapper], { env: {
+      QUICK_SESSION: id, QUICK_DONE: doneFile, QUICK_REMOVE_SESSION: '1',
+    } });
+    await f.finished(run, 'quick');
+    assert.ok(readJson(doneFile).durationMs < 1000, 'the agent exits in under a second');
+    const records = lines(path.join(f.state, 'external.jsonl'));
+    assert.equal(records.length, 1);
+    const r = records[0];
+    assert.deepEqual([r.key, r.agent, r.sessionId, r.parent.run, r.parent.task, r.cwd],
+      [`${agent}:${id}`, agent, id, run.id, 'quick', childDir]);
+    assert.ok(r.startedMs > 0);
+    assert.ok(['pid', 'command', 'name', 'launcher'].every((k) => Object.hasOwn(r, k)));
+    assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false);
+  });
+}
+
+test('the relay ignores a simultaneous unrelated Claude session in another directory', async (t) => {
+  const { spawn } = await import('node:child_process');
+  let outsider, outsideRelease;
+  t.after(async () => {
+    if (!outsider) return;
+    fs.writeFileSync(outsideRelease, '');
+    await eventually(() => outsider.exitCode !== null, 'unrelated fixture did not stop');
+  });
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const bin = quickAgent(f, 'claude');
+  const control = path.join(f.root, 'control');
+  fs.mkdirSync(control);
+  await startCommand(f, run, 'owner', held(control));
+  await eventually(() => fs.existsSync(path.join(control, 'ready')), 'command was not ready');
+  outsideRelease = path.join(f.root, 'outside-release');
+  outsider = spawn(process.execPath, [bin, '-p', 'review'], { cwd: f.root, env: {
+    ...f.env, QUICK_SESSION: 'unrelated', QUICK_DONE: path.join(f.root, 'outside-done.json'),
+    QUICK_READY: path.join(f.root, 'outside-ready.json'), QUICK_RELEASE: path.join(f.root, 'outside-release'),
+  }, stdio: 'ignore' });
+  await eventually(() => fs.existsSync(path.join(f.root, 'outside-ready.json')), 'unrelated agent was not ready');
+  fs.writeFileSync(path.join(control, 'release'), '');
+  await f.finished(run, 'owner');
+  const file = path.join(f.state, 'external.jsonl');
+  assert.deepEqual(fs.existsSync(file) ? lines(file) : [], []);
+});
+
+test('the relay and dashboard record the same live command agent once', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const bin = quickAgent(f, 'claude');
+  const release = path.join(f.root, 'agent-release');
+  await startCommand(f, run, 'shared', [process.execPath, bin, '-p', 'review'], { env: {
+    QUICK_SESSION: 'shared-agent', QUICK_DONE: path.join(f.root, 'done.json'),
+    QUICK_READY: path.join(f.root, 'ready.json'), QUICK_RELEASE: release,
+  } });
+  const file = path.join(f.state, 'external.jsonl');
+  await eventually(() => fs.existsSync(file) && lines(file).length, 'relay did not record the running agent');
+  const board = await f.dashboard();
+  const found = await eventually(async () => {
+    const state = await board.json('/api/state');
+    return JSON.stringify(state).includes('shared-agent') ? state : null;
+  }, 'dashboard did not find the shared agent', 20_000);
+  assert.ok(found);
+  assert.equal(lines(file).filter((r) => r.key === 'claude:shared-agent').length, 1);
+  fs.writeFileSync(release, '');
+  await f.finished(run, 'shared');
+  assert.equal(lines(file).filter((r) => r.key === 'claude:shared-agent').length, 1);
+});
