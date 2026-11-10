@@ -46,6 +46,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Create and prepare an isolated git worktree + branch for TASK.
                                   Recreates a collected folder from its retained branch; --from
                                   requires a new --branch when restoring a retained branch.
+                                  A restored folder stays until a fresh explicit close, or fresh
+                                  acceptance and integration.
   brief RUN TASK [--type implement|review|research|debug|babysit] [--read-only]
         [--out FILE] [--force]
                                   Write a draft brief for TASK from references/briefs/<type>.md,

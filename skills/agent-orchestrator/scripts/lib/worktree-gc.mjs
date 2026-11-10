@@ -70,6 +70,12 @@ export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   if (registered.error) return registered.error;
   const exists = fs.existsSync(wt);
   if (exists) {
+    if (task.worktree.restoredAt) {
+      const restoredAt = Date.parse(task.worktree.restoredAt);
+      const closedAfterRestore = task.closedExplicitlyAttempt === (task.attempt || 0) && Date.parse(task.closedAt) >= restoredAt;
+      const integratedAfterRestore = acceptedNow(task) && Date.parse(task.acceptedAt) >= restoredAt && Date.parse(task.integratedAt) >= restoredAt;
+      if (!closedAfterRestore && !integratedAfterRestore) return 'restored worktree awaits a new explicit close or acceptance and integration';
+    }
     // Idle-run GC can collect read results; other callers keep them available for review.
     const closed = task.closedAt && (allowReadClosed || task.readOnly || task.closedExplicitlyAttempt === (task.attempt || 0));
     if (!closed && !(acceptedNow(task) && task.integratedAt)) return `task is not ${allowReadClosed ? '' : 'explicitly '}closed or accepted and integrated`;

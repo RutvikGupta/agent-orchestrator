@@ -62,12 +62,12 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   // A collected folder leaves its branch intact. Reuse it without resetting its commits.
   const retainedHead = previous?.branch === branch ? git(run.repo, ["rev-parse", "--verify", `refs/heads/${branch}`], { allowFail: true }) : null;
   if (retainedHead && from) die(`cannot use --from while restoring retained branch ${branch}; omit --from, or choose a new --branch`);
-  from = retainedHead || from || run.baseCommit;
+  from = retainedHead ? previous.from || run.baseCommit : from || run.baseCommit;
   const wt = path.resolve(worktreePath || (retainedHead && previous.path) || path.join(run.dir, "worktrees", id));
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
   git(run.repo, retainedHead ? ["worktree", "add", "-q", wt, branch] : ["worktree", "add", "-q", "-b", branch, wt, from]);
-  const task = { ...(existing || { id, createdAt: new Date().toISOString() }), cd: wt, worktree: { path: wt, branch, from, ...(retainedHead ? { restored: true } : {}) } };
+  const task = { ...(existing || { id, createdAt: new Date().toISOString() }), cd: wt, worktree: { path: wt, branch, from, ...(retainedHead ? { restored: true, restoredAt: new Date().toISOString(), restoredCommit: retainedHead } : {}) } };
   saveTask(run, task);
   if (prep) {
     const controller = new AbortController();

@@ -386,7 +386,8 @@ for (const closure of ['result', 'legacy']) test(`round two: idle gc collects ${
   const recreated = await f.json(['worktree', run.id, 'restore', '--no-prep']);
   assert.equal(recreated.path, wt.path);
   assert.equal(recreated.branch, wt.branch);
-  assert.equal(recreated.from, tip);
+  assert.equal(recreated.from, wt.from);
+  assert.equal(recreated.restoredCommit, tip);
   assert.equal(recreated.restored, true);
   assert.equal(await f.git(['-C', recreated.path, 'rev-parse', 'HEAD']), tip);
   assert.equal(fs.readFileSync(path.join(recreated.path, 'change.txt'), 'utf8'), 'Unique committed work.\n');
@@ -446,4 +447,67 @@ test('round two: worktree recreates a folder collected by explicit cleanup from 
   assert.equal(restored.branch, wt.branch);
   assert.equal(await f.git(['-C', restored.path, 'rev-parse', 'HEAD']), tip);
   assert.equal(fs.readFileSync(path.join(restored.path, 'change.txt'), 'utf8'), 'Unique committed work.\n');
+});
+
+test('round three: restored task keeps its original start point through accept and integrate', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'feature');
+  const tip = await commit(f, wt);
+  finished(f, run, 'feature', 1, { closedAt: daysAgo(1) });
+  await f.command(['cleanup', run.id]);
+  const restored = await f.json(['worktree', run.id, 'feature', '--no-prep']);
+  assert.equal(restored.from, wt.from);
+  assert.equal(restored.restoredCommit, tip);
+  assert.ok(restored.restoredAt);
+  const accepted = await f.command(['accept', run.id, 'feature']);
+  assert.doesNotMatch(accepted.stdout, /has no commits beyond where it started/);
+  assert.equal(await f.git(['rev-list', '--count', `${restored.from}..${tip}`]), '1');
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0, 'acceptance alone does not release a restored folder');
+  const integrated = await f.json(['integrate', run.id, 'feature']);
+  assert.equal(integrated.cleanup.removed.length, 1);
+  await f.git(['merge-base', '--is-ancestor', tip, 'main']);
+});
+
+test('round three: restore survives cleanup, idle gc, result reads and closing another task until explicitly closed again', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'feature');
+  finished(f, run, 'feature', 1, { closedAt: daysAgo(1), closedBy: 'previous coordinator' });
+  await f.command(['cleanup', run.id]);
+  await f.command(['worktree', run.id, 'feature', '--no-prep']);
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0);
+  assert.equal(fs.existsSync(wt.path), true);
+  await worktree(f, run, 'other');
+  const closedOther = await f.json(['close', run.id, 'other']);
+  assert.ok(closedOther.cleanup.kept.some((r) => r.task === 'feature' && /restored worktree/.test(r.reason)));
+  await f.command(['result', run.id, 'feature']);
+  idleRun(f, run);
+  const collected = await f.json(['gc']);
+  assert.equal(collected.totals.removed, 0);
+  assert.match(collected.runs[0].kept[0].reason, /restored worktree/);
+  const closed = await f.json(['close', run.id, 'feature']);
+  assert.equal(closed.cleanup.removed.length, 1);
+  assert.equal(readJson(f.taskFile(run, 'feature')).closedBy, 'user (terminal)');
+  assert.equal(fs.existsSync(wt.path), false);
+});
+
+test('round three: restored previously integrated work needs fresh acceptance and integration', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await worktree(f, run, 'feature');
+  const tip = await commit(f, wt);
+  finished(f, run, 'feature', 1);
+  await f.command(['accept', run.id, 'feature']);
+  await f.command(['integrate', run.id, 'feature']);
+  assert.equal(fs.existsSync(wt.path), false);
+  const restored = await f.json(['worktree', run.id, 'feature', '--no-prep']);
+  const oldIntegration = readJson(f.taskFile(run, 'feature')).integratedAt;
+  assert.ok(Date.parse(restored.restoredAt) > Date.parse(oldIntegration));
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0);
+  const stale = await f.json(['integrate', run.id, 'feature']);
+  assert.equal(stale.cleanup.removed.length, 0);
+  await f.command(['accept', run.id, 'feature']);
+  assert.equal((await f.json(['cleanup', run.id])).removed.length, 0);
+  const confirmed = await f.json(['integrate', run.id, 'feature']);
+  assert.equal(confirmed.cleanup.removed.length, 1);
+  assert.ok(Date.parse(readJson(f.taskFile(run, 'feature')).integratedAt) >= Date.parse(restored.restoredAt));
+  assert.equal(await f.git(['rev-parse', wt.branch]), tip);
 });

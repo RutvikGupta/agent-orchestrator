@@ -188,10 +188,12 @@ export async function cmdClose(args) {
   });
   const lines = [];
   for (const task of tasks) {
-    // Collecting a result is not an explicit close. Record the intent even if it was read.
-    lines.push(`${task.id}: ${closeTask(run, task, task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) ? {} : { closedBy: g.actor })}`);
+    // Reading a result or restoring its folder needs a fresh explicit close.
+    const explicitlyClosed = task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) &&
+      (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt));
+    lines.push(`${task.id}: ${closeTask(run, task, explicitlyClosed ? {} : { closedBy: g.actor })}`);
     // The owner hears of a task that was open; one it had closed already changed nothing.
-    if (!task.closedAt || task.closedExplicitlyAttempt !== (task.attempt || 0)) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
+    if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
   const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
   const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;

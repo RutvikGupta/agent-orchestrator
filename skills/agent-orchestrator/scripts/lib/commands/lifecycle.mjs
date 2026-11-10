@@ -346,8 +346,8 @@ export function cmdAccept(args) {
     // Accepting overrides an earlier `reject` of this attempt; reviews.jsonl keeps that round.
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
-  // A different commit or attempt is new work, which no earlier integration covers.
-  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt)) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
+  // A different commit, attempt or restored folder needs integration confirmed again.
+  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt || Date.parse(task.worktree?.restoredAt) > Date.parse(task.integratedAt))) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
   saveTask(run, accepted);
   recordChange(run, g, { task: id, attempt, action: "accepted" });
   reclaimTask(run, task);
