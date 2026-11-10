@@ -4,6 +4,8 @@ const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":
 const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
 const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="idle"||s==="parked"?"s-idle":"s-bad";
+// The attempt of its task that started an agent, once the task has had more than one.
+const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
 // A row with sub-agents opens while any agent under it runs and closes once none do; clicking its
 // arrow, or the row itself, overrides that until the running state under it changes.
@@ -153,8 +155,8 @@ function sectionView(run){
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+m.text).join("\n")},"✉ "+t.inbox.unread+" unread"):null,
-        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:t.why||""},t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
-      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(t.attempt>1?" · "+t.attempt+" attempts":"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
+        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:t.why||""},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
+      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(t.attempt>1?" · "+t.attempt+" attempts":"")+(startedIn(t,byKey.get(t.parentKey))?" · attempt "+startedIn(t,byKey.get(t.parentKey)):"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
       $("tr",{class:"nowrow"},$("td",{...indent(32),colspan:"10"},nowText(t))))});
@@ -228,36 +230,31 @@ function logPrint(ev){if(!ev)return"loading";let p=prints.get(ev);if(p!=null)ret
   for(const e of ev){const s=e.kind+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
   p=ev.length+":"+h.toString(36);prints.set(ev,p);return p}
 function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSource(t,n);if(!src)return Promise.resolve([]);if(loading.has(lk))return loading.get(lk);
+  if(t.external)return loadTranscript(lk,t,src);
   const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(lk)?.ev||[]).then(ev=>{loading.delete(lk);logs.delete(lk);
     logs.set(lk,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
   loading.set(lk,load);return load}
-// The agents that a task's own shell started (`t.inner`, from the board) show in its details, each with
-// its events from its own transcript (api/transcript, the same 400 events as a native agent's log).
-// Kept by the agent's key, from successful reads only: a read that fails keeps what an earlier one
-// gave, is marked in `innerFailed`, and is tried again at the next refresh. A finished agent's
-// transcript no longer changes, so a good read is fetched again only when the board says it was
-// active since.
-const innerLogs=new Map(),innerLoading=new Map(),innerFailed=new Set();
-const innerSource=x=>x.file?"api/transcript?file="+encodeURIComponent(x.file):null;
-function loadInner(x){const src=innerSource(x);if(!src)return Promise.resolve([]);
-  const hit=innerLogs.get(x.key);if(hit&&x.state!=="running"&&hit.active===x.lastActiveMs)return Promise.resolve(hit.ev);
-  if(innerLoading.has(x.key))return innerLoading.get(x.key);
+// An outside agent's events come from its own transcript (api/transcript, the same 400 events as a native
+// agent's log), whether a skill's script or a task's own shell started it. Kept from successful reads
+// only: a read that fails keeps what an earlier one gave, is marked in `logFailed`, and is tried again
+// at the next refresh. A finished agent's transcript no longer changes, so a good read is fetched again
+// only when the board says it was active since.
+const logFailed=new Set();
+function loadTranscript(lk,t,src){
+  const hit=logs.get(lk);if(hit&&t.state!=="running"&&hit.active===t.lastActiveMs)return Promise.resolve(hit.ev);
   const load=fetch(src).then(r=>{if(r.ok===false)throw new Error("HTTP "+r.status);return r.json()}).then(v=>{if(!Array.isArray(v?.events))throw new Error("no events");return v.events})
-    .then(ev=>{innerFailed.delete(x.key);innerLogs.delete(x.key);innerLogs.set(x.key,{ev,at:Date.now(),active:x.lastActiveMs});if(innerLogs.size>40)innerLogs.delete(innerLogs.keys().next().value);return ev},
-      ()=>{innerFailed.add(x.key);return innerLogs.get(x.key)?.ev||[]})
-    .finally(()=>innerLoading.delete(x.key));
-  innerLoading.set(x.key,load);return load}
-const loadInners=t=>Promise.all((t?.inner||[]).map(loadInner));
-const innerSig=t=>(t.inner||[]).map(x=>x.key+":"+(innerSource(x)?logPrint(innerLogs.get(x.key)?.ev)+(innerFailed.has(x.key)?"!":""):"none")).join();
-function preload(key){const t=taskAt(key),lk=logKey(key,t);if(t&&!loading.has(lk)&&!(Date.now()-(logs.get(lk)?.at||0)<3000))loadLog(key,t);
-  for(const x of t?.inner||[])if(!(Date.now()-(innerLogs.get(x.key)?.at||0)<3000))loadInner(x)}
+    .then(ev=>{logFailed.delete(lk);logs.delete(lk);logs.set(lk,{ev,at:Date.now(),active:t.lastActiveMs});if(logs.size>30)logs.delete(logs.keys().next().value);return ev},
+      ()=>{logFailed.add(lk);return logs.get(lk)?.ev||[]})
+    .finally(()=>loading.delete(lk));
+  loading.set(lk,load);return load}
+function preload(key){const t=taskAt(key),lk=logKey(key,t);if(t&&!loading.has(lk)&&!(Date.now()-(logs.get(lk)?.at||0)<3000))loadLog(key,t)}
 async function detail(){
   if(!sel)return;const key=sel,[runId,taskId]=key.split("/");const run=state.find(r=>r.id===runId);const t=run?.tasks.find(x=>x.key===taskId);if(!t)return;
   const ext=t.native||t.main;
   // A newly chosen row paints at once, with the log it last had, before its fresh log arrives.
   const lk=logKey(key,t);
   if(document.getElementById("detail").dataset.sel!==key)paint(key,t,ext,logSource(t)?logs.get(lk)?.ev??null:[]);
-  const[ev]=await Promise.all([loadLog(key,t),loadInners(t)]);
+  const ev=await loadLog(key,t);
   // A slower load for a row chosen earlier, or for another attempt of this row, must not repaint
   // the panel over the current one.
   const now=state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskId)||t;
@@ -265,8 +262,9 @@ async function detail(){
   paint(key,now,ext,ev);
 }
 // The panel's controls that keep focus across a repaint, found again as focusedOn finds the board's:
-// an attempt line by its number, the Brief, "show attempt N", and the close button.
-const PANEL_FOCUS=[[".att",["n"]],[".bsum",[]],[".linkish",[]],[".close",[]]];
+// an attempt line by its number, an agent the task started by its row, the Brief, "show attempt N", and
+// the close button.
+const PANEL_FOCUS=[[".att",["n"]],[".agentlink",["key"]],[".bsum",[]],[".linkish",[]],[".close",[]]];
 // The final message as the panel shows it: without the orch-result block that the structured report
 // above already shows. An invalid block stays, so the reader can see what is wrong with it.
 const REPORT_BLOCK=/^[\t ]*```orch-result[\t ]*\r?\n[\s\S]*?^[\t ]*```[\t ]*(?=\r?$)/gm;
@@ -278,44 +276,41 @@ const saysText=x=>{const m=String(x??"");return m.replace(REPORT_BLOCK,"[orch-re
 // A tool event with no output text gets no OUTPUT row.
 const eventRows=ev=>(ev||[]).filter(e=>e.kind!=="output"||String(e.text??"").trim());
 const eventView=e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.kind==="reply"?rich(e.text):$("pre",{},e.kind==="says"?saysText(e.text):e.text));
-// The headless agents that the task's own shell started, one block each after the task's events,
-// oldest first: "Inside this task: <kind> · <model> · <state>", its figures, and its events in the
-// task's own format. Its tokens are its own, never in the task's totals above.
-function innerView(t){const list=t.inner||[];if(!list.length)return[];
-  const skipped=t.innerOmitted?[$("p",{class:"muted"},t.innerOmitted+" earlier "+(t.innerOmitted===1?"agent":"agents")+" that this task started "+(t.innerOmitted===1?"is":"are")+" not shown.")]:[];
-  return[...skipped,...list.map(x=>{const ev=innerLogs.get(x.key)?.ev,src=innerSource(x),rows=eventRows(ev);
-    return $("section",{class:"inner","data-inner":x.key},
-      $("h3",{},"Inside this task: "+x.kind+" · "+(x.model||"model unknown")+" · ",$("span",{class:"state "+cls(x.state)},x.state),t.attempt>1&&x.attempt?" · attempt "+x.attempt:""),
-      $("dl",{},...[["started by",x.launcher],["session",x.session],["activity",x.state==="running"?x.now:null],["elapsed",x.elapsed],["steps",x.steps],
-        ["tokens",(x.tokensExact?"":"~")+fmt(x.tokensIn)+" in ("+fmt(x.tokensCached)+" cached) / "+fmt(x.tokensOut)+" out; not in the task's totals"],["working dir",x.cd],["transcript",x.file]]
-        .filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
-      $("h3",{},!src?"Events: its transcript was not found":"Events"+(ev?" ("+rows.length+", newest last), from its transcript":innerFailed.has(x.key)?": could not be read, trying again":" (loading…)")+(ev&&innerFailed.has(x.key)?"; the latest read failed, trying again":"")),
-      ...rows.map(eventView))})]}
+// The agents that a task's own shell started, as one line in its details: each links to its row, which
+// the board lists under the task. After a resume, an agent says which attempt it started in.
+const agentList=(key,t)=>(state.find(r=>r.id===key.split("/")[0])?.tasks||[]).filter(x=>x.taskAgent&&x.parentKey===t.key);
+function agentsView(key,t){const list=agentList(key,t);if(!list.length)return[];
+  return[$("p",{class:"ctx"},$("span",{class:"k"},"Agents it started"),
+    ...list.flatMap((x,i)=>[i?", ":"",$("button",{type:"button",class:"agentlink","data-key":key.split("/")[0]+"/"+x.key,title:"Show its row and its events",onclick:()=>reveal(key.split("/")[0]+"/"+x.key)},
+      x.kind+" · "+(x.model||"model unknown")+" · "+x.state+(startedIn(x,t)?" · attempt "+startedIn(x,t):""))]))]}
 // `ev` is null while the row's first log is still loading; it must be the log of the attempt the
 // panel shows (logKey). `keep` holds the scroll position as it is, after a click inside the panel.
 function paint(key,t,ext,ev,keep){
   // A task that orch.mjs started has receipts; its working directory and branch go in its Context line.
   const own=!ext&&!t.external&&(t.attempts||[]).length>0,n=own?shownAttempt(key,t):0,past=own&&n!==t.attempt;
-  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+"|"+innerSig(t)+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
+  const lk=logKey(key,t),src=logSource(t,n),failed=t.external&&logFailed.has(lk),good=logs.get(lk)?.ev;
+  const up=t.taskAgent?state.find(r=>r.id===key.split("/")[0])?.tasks.find(x=>x.key===t.parentKey):null; // the task that started this agent
+  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(failed?"!":"")+"|"+agentList(key,t).map(x=>x.key+x.state+x.model+x.taskAttempt).join()+(up?up.attempt:"")+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
   const d=document.getElementById("detail");if(holding(d)){behind=true;return}lastDetail=sig;
   const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d);
   const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
-    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["mode",t.mode],
+    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model+(t.tier?" ("+t.tier+" tier)":"")],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
+    ...agentsView(key,t),
     ...(own?[...contextView(t,n),...briefView(key,t,n),...attemptsView(key,t,n)]:[]),
     ...reportView(t),
     ...reviewView(t),
     ...(message?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final"},$("pre",{},message))]:[]),
     ...(t.main?[$("p",{class:"muted"},"The session that launched this run. Its counts cover the whole session and are not in the run's totals.")]:[]),
     ...messagesView(key,t),
-    $("h3",{},(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":""):" (loading…)"),
+    $("h3",{},t.external&&!src?"Events: its transcript was not found":failed&&!good?"Events: could not be read, trying again"
+        :(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":"")+(failed?"; the latest read failed, trying again":""):" (loading…)"),
       past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
-    ...rows.map(eventView),
-    ...innerView(t));
+    ...rows.map(eventView));
   d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;
   if(focus)refocus(d,focus);
 }

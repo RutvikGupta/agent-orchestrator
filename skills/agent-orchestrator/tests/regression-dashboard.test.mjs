@@ -186,7 +186,7 @@ test('details fetch transcript logs for main and native rows and attempt logs fo
     sel: null, state: [], lastDetail: '', holding: () => false,
     document: { getElementById: () => panel },
     fetch: async (url) => { fetched.push(url); return { json: async () => ({ events: [{ kind: 'says', text: 'Live fixture output.' }] }) }; },
-    $: (tag, attrs, ...children) => ({ tag, attrs, children }), fmt: String, cls: String, reportView: () => [], closeDetail() {},
+    $: (tag, attrs, ...children) => ({ tag, attrs, children }), fmt: String, cls: String, startedIn: () => null, reportView: () => [], closeDetail() {},
   });
   vm.runInContext(snippet('const atBottom=', 'async function limits()'), context);
   for (const [kind, flags, expected] of [

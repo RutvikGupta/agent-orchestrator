@@ -122,7 +122,7 @@ export function treeOrder(tasks) {
   const main = tasks.find((t) => t.main) || null;
   const others = tasks.filter((t) => !t.main);
   const parentOf = (t) => {
-    if (t.under && !t.native) return others.find((o) => !o.native && o.run === t.under.run && o.id === t.under.id) || main;
+    if (t.under && !t.native) return others.find((o) => (!o.native || o.taskAgent) && o.run === t.under.run && o.id === t.under.id) || main;
     if (!t.native || t.parent === "orchestrator" || !t.parent) return main;
     const near = others.filter((o) => o !== t && o.id === t.parent && o.run === t.run);
     return near.find((o) => o.native) || near[0] || main;

@@ -1,9 +1,9 @@
 // The dashboard's state (/api/state): one section per launching session, holding its runs and every
 // session they launched as a tree, plus Claude Code sessions that started sub-agents without this
-// skill, and the headless agents that a skill's script started outside it (external.mjs). A task's
-// row lists the headless agents that its own shell started (`inner`). Each
-// section also lists its sessions that need attention, and flags the finished rows that
-// the page folds away by default (`older`). Built at most every 250 ms.
+// skill, and the headless agents that a skill's script started outside it (external.mjs). The headless
+// agents that a task's own shell started are rows under that task. Each section also lists its
+// sessions that need attention, and flags the finished rows that the page folds away by default
+// (`older`). Built at most every 250 ms.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -14,7 +14,7 @@ import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { reviveParked } from "./park.mjs";
-import { attemptAgent, isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
+import { isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
 
@@ -194,16 +194,22 @@ function boardIdle(run, tasks, ownsMain, idleMs) {
 // Rows the board folds away by default inside a section that stays: not running, not needing
 // attention, not the main session, and quiet for AGENT_ORCH_ROW_IDLE (1h). A row stays while any
 // row under it stays, so a folded row takes its whole subtree with it and the tree keeps its shape.
+// An agent that a task's shell started (`taskAgent`) stays while its task stays, so a task that is
+// shown never loses the agents it started; it folds with its task, unless it runs.
 // Every row carries `older`; the page shows a section's older rows again on request.
 function markOlder(rows, idleMs, now) {
   const kept = new Set(); // keys of rows with a row under them that stays
   const older = new Map();
   for (const t of [...rows].reverse()) {
+    const live = t.main || t.state === "running" || t.attention || kept.has(t.key);
+    if (t.taskAgent && !live) continue; // decided below, once its task is
     const quiet = !t.main && t.state !== "running" && !t.attention && now - (t.activeMs ?? t.lastActiveMs ?? 0) >= idleMs;
     const fold = quiet && !kept.has(t.key);
     older.set(t, fold);
     if (!fold && t.parentKey) kept.add(t.parentKey);
   }
+  const byKey = new Map(rows.map((t) => [t.key, t]));
+  for (const t of rows) if (!older.has(t)) older.set(t, older.get(byKey.get(t.parentKey)) ?? false);
   return rows.map((t) => ({ ...t, older: older.get(t) }));
 }
 
@@ -293,20 +299,10 @@ export function boardIds() {
   return shownIds;
 }
 
-// The headless agents that a task's own shell started, for its row (`inner`, oldest first, the newest
-// INNER_MAX; `innerOmitted` counts the rest). Each is matched to the attempt it started in (`attempt`),
-// so a resumed task does not take its earlier attempts' agents as its own. Their tokens stay out of the
-// task's own. While the task's own latest event is a tool call that has waited INNER_QUIET_MS for its
-// result, as when it runs a script that starts an agent, and an agent of its current attempt runs, the
-// row's activity is that agent's latest, after "inner: ". Any newer event of the task's own, such as
-// a message after it started a command in the background, means it is active itself: its own
-// activity shows. The page lists each agent's events in the task's details.
-const INNER_QUIET_MS = 30_000;
-const INNER_MAX = 8;
-
-// The attempt an agent started in: the latest one that had started by then, so one that starts after
-// an attempt ended and before the next began still goes with the earlier. `attempts` is the row's list
-// (newest first). An attempt whose start is not recorded starts where the one before it ended.
+// The attempt a task's agent started in: the latest one that had started by then, so one that starts
+// after an attempt ended and before the next began still goes with the earlier. `attempts` is the row's
+// list (newest first). An attempt whose start is not recorded starts where the one before it ended. A
+// resumed task does not take its earlier attempts' agents as its current attempt's own.
 function attemptAt(attempts, ms, fallback) {
   const list = [...(attempts || [])].sort((x, y) => x.n - y.n);
   let found = list[0]?.n ?? fallback;
@@ -320,61 +316,21 @@ function attemptAt(attempts, ms, fallback) {
   return found;
 }
 
-// Whether the last event in the task's own log is a tool call with no result yet: a Claude assistant
-// message that calls a tool, or a Codex item that has started. Read from the end of the file, once
-// per change of the file.
-const endMemo = new Map(); // events.jsonl path -> { mtimeMs, size, value }
-function endsOnToolCall(agent, file) {
-  let st;
-  try {
-    st = fs.statSync(file);
-  } catch {
-    return false;
-  }
-  const hit = endMemo.get(file);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value;
-  const lines = (tailText(file, 65_536) || "").split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  let value = false;
-  try {
-    const e = JSON.parse(lines.at(-1));
-    value = agent === "codex" ? e.type === "item.started" : e.type === "assistant" && (e.message?.content || []).some((b) => b.type === "tool_use");
-  } catch {
-    // An empty file, or a last line that is still being written: the task is active.
-  }
-  if (endMemo.size >= 500) endMemo.delete(endMemo.keys().next().value);
-  endMemo.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
-  return value;
-}
-
-function waitsOnTool(row, record) {
-  if (row.state !== "running" || row.phase === "parked" || !row.outDir || !record || !(row.quietMs >= INNER_QUIET_MS)) return false;
-  return endsOnToolCall(attemptAgent(record, record.attempt), path.join(row.outDir, "events.jsonl"));
-}
-
-function withInner(row, record, agents) {
-  if (!agents?.length) return row;
-  const inner = agents.slice(-INNER_MAX).map((x) => ({ ...innerAgent(x), attempt: attemptAt(row.attempts, x.startedMs, row.attempt) }));
-  const active = inner.filter((a) => a.attempt === row.attempt && a.state === "running").sort((a, b) => b.lastActiveMs - a.lastActiveMs)[0];
-  return {
-    ...row,
-    inner,
-    ...(agents.length > inner.length ? { innerOmitted: agents.length - inner.length } : {}),
-    now: active && waitsOnTool(row, record) ? `inner: ${active.now}` : row.now,
-  };
-}
+// Whether a task's own shell started the agent (AGENT_ORCH_RUN and AGENT_ORCH_TASK name the task).
+const startedByTask = (x) => Boolean(x.parent?.run && x.parent?.task);
 
 // A script of the user's skills or agent tooling, such as ~/.agents/code-review/codex_review.sh.
 const skillScript = (command) => Boolean(command) && (command.includes(`${HOME}/.agents/`) || command.includes(`${HOME}/.claude/`) || /[/\\]\.(claude|agents)[/\\]skills[/\\]/.test(command));
 
 // Headless agents that a command started outside the orchestrator (external.mjs). Only Codex and
-// Claude Opus agents that a skill's script started from a session are listed: one started from a
-// task's shell is that task's own work (a runner task that runs a review script, say), so the task's
-// row stands for it, and its details show the agent (innerOf below). The board row of a listed
-// agent, or null.
-function listedExternal(x) {
+// Claude Opus agents that a skill's script started from a session are listed, as rows of their own. One
+// started from a task's shell (AGENT_ORCH_RUN and AGENT_ORCH_TASK) is listed whatever its script or
+// model, as a row under that task, for as long as the task shows; `onBoard` holds the "run/task" keys
+// of the tasks that show. The board row of a listed agent, or null.
+function listedExternal(x, onBoard) {
   const p = x.parent || {};
-  if ((p.run && p.task) || !skillScript(x.launcher)) return null;
+  if (startedByTask(x)) return onBoard.has(`${p.run}/${p.task}`) ? innerAgent(x) : null;
+  if (!skillScript(x.launcher)) return null;
   const row = externalRow(x, x.name, null);
   return x.agent === "claude" && row.model && !/opus/.test(row.model) ? null : row;
 }
@@ -382,9 +338,13 @@ function listedExternal(x) {
 // Each listed agent goes under whoever ran the command: the task, sub-agent or outside agent on the board whose
 // shell it was (by the nearest session's variable); else the task named by AGENT_ORCH_RUN and
 // AGENT_ORCH_TASK; else the row of the other session variable; else that session's section,
-// created if needed; else one shared section.
-function placeExternal(externals, sections, sectionOf, sessionSection) {
-  if (!externals.length) return;
+// created if needed; else one shared section. An agent that a task's shell started always goes under
+// that task, and is marked with the task's attempt that started it (`taskAttempt`). A Claude agent of
+// that kind also takes its own Agent-tool sub-agents as rows under it (`subAgents(session, id, run)`).
+// Returns those agents' rows by session id, so the runs they launched can hang under them.
+function placeExternal(externals, sections, sectionOf, sessionSection, subAgents) {
+  const placedAgents = new Map();
+  if (!externals.length) return placedAgents;
   const hosts = new Map(); // session id -> [section, row], for every task and sub-agent on the board
   const tasks = new Map(); // "run/task" -> [section, row]
   for (const sec of sections.values()) {
@@ -400,8 +360,9 @@ function placeExternal(externals, sections, sectionOf, sessionSection) {
     const sessions = (p.nearest === "claude" ? [["claude", p.claude], ["codex", p.codex]] : [["codex", p.codex], ["claude", p.claude]]).filter(([, id]) => id);
     // The variable of the nearest session is set by the shell that ran the command, so it names the
     // launcher more closely than the inherited AGENT_ORCH_* variables.
-    const host = (p.nearest && sessions[0]?.[0] === p.nearest && hosts.get(sessions[0][1]))
-      || (p.run && p.task && tasks.get(`${p.run}/${p.task}`))
+    const ofTask = p.run && p.task ? tasks.get(`${p.run}/${p.task}`) : null;
+    const host = ofTask
+      || (p.nearest && sessions[0]?.[0] === p.nearest && hosts.get(sessions[0][1]))
       || sessions.map(([, id]) => hosts.get(id)).find(Boolean);
     let section, run, parent;
     if (host) [section, run, parent] = [host[0], host[1].run, host[1].id];
@@ -427,11 +388,16 @@ function placeExternal(externals, sections, sectionOf, sessionSection) {
     const ids = new Set(section.rows.filter((t) => t.run === run).map((t) => t.id));
     let id = x.name;
     for (let n = 2; ids.has(id); n++) id = `${x.name.slice(0, 25)}-${n}`;
-    const placed = { ...row, id, parent, run, attention: null };
+    const placed = { ...row, id, parent, run, attention: null, ...(ofTask ? { taskAgent: true, taskAttempt: attemptAt(ofTask[1].attempts, x.startedMs, ofTask[1].attempt) } : {}) };
     section.rows.push(placed);
+    if (ofTask) {
+      placedAgents.set(x.sessionId, placed);
+      if (x.agent === "claude") section.rows.push(...subAgents(x.sessionId, id, run));
+    }
     // An agent that this one's shell starts goes under it (they come oldest first).
     hosts.set(x.sessionId, [section, placed]);
   }
+  return placedAgents;
 }
 
 export function buildDashboardState() {
@@ -443,22 +409,27 @@ export function buildDashboardState() {
   reviewStaleMs(); // attentionOf reads it per row; reading it here checks it on every build
   const runs = listRuns();
   // Headless agents found outside the orchestrator. Those that a task's shell started are kept for
-  // as long as the task shows, however long ago they ended; "run/task" -> its agents, oldest first.
-  const outside = externalAgents(now - idleMs, (x) => Boolean(x.parent?.run && x.parent?.task));
-  const innerOf = new Map();
-  for (const x of outside) {
-    if (!x.parent?.run || !x.parent?.task) continue;
-    const key = `${x.parent.run}/${x.parent.task}`;
-    innerOf.set(key, [...(innerOf.get(key) || []), x]);
-  }
+  // as long as the task shows, however long ago they ended.
+  const outside = externalAgents(now - idleMs, startedByTask);
   const newestOfSession = new Map();
   for (const run of runs) if (run.orchestrator?.sessionId && !newestOfSession.has(run.orchestrator.sessionId)) newestOfSession.set(run.orchestrator.sessionId, run.id);
   // One section per launching session: its runs (newest first, as listRuns returns them) share it.
   const sections = new Map();
   const byId = new Map(runs.map((r) => [r.id, r]));
+  // An agent that a task's shell started can launch runs of its own, as their orchestrator session. Those
+  // runs hang under the agent's row, as a nested run hangs under the task that started it: the task
+  // whose shell started the agent, {run, task}, or null for any other run.
+  const startedAgents = new Map(); // session id -> {run, task}
+  for (const x of outside) if (startedByTask(x) && !startedAgents.has(x.sessionId)) startedAgents.set(x.sessionId, x.parent);
+  const agentHostOf = (run) => {
+    const o = run.orchestrator;
+    const host = !o?.parentRun && o?.sessionId ? startedAgents.get(o.sessionId) : null;
+    return host && byId.has(host.run) ? { run: host.run, task: host.task } : null;
+  };
+  const nestedIn = (r) => r.orchestrator?.parentRun || agentHostOf(r)?.run;
   const rootOf = (run) => {
     let r = run;
-    for (let hops = 0; r.orchestrator?.parentRun && byId.has(r.orchestrator.parentRun) && hops < 10; hops++) r = byId.get(r.orchestrator.parentRun);
+    for (let hops = 0; nestedIn(r) && byId.has(nestedIn(r)) && hops < 10; hops++) r = byId.get(nestedIn(r));
     return r;
   };
   const sectionOf = (run) => {
@@ -497,7 +468,9 @@ export function buildDashboardState() {
     const described = listTasks(run);
     reviveParked(run, described); // a parked task whose watcher is not running gets a new one
     const main = mainRow(run);
-    const natives = listNative(run, described, runs);
+    // The sub-agents of an agent that launched this run are rows under that agent's row, not under a main row.
+    const agentHost = agentHostOf(run);
+    const natives = listNative(run, described, runs).filter((t) => !(agentHost && t.parent === "orchestrator"));
     if (boardIdle(run, [...(main ? [main] : []), ...described, ...natives], ownsMain, idleMs)) {
       idleRuns.set(run.id, { stamp, checkedMs: now });
       continue;
@@ -506,27 +479,41 @@ export function buildDashboardState() {
     counted += 1;
     const section = sectionOf(run);
     section.runs.push(run);
-    section.main ||= main;
-    // A nested run's tasks hang under the task that started the run. A task that never ran dates
-    // from when it was prepared (`activeMs`, which markOlder reads and the board leaves out).
-    const p = run.orchestrator?.parentRun && run.orchestrator.parentTask ? { run: run.orchestrator.parentRun, id: run.orchestrator.parentTask } : null;
+    if (!agentHost) section.main ||= main;
+    // A nested run's tasks hang under the task that started the run, or under the row of the agent that
+    // launched it (`session` names the agent; its row is found once the agents are placed, below). A
+    // task that never ran dates from when it was prepared (`activeMs`, which markOlder reads and the
+    // board leaves out).
+    const p = run.orchestrator?.parentRun && run.orchestrator.parentTask ? { run: run.orchestrator.parentRun, id: run.orchestrator.parentTask }
+      : agentHost ? { run: agentHost.run, id: agentHost.task, session: run.orchestrator.sessionId } : null;
     const records = new Map(described.map((t) => [t.id, loadTask(run, t.id)]));
     section.rows.push(
       ...described.map((d) => {
         const record = records.get(d.id);
-        const t = withInner(d, record, innerOf.get(`${run.id}/${d.id}`));
-        return { ...t, run: run.id, under: p, attention: addressed(run, record, t, attentionOf(t, Boolean(record?.closedAt), now), now, table()), activeMs: t.lastActiveMs || Date.parse(record?.createdAt) || 0 };
+        return { ...d, run: run.id, under: p, attention: addressed(run, record, d, attentionOf(d, Boolean(record?.closedAt), now), now, table()), activeMs: d.lastActiveMs || Date.parse(record?.createdAt) || 0 };
       }),
       ...natives.map((t) => ({ ...t, run: run.id, attention: addressed(run, null, t, attentionOf(t, t.closed, now), now, table()) })),
     );
   }
   // Claude Code sessions whose sub-agents ran within AGENT_ORCH_BOARD_IDLE without this skill: each
   // gets a section of its own. Sessions already shown, as a run's main session or task, are skipped.
-  const known = new Set(runs.map((r) => r.orchestrator?.sessionId).filter(Boolean));
-  for (const sec of sections.values()) for (const t of sec.rows) if (t.session && !t.native) known.add(t.session);
-  // Only listed agents count as shown, so a hidden one's session keeps its own section.
-  const externals = outside.filter((x) => !known.has(x.sessionId)).map((x) => ({ ...x, row: listedExternal(x) })).filter((x) => x.row);
-  for (const x of externals) known.add(x.sessionId); // shown under whoever started it, below
+  const taskSessions = new Set();
+  const onBoard = new Set();
+  for (const sec of sections.values()) {
+    for (const t of sec.rows) {
+      if (t.session && !t.native) taskSessions.add(t.session);
+      if (!t.native) onBoard.add(`${t.run}/${t.id}`);
+    }
+  }
+  const known = new Set([...runs.map((r) => r.orchestrator?.sessionId).filter(Boolean), ...taskSessions]);
+  // Only listed agents count as shown, so a hidden one's session keeps its own section. An agent that a
+  // task's shell started is shown even when it launched a run (its session is that run's orchestrator
+  // session): the run hangs under its row.
+  const externals = outside.filter((x) => !(startedByTask(x) ? taskSessions : known).has(x.sessionId))
+    .map((x) => ({ ...x, row: listedExternal(x, onBoard) })).filter((x) => x.row);
+  // Shown under whoever started it, below. An agent that a task's shell started shows once, as that row:
+  // its own sub-agents go under it too, and its session gets no section of its own.
+  for (const x of externals) known.add(x.sessionId);
   // A section for a session that launched no run, headed by the session's own row. Without its
   // transcript there is no such row: then null, unless `always`.
   const sessionSection = (agent, sessionId, firstMs, always = false) => {
@@ -546,13 +533,23 @@ export function buildDashboardState() {
     const section = sessionSection("claude", c.sessionId, c.firstMs, true);
     section.rows.push(...claudeNativeAgents(c.sessionId, "orchestrator").map((t) => ({ ...t, run: section.runs[0].id, attention: addressed(section.runs[0], null, t, attentionOf(t, t.closed, now), now, table()) })));
   }
-  placeExternal(externals, sections, sectionOf, sessionSection);
+  const subAgents = (sessionId, parent, run) => claudeNativeAgents(sessionId, parent)
+    .map((t) => ({ ...t, run, attention: addressed(byId.get(run), null, t, attentionOf(t, t.closed, now), now, table()) }));
+  const agentRows = placeExternal(externals, sections, sectionOf, sessionSection, subAgents);
+  // A run that such an agent launched hangs under the agent's row; if the row is not on the board, under its task.
+  for (const sec of sections.values()) {
+    sec.rows = sec.rows.map((t) => {
+      if (!t.under?.session) return t;
+      const agent = agentRows.get(t.under.session);
+      return { ...t, under: agent ? { run: agent.run, id: agent.id } : { run: t.under.run, id: t.under.id } };
+    });
+  }
   const shown = [...sections.values()].map(({ id, runs: secRuns, main, rows }) => {
-    const newest = secRuns.find((r) => !r.orchestrator?.parentRun) || secRuns[0];
+    const newest = secRuns.find((r) => !nestedIn(r)) || secRuns[0];
     const tasks = markOlder(treeOrder([...(main ? [{ ...main, attention: null }] : []), ...rows]), rowIdle, now).map(boardRow);
     const work = tasks.filter((t) => !t.main);
-    // `parent` names the task that started a nested run.
-    const parentOf = (r) => (r.orchestrator?.parentRun && r.orchestrator.parentTask ? { run: r.orchestrator.parentRun, task: r.orchestrator.parentTask } : null);
+    // `parent` names the task that started a nested run, or whose shell started the agent that launched it.
+    const parentOf = (r) => (r.orchestrator?.parentRun && r.orchestrator.parentTask ? { run: r.orchestrator.parentRun, task: r.orchestrator.parentTask } : agentHostOf(r));
     return {
       ...newest,
       id,
