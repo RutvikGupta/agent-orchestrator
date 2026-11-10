@@ -20,6 +20,10 @@ async function configuration(f, includes = '', ignores = '.env*\ncache/\nnode_mo
   await f.git(['add', '.gitignore', '.worktreeinclude']);
   await f.git(['commit', '-qm', 'Prep configuration']);
 }
+function closed(f, run, id) {
+  const file = f.taskFile(run, id);
+  writeJson(file, { ...readJson(file), closedAt: new Date().toISOString(), closedExplicitlyAttempt: 0 });
+}
 function recipes(f, value, name = 'recipe.json') {
   const dir = path.join(f.root, 'recipes');
   writeJson(path.join(dir, name), value);
@@ -32,6 +36,7 @@ test('include patterns copy only ignored files, with gitignore glob, negation an
   for (const name of ['.env', '.env.dev', 'cache/deep/file', 'cache/exclude.local', 'a/nested.local', 'skip.local', 'untracked.txt']) put(f.repo, name);
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'include']);
+  closed(f, run, 'include');
   for (const name of ['.env', '.env.dev', 'cache/deep/file', 'a/nested.local']) assert.equal(fs.readFileSync(path.join(wt.path, name), 'utf8'), name);
   for (const name of ['cache/exclude.local', 'skip.local', 'untracked.txt']) assert.equal(fs.existsSync(path.join(wt.path, name)), false);
   assert.equal(fs.readFileSync(path.join(wt.path, 'README.md'), 'utf8'), 'Temporary fixture repository.\n');
@@ -56,6 +61,7 @@ test('absolute recipe beats basename; symlinks, commands, environment and teardo
   const result = await f.command(['worktree', run.id, 'recipe'], { env });
   assert.match(result.stdout, /1 copied, 1 symlinked/); assert.match(result.stdout, /setup failed \(7\)/);
   const wt = readJson(f.taskFile(run, 'recipe')).worktree;
+  closed(f, run, 'recipe');
   assert.deepEqual(wt.prep.symlinked, ['node_modules']);
   assert.equal(fs.readlinkSync(path.join(wt.path, 'node_modules')), path.join(f.repo, 'node_modules'));
   assert.equal(wt.prep.notes, 'Run local gates here');
@@ -102,6 +108,7 @@ test('cleanup keeps modified files and unrelated untracked files; teardown waits
   const env = recipes(f, { match: f.repo, teardown: ['touch "$ORCH_REPO/teardown.local"'] });
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'dirty'], { env });
+  closed(f, run, 'dirty');
   put(wt.path, 'untracked.txt', 'keep');
   assert.match((await f.command(['cleanup', run.id])).stdout, /skip dirty: uncommitted/);
   assert.equal(fs.existsSync(path.join(f.repo, 'teardown.local')), false);
@@ -109,6 +116,10 @@ test('cleanup keeps modified files and unrelated untracked files; teardown waits
   put(wt.path, 'README.md', 'changed');
   assert.match((await f.command(['cleanup', run.id])).stdout, /skip dirty: uncommitted/);
   await f.command(['cleanup', run.id, '--force']);
+  assert.equal(fs.existsSync(wt.path), true);
+  assert.equal(fs.existsSync(path.join(f.repo, 'teardown.local')), false);
+  await f.git(['-C', wt.path, 'restore', 'README.md']);
+  await f.command(['cleanup', run.id]);
   assert.equal(fs.existsSync(wt.path), false);
   assert.equal(fs.existsSync(path.join(f.repo, 'teardown.local')), true);
 });
@@ -121,9 +132,11 @@ test('cleanup keeps an untracked replacement when prep exclusions have been remo
   const env = recipes(f, { match: f.repo, symlink: ['vendor/'] });
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'links'], { env });
+  closed(f, run, 'links');
   // Prep makes the symlink ignored even though the directory-only pattern does not.
   await f.command(['cleanup', run.id]); assert.equal(fs.existsSync(wt.path), false);
   const replaced = await f.json(['worktree', run.id, 'replaced'], { env });
+  closed(f, run, 'replaced');
   fs.unlinkSync(path.join(replaced.path, 'vendor'));
   put(replaced.path, 'vendor', 'user file');
   // Exercise the untracked fallback used by worktrees without prep's exclusion.
@@ -219,6 +232,7 @@ test('cleanup removes gate caches and ignored build output without force', async
   await configuration(f, '', 'build/\n.venv/\n');
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'gates']);
+  closed(f, run, 'gates');
   for (const name of ['__pycache__/x.pyc', '.pytest_cache/results', 'node_modules/pkg/file', 'build/output.js', '.venv/bin/python']) put(wt.path, name);
   const result = await f.command(['cleanup', run.id]);
   assert.match(result.stdout, /removed worktree/);
@@ -439,6 +453,7 @@ test('regression: port selection skips an IPv4 loopback listener', async (t) => 
   const env = recipes(f, { match: f.repo, port: true });
   const run = await f.newRun();
   const first = await f.json(['worktree', run.id, 'loopback'], { env });
+  closed(f, run, 'loopback');
   const port = first.prep.port;
   await f.command(['cleanup', run.id]);
   const server = net.createServer();

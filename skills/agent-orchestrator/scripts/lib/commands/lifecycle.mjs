@@ -1,3 +1,4 @@
+import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
 // `plan`, `dispatch`, `accept`, `integrate`, and `recover`: record the run's plan, start its tasks as
 // their prerequisites land, mark reviewed results accepted, merge them, and rebuild the picture
 // after the orchestrator restarts.
@@ -445,8 +446,8 @@ export function cmdAccept(args) {
     // Accepting overrides an earlier `reject` of this attempt; reviews.jsonl keeps that round.
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
-  // A different commit or attempt is new work, which no earlier integration covers.
-  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt)) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
+  // A different commit, attempt or restored folder needs integration confirmed again.
+  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt || Date.parse(task.worktree?.restoredAt) > Date.parse(task.integratedAt))) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
   saveTask(run, accepted);
   recordChange(run, g, { task: id, attempt, action: "accepted" });
   reclaimTask(run, task);
@@ -463,6 +464,7 @@ export function cmdAccept(args) {
 // it once `cleanup` removed the worktree. Null when the task ran in a checkout without its own branch.
 function taskBranch(run, task) {
   if (task.worktree?.branch) return task.worktree.branch;
+  if (task.removedWorktree?.branch) return task.removedWorktree.branch;
   const own = `orch/${run.id}/${task.id}`;
   return gitOk(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${own}`]) ? own : null;
 }
@@ -472,7 +474,7 @@ function mergeGoal(run, task) {
   return String(entry?.goal || task.title || "").replace(/\s+/g, " ").trim();
 }
 
-export function cmdIntegrate(args) {
+export async function cmdIntegrate(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
@@ -485,7 +487,8 @@ export function cmdIntegrate(args) {
     const text = task.integratedAt
       ? `task ${id} is already integrated (${short(task.integratedCommit)})`
       : `task ${id} is read-only and its result was collected, so it already counts as integrated`;
-    emit(args, { id, integrated: true, integratedCommit: task.integratedCommit || null }, text);
+    const cleanup = dryRun ? null : await collectWorktrees(run, { tasks: [id], actor: g.actor });
+    emit(args, { id, integrated: true, integratedCommit: task.integratedCommit || null, cleanup }, text + (cleanup ? `\n${collectionText(cleanup)}` : ''));
     return;
   }
   if (row.phase !== "accepted") die(`task ${id} is ${row.phase}, not accepted: review its result, commit its work on its branch, then run: ${CLI} accept ${run.id} ${id}`);
@@ -497,17 +500,18 @@ export function cmdIntegrate(args) {
   if (!run.isGit) die("the run's repository is not a git repository");
   const target = args.into || run.baseBranch || die("the run started on a detached HEAD, so it has no base branch; pass --into BRANCH", 2);
   const targetHead = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
-  const record = (commit, text) => {
+  const record = async (commit, text) => {
     if (!dryRun) {
       saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedInto: target, integratedBy: g.actor });
       recordChange(run, g, { task: id, attempt: task.attempt || null, action: "integrated" });
       reclaimTask(run, task);
     }
+    const cleanup = dryRun ? null : await collectWorktrees(run, { tasks: [id], actor: g.actor });
     const ready = dryRun ? [] : readyAfter(run, id);
     emit(
       args,
-      { id, dryRun, into: target, integratedCommit: commit, ready },
-      `${text}${ready.length ? `\nready to dispatch now: ${ready.join(", ")}\nnext: ${CLI} dispatch ${run.id}` : ""}`,
+      { id, dryRun, into: target, integratedCommit: commit, ready, cleanup },
+      `${text}${cleanup ? `\n${collectionText(cleanup)}` : ""}${ready.length ? `\nready to dispatch now: ${ready.join(", ")}\nnext: ${CLI} dispatch ${run.id}` : ""}`,
     );
   };
 

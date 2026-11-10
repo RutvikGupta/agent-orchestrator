@@ -217,6 +217,9 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
   assert.equal(await f.git(['rev-parse', 'HEAD']), mainHead);
   const merged = await f.command(['integrate', run.id, 'api']);
   assert.match(merged.stdout, /integrated api: merged .* into main at/);
+  assert.match(merged.stdout, /removed worktree/);
+  assert.equal(fs.existsSync(api.cd), false);
+  assert.equal(await f.git(['rev-parse', api.worktree.branch]), head);
   assert.match(merged.stdout, /ready to dispatch now: ui/);
   const mergeHead = await f.git(['rev-parse', 'HEAD']);
   assert.notEqual(mergeHead, mainHead);
