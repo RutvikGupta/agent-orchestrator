@@ -46,6 +46,7 @@ export const GUARDED_COMMANDS = {
   start: { self: true }, stop: { self: true }, close: { self: true }, cleanup: { self: true },
   accept: { self: true }, verdict: { self: true }, resolve: { self: true }, steer: { self: true },
   dispatch: { self: true, open: (a) => a["dry-run"] },
+  gc: { self: true, open: (a) => a["dry-run"] },
   integrate: { self: true, open: (a) => a["dry-run"] },
   send: { self: true, open: (a) => !a.steer },
   plan: { self: true, open: (a) => a.check },

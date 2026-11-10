@@ -1,3 +1,4 @@
+import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
 // `result`, `log`, `stop`, and `close`: read, stop, and close one run's tasks.
 
 import { reclaimTask } from "../reclaim.mjs";
@@ -175,7 +176,7 @@ export function cmdStop(args) {
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark
 // them closed. A run has one owner, so a refused close closes none of them and lists them all.
-export function cmdClose(args) {
+export async function cmdClose(args) {
   const run = loadRun(args._[0]);
   const rows = args.all ? listTasks(run) : null;
   const ids = rows ? rows.map((t) => t.id) : args._.slice(1).map(validTask);
@@ -192,7 +193,10 @@ export function cmdClose(args) {
     // The owner hears of a task that was open; one it had closed already changed nothing.
     if (!task.closedAt) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
-  emit(args, { run: run.id, closed: ids }, lines.join("\n"));
+  const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
+  const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
+  if (cleanup) lines.push(collectionText(cleanup));
+  emit(args, { run: run.id, closed: ids, cleanup }, lines.join("\n"));
 }
 
 // Close one task: stop it if it still runs, and record closedAt, plus `extra` fields (closedBy, the

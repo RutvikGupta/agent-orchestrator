@@ -13,6 +13,7 @@
 import { STATE_ROOT } from "./lib/config.mjs";
 import { gateCommand } from "./lib/ownership.mjs";
 import { die, parseArgs } from "./lib/util.mjs";
+import { cmdGc } from "./lib/commands/gc.mjs";
 import { cmdHeavy } from "./lib/commands/heavy.mjs";
 import { cmdReclaim } from "./lib/commands/reclaim.mjs";
 import { cmdAgents } from "./lib/commands/agents.mjs";
@@ -190,8 +191,14 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Stop any of these tasks that still run, and mark them closed.
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
-  cleanup RUN [--force] [--delete-branches]
-                                  Remove the run's worktrees (dirty ones only with --force)
+  cleanup RUN                    Remove only closed (or accepted and integrated), clean worktrees
+                                  whose commits remain on kept branches. Never deletes branches.
+  gc [--dry-run] [--older-than DUR] [--json]
+                                  Collect owned runs with no running task and no activity for
+                                  24h (override with --older-than, e.g. 7d). Dry runs change nothing.
+                                  Unread, unaccepted finished tasks expire after AGENT_ORCH_EXPIRE
+                                  (default 7d). Reports removed/kept worktrees and disk bytes freed.
+                                  close cleans after the last open task; integrate cleans its task.
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d)
   pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
@@ -229,6 +236,7 @@ const specs = {
   log: { value: ["lines"] },
   stop: { bool: ["adopt"] },
   close: { bool: ["all", "adopt"] },
+  gc: { value: ["older-than"], bool: ["dry-run"] },
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },
@@ -267,6 +275,7 @@ const handlers = {
   stop: cmdStop,
   close: cmdClose,
   cleanup: cmdCleanup,
+  gc: cmdGc,
   runs: cmdRuns,
   stats: cmdStats,
   "pr-watch": cmdPrWatch,

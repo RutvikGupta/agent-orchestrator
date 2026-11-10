@@ -1,6 +1,6 @@
 // `new`, `worktree`, `runs`, and `cleanup`: create a run and its worktrees, list runs, and clean up.
 
-import { reclaimTask } from "../reclaim.mjs";
+import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
@@ -9,7 +9,7 @@ import { guard, recordChange } from "../ownership.mjs";
 import { detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { totals } from "../views.mjs";
-import { prepareWorktree, prepSummary, teardownWorktree, worktreeChanges } from "../worktree-prep.mjs";
+import { prepareWorktree, prepSummary } from "../worktree-prep.mjs";
 
 export function cmdNew(args) {
   const repo = path.resolve(args.repo || process.cwd());
@@ -100,42 +100,8 @@ export async function cmdCleanup(args) {
     adopt: args.adopt,
     refused: () => rows.filter((t) => loadTask(run, t.id)?.worktree).map((t) => `${t.id}'s worktree`),
   });
-  const report = [];
-  for (const t of rows) {
-    const task = loadTask(run, t.id);
-    if (!task?.worktree) continue;
-    const { path: wt, branch } = task.worktree;
-    if (t.state === "running") {
-      report.push(`skip ${t.id}: still running`);
-      continue;
-    }
-    if (fs.existsSync(wt)) {
-      const dirty = worktreeChanges(wt, task.worktree.prep, run.repo);
-      if (dirty.length && !args.force) {
-        report.push(`skip ${t.id}: uncommitted changes in ${wt} (commit them, or pass --force to discard):\n  ${dirty.join("\n  ")}`);
-        continue;
-      }
-      const teardown = await teardownWorktree(run, task);
-      for (const result of teardown) {
-        if (result.exitCode !== 0) report.push(`teardown ${t.id} failed (${result.exitCode ?? result.signal}): ${result.command}\n${result.output}`);
-      }
-      reclaimTask(run, task);
-      // Teardown can leave artifacts, so force removal after the pre-teardown dirty check.
-      // git refuses to remove a worktree with untracked files, caches included.
-      git(run.repo, ["worktree", "remove", "--force", wt]);
-      report.push(`removed worktree ${wt}`);
-      task.worktreeRemovedBy = g.actor;
-      recordChange(run, g, { task: t.id, attempt: task.attempt || null, action: "worktree removed" });
-    }
-    if (args["delete-branches"]) {
-      const deleted = git(run.repo, ["branch", args.force ? "-D" : "-d", branch], { allowFail: true });
-      report.push(deleted === null ? `kept branch ${branch} (not merged; -D needs --force)` : `deleted branch ${branch}`);
-    }
-    delete task.worktree;
-    saveTask(run, task);
-  }
-  git(run.repo, ["worktree", "prune"], { allowFail: true });
-  process.stdout.write(`${report.length ? report.join("\n") : "nothing to clean"}\n`);
+  const report = await collectWorktrees(run, { actor: g.actor });
+  emit(args, report, `${args.force || args["delete-branches"] ? "Safety checks cannot be overridden; branches are always kept.\n" : ""}${collectionText(report)}`);
 }
 
 export function cmdRuns(args) {

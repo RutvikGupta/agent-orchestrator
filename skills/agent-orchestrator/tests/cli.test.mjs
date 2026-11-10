@@ -27,10 +27,10 @@ test('new records the repository and worktree prepares an isolated branch', asyn
   await f.command(['result', run.id, 'writer']);
   const cleaned = await f.command(['cleanup', run.id, '--delete-branches']);
   assert.match(cleaned.stdout, /removed worktree/);
-  assert.match(cleaned.stdout, /deleted branch/);
+  assert.match(cleaned.stdout, /branch kept/);
   assert.equal(fs.existsSync(wt.path), false);
   assert.equal(readJson(f.taskFile(run, 'writer')).worktree, undefined);
-  assert.equal(await f.git(['branch', '--list', wt.branch]), '');
+  assert.ok(await f.git(['branch', '--list', wt.branch]));
 });
 
 for (const agent of ['claude', 'codex']) {
@@ -220,15 +220,17 @@ test('nested depth 1 defaults to six slots; depth 4 refuses to start', async (t)
   await f.command(['close', run.id, '--all']);
 });
 
-test('cleanup preserves dirty worktrees, then removes them when forced', async (t) => {
+test('cleanup preserves dirty worktrees even when forced', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   const wt = await f.json(['worktree', run.id, 'dirty']);
   fs.writeFileSync(path.join(wt.path, 'important.txt'), 'Uncommitted fixture work.');
+  await f.command(['close', run.id, 'dirty']);
   const skipped = await f.command(['cleanup', run.id]);
   assert.match(skipped.stdout, /skip dirty: uncommitted changes/);
   assert.equal(fs.readFileSync(path.join(wt.path, 'important.txt'), 'utf8'), 'Uncommitted fixture work.');
   assert.ok(readJson(f.taskFile(run, 'dirty')).worktree);
   await f.command(['cleanup', run.id, '--force', '--delete-branches']);
-  assert.equal(fs.existsSync(wt.path), false);
+  assert.equal(fs.existsSync(wt.path), true);
+  assert.ok(await f.git(['branch', '--list', wt.branch]));
 });
