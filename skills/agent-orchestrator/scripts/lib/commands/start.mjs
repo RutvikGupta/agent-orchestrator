@@ -13,8 +13,8 @@ import { reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, ModelRefused, modelFor, tierOrder } from "../policy.mjs";
-import { describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
+import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, modelFor, tierOrder } from "../policy.mjs";
+import { commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
@@ -70,6 +70,29 @@ export function cmdStart(args) {
   }
 }
 
+// The relay of a command task: it runs the command with no model (scripts/command-relay.mjs).
+const COMMAND_RELAY = path.join(SKILL_DIR, "scripts", "command-relay.mjs");
+// The options a command task has no use for: it has no brief, sandbox or pull request. The model
+// policy refuses --tier, --model and --effort for it (policy.mjs).
+const NOT_FOR_COMMANDS = ["brief", "babysit", "pr", "sandbox", "confine", "offline", "no-publish"];
+const DURATION = /^\d+(?:\.\d+)?(?:ms|s|m|h)?$/;
+
+// A command task's command and its options, checked: { argv, done, timeout, reused }. Started
+// again without a command after `--`, it re-runs the previous attempt's command, with that
+// attempt's --done and --timeout unless new ones are given.
+function commandOf(args, prev) {
+  const given = NOT_FOR_COMMANDS.filter((name) => args[name] !== undefined && args[name] !== false);
+  if (given.length) refuse(`a command task has no brief, sandbox or pull request: drop ${given.map((name) => `--${name}`).join(", ")}`, 2);
+  const reused = !args.passthrough.length;
+  const argv = reused ? (prev.agent === COMMAND_AGENT && Array.isArray(prev.command) ? prev.command : null) : args.passthrough;
+  if (!argv?.length || !argv[0]) refuse("give the command after --: start RUN TASK --agent command --why TEXT -- COMMAND [ARG...]", 2);
+  const done = args.done ?? (reused ? prev.doneMarker ?? null : null);
+  if (done !== null && !String(done).trim()) refuse("--done needs a marker: text the command prints when it has done its work", 2);
+  const timeout = args.timeout ?? (reused ? prev.commandTimeout ?? null : null);
+  if (timeout !== null && !DURATION.test(String(timeout).trim())) refuse(`bad --timeout "${timeout}" (use e.g. 90s, 10m, 2h)`, 2);
+  return { argv, done, timeout, reused };
+}
+
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
 // record in the task, such as its plan entry. Returns the saved task and the text `start` prints.
 export function startTask(args, extra = {}) {
@@ -79,7 +102,9 @@ export function startTask(args, extra = {}) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
-  if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")})`, 2);
+  if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
+  if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
+  if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
   if (!args.brief) refuse("--brief FILE is required", 2);
   const briefSource = path.resolve(args.brief);
   if (!fs.existsSync(briefSource) || !fs.readFileSync(briefSource, "utf8").trim()) refuse(`brief is missing or empty: ${briefSource}`, 2);
@@ -147,37 +172,8 @@ export function startTask(args, extra = {}) {
     refuse(`--why is required: one line on why your assessment of this task picked ${key}${tier ? ` at the ${tier} tier` : ""} (see SKILL.md, "Choose the agent and model")`, 2);
   const sharesRepo = !prev.worktree && path.resolve(cd) === path.resolve(run.repo);
 
-  let rows = listTasks(run);
-  // A revive may adopt a relay that a dead resume left running: then look again before counting.
-  if (reviveParked(run, rows.filter((t) => t.id !== id)).length) rows = listTasks(run);
-  // A parked babysitter holds no agent, so it leaves its slot free; it still owns its checkout,
-  // where only its own resume may write.
-  const running = rows.filter((t) => t.state === "running" && t.phase !== "parked");
-  const limit = Number(args["max-parallel"] || parallelAt(DEPTH));
-  if (running.length >= limit && !args.force) {
-    refuse(`${running.length} tasks already running (limit ${limit}); wait for one, or pass --force`);
-  }
-  const writersHere = rows.filter((t) => t.state === "running" && t.id !== id && (t.mode.startsWith("write") || t.mode.startsWith("babysit")) && path.resolve(t.cd || "") === cd);
-  if (!args["read-only"] && writersHere.length && !args.force) {
-    refuse(`task ${writersHere[0].id} is already writing in ${cd}; give this task its own worktree, or pass --force`);
-  }
-
-  // Read local settings before creating attempt artifacts. A broken optional file must
-  // not prevent work, and it cannot change the orchestrator's identity or execution setup.
-  const envFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "agent-orchestrator", "agent-env.json");
-  let agentEnv = {};
-  try {
-    const values = JSON.parse(fs.readFileSync(envFile, "utf8"));
-    if (!values || Array.isArray(values) || typeof values !== "object" || Object.entries(values).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !["string", "number", "boolean"].includes(typeof value) || String(value).includes("\0"))) throw new Error("expected a flat object of environment values");
-    const reserved = new Set(["XDG_STATE_HOME", "HOME", "PATH", "NODE_OPTIONS"]);
-    for (const [key, value] of Object.entries(values)) {
-      if (key.startsWith("AGENT_ORCH_") || reserved.has(key)) process.stderr.write(`orch: ignoring reserved agent environment key ${key}\n`);
-      else agentEnv[key] = String(value);
-    }
-  } catch (error) {
-    agentEnv = {};
-    if (error.code !== "ENOENT") process.stderr.write(`orch: ignoring agent environment ${envFile}: ${error instanceof SyntaxError ? "invalid JSON" : error.message}\n`);
-  }
+  checkSlots(run, id, args, cd, { writes: !args["read-only"] });
+  const agentEnv = readAgentEnv();
 
   // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
   // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
@@ -268,35 +264,16 @@ export function startTask(args, extra = {}) {
       refuse(`task ${id} was ${latest.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
     }
   }
-  const logPath = path.join(outDir, "relay.log");
-  let log = null;
   let child;
   try {
-    log = fs.openSync(logPath, "a");
-    child = spawn(process.execPath, [relay, ...relayArgs], {
-      cwd: cd,
-      detached: true,
-      stdio: ["ignore", log, log],
-      env: {
-        ...process.env,
-        ...agentEnv,
-        ...(net.httpsGit ? gitHttpsEnv(process.env) : {}),
-        AGENT_ORCH_HEAVY_ACTIVE: undefined, // A new agent needs its own heavy admissions.
-        AGENT_ORCH_DEPTH: String(DEPTH + 1),
-        AGENT_ORCH_RUN: run.id,
-        AGENT_ORCH_TASK: id,
-      },
-    });
+    child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
   } catch (error) {
-    if (log !== null) fs.closeSync(log);
     parkClaim?.release();
     throw error;
   }
   task.pid = child.pid;
   // First of all, record the relay: a resume that dies now leaves it for the next claimant to adopt.
   parkClaim?.spawned?.(task);
-  child.unref();
-  fs.closeSync(log);
   // A resume never clears a close or stop that came while it started.
   if (parkClaim) Object.assign(task, keptEnd(loadTask(run, id)));
   saveTask(run, task);
@@ -309,5 +286,155 @@ export function startTask(args, extra = {}) {
   return {
     task,
     text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${child.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
+  };
+}
+
+// Refuse a start when the run has no free slot, or when `writes` and another task already writes
+// in `cd`; --force overrides both.
+function checkSlots(run, id, args, cd, { writes }) {
+  let rows = listTasks(run);
+  // A revive may adopt a relay that a dead resume left running: then look again before counting.
+  if (reviveParked(run, rows.filter((t) => t.id !== id)).length) rows = listTasks(run);
+  // A parked babysitter holds no agent, so it leaves its slot free; it still owns its checkout,
+  // where only its own resume may write.
+  const running = rows.filter((t) => t.state === "running" && t.phase !== "parked");
+  const limit = Number(args["max-parallel"] || parallelAt(DEPTH));
+  if (running.length >= limit && !args.force) {
+    refuse(`${running.length} tasks already running (limit ${limit}); wait for one, or pass --force`);
+  }
+  const writersHere = rows.filter((t) => t.state === "running" && t.id !== id && (t.mode.startsWith("write") || t.mode.startsWith("babysit")) && path.resolve(t.cd || "") === cd);
+  if (writes && writersHere.length && !args.force) {
+    refuse(`task ${writersHere[0].id} is already writing in ${cd}; give this task its own worktree, or pass --force`);
+  }
+}
+
+// The user's extra environment for agents (agent-env.json), read before creating attempt
+// artifacts. A broken optional file must not prevent work, and it cannot change the
+// orchestrator's identity or execution setup.
+function readAgentEnv() {
+  const envFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "agent-orchestrator", "agent-env.json");
+  const agentEnv = {};
+  try {
+    const values = JSON.parse(fs.readFileSync(envFile, "utf8"));
+    if (!values || Array.isArray(values) || typeof values !== "object" || Object.entries(values).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !["string", "number", "boolean"].includes(typeof value) || String(value).includes("\0"))) throw new Error("expected a flat object of environment values");
+    const reserved = new Set(["XDG_STATE_HOME", "HOME", "PATH", "NODE_OPTIONS"]);
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith("AGENT_ORCH_") || reserved.has(key)) process.stderr.write(`orch: ignoring reserved agent environment key ${key}\n`);
+      else agentEnv[key] = String(value);
+    }
+    return agentEnv;
+  } catch (error) {
+    if (error.code !== "ENOENT") process.stderr.write(`orch: ignoring agent environment ${envFile}: ${error instanceof SyntaxError ? "invalid JSON" : error.message}\n`);
+    return {};
+  }
+}
+
+// Start a relay detached, in its own process group, writing its output to the attempt's relay.log,
+// with the variables that link what it runs to the task. Returns the child process.
+function spawnRelay(run, id, relay, relayArgs, outDir, cd, env) {
+  const log = fs.openSync(path.join(outDir, "relay.log"), "a");
+  try {
+    const child = spawn(process.execPath, [relay, ...relayArgs], {
+      cwd: cd,
+      detached: true,
+      stdio: ["ignore", log, log],
+      env: {
+        ...process.env,
+        ...env,
+        AGENT_ORCH_HEAVY_ACTIVE: undefined, // A new agent needs its own heavy admissions.
+        AGENT_ORCH_DEPTH: String(DEPTH + 1),
+        AGENT_ORCH_RUN: run.id,
+        AGENT_ORCH_TASK: id,
+      },
+    });
+    child.unref();
+    return child;
+  } finally {
+    fs.closeSync(log);
+  }
+}
+
+// Start a command task: COMMAND_RELAY runs the words after `--` as an argument vector, with no
+// shell and no model, and writes the files a delegate relay writes (relay.log, events.jsonl,
+// result.json). It has no session: each start runs the command again, as a new attempt. It counts
+// as read-only, since its work is never committed: `accept` takes it as it is, and it does not
+// claim its folder as a writer. Its environment links any agent it starts to the task.
+function startCommand(run, id, args, extra) {
+  const prev = loadTask(run, id) || { id, createdAt: new Date().toISOString() };
+  try {
+    modelFor(COMMAND_AGENT, args); // refuses --tier, --model and --effort
+  } catch (error) {
+    if (error instanceof ModelRefused) refuse(error.message, error.code);
+    throw error;
+  }
+  const { argv, done, timeout, reused } = commandOf(args, prev);
+  if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  const cd = path.resolve(args.cd || prev.cd || run.repo);
+  if (!fs.existsSync(cd)) refuse(`--cd does not exist: ${cd}`);
+  const sameAgent = Boolean(prev.attempt && prev.agent === COMMAND_AGENT);
+  const line = commandText(argv);
+  const why =
+    String(args.why ?? "").replace(/\s+/g, " ").trim() ||
+    (sameAgent ? prev.why : null) ||
+    refuse("--why is required: one line on why this work runs as a command with no model watching it (see SKILL.md, \"Choose the agent and model\")", 2);
+  checkSlots(run, id, args, cd, { writes: false });
+  const agentEnv = readAgentEnv();
+
+  const attempt = (prev.attempt || 0) + 1;
+  const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
+  const attemptReason = extra.attemptReason
+    || (!prev.attempt ? "first" : lastRound?.verdict === "changes" && lastRound.attempt === prev.attempt ? "rework" : "resume");
+  const outDir = path.join(taskDir(run, id), `attempt-${attempt}`);
+  fs.mkdirSync(outDir, { recursive: true });
+  const relayArgs = ["--out-dir", outDir, "--cd", cd, ...(done !== null ? ["--done", done] : []), ...(timeout !== null ? ["--timeout", timeout] : []), "--", ...argv];
+
+  const startedBy = startedByCaller(run, id);
+  const task = {
+    ...prev,
+    agent: COMMAND_AGENT,
+    tier: null,
+    model: null,
+    effort: null,
+    why,
+    attemptAgents: { ...(prev.attemptAgents || {}), [attempt]: COMMAND_AGENT },
+    attemptReason,
+    attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
+    // The row's title is the command, unless --title names it.
+    title: args.title ?? (sameAgent && reused ? prev.title : null) ?? line,
+    command: argv,
+    doneMarker: done,
+    commandTimeout: timeout,
+    relay: COMMAND_RELAY,
+    cd,
+    readOnly: true,
+    offline: false,
+    babysit: false,
+    sandboxRequested: false,
+    confine: false,
+    noPublish: false,
+    sandboxed: false,
+    pr: null,
+    closedAt: null,
+    stoppedAt: null, // a start by hand opens a closed or stopped task again
+    network: "on",
+    attempt,
+    outDir,
+    pid: null, // set once the relay starts
+    argv: relayArgs,
+    startedAt: new Date().toISOString(),
+    startDepth: DEPTH,
+    startedBy,
+    attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
+    resumedBy: null,
+    ...extra,
+  };
+  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, agentEnv);
+  task.pid = child.pid;
+  saveTask(run, task);
+  if (startedBy) watchForFinish(run, task);
+  const opts = [done !== null ? `done marker ${JSON.stringify(done)}` : null, timeout !== null ? `timeout ${timeout}` : null].filter(Boolean);
+  return {
+    task,
+    text: `started ${id} → command (no model${opts.length ? `, ${opts.join(", ")}` : ""}) pid ${child.pid}, attempt ${attempt}\n  run: ${line}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
   };
 }

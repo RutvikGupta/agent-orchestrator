@@ -77,6 +77,43 @@ model"); the models themselves live in `../policy.json`.
   `PATH` and `NODE_OPTIONS`, are ignored with a warning. Bad JSON warns once and does not block
   the task. Keep this file local, outside the repository.
 
+## Command tasks
+
+`start <run> <task> --agent command --why "<reason>" [--done "<marker>"] [--timeout DUR] [--cd DIR]
+-- <command> [args...]` runs a command as a task, with no model and no brief.
+`scripts/command-relay.mjs` runs it in place of a delegate relay.
+
+- **How it runs.** The words after `--` run as an argument vector, with no shell. Put variables in
+  with `-- env VAR=value <command> ...`, and shell syntax with `-- sh -c '...'`. It runs detached, in
+  `--cd`, in its own process group, with the environment a relay's agent gets (`AGENT_ORCH_RUN`,
+  `AGENT_ORCH_TASK`, `AGENT_ORCH_DEPTH`, and `agent-env.json`). So an agent it starts, such as a
+  review script's `claude -p` or `codex exec`, is linked to the task, and the board shows it there.
+- **When it succeeds.** It exits 0 and, with `--done`, a line of its output contains the marker.
+  Otherwise it fails. `--timeout` stops it after DUR, with the status `timeout`.
+- **What it records.** `relay.log` holds its full stdout and stderr together. `events.jsonl` holds
+  a `command.started` event, then the output in events of at most 200 lines or 64 KB, which the
+  dashboard's event log shows. A line over 4 KB is cut there and marked truncated. `result.json`
+  holds `status`, `exitCode`, `error`, the last 40 lines of output as `finalMessage`, and
+  `leftover`. The activity column shows the latest output line, `steps` counts output lines, and
+  the model column shows `-`.
+- **Its process group.** The command leads its own process group, recorded in the attempt's
+  `command-group.json`. When the command exits, the relay ends whatever is left in that group:
+  SIGTERM, then SIGKILL after 5 seconds, checking each process's PID and start time just before it
+  signals it. `leftover` counts those processes.
+- **Its lifecycle** is an agent task's: `status`, `wait`, `result`, `log`, `close`, the finish
+  notice to the parent, and the ownership guard work the same way. `stop` sends SIGTERM to the
+  relay, which ends the command's process group and records `aborted`. When the relay has gone
+  without ending the group (it was killed), `stop` and `close` end the recorded group themselves,
+  even after the command that led it has exited.
+- **No session.** `start` again runs the command again, as a new attempt: the same command, with
+  its `--done` and `--timeout`, unless a new command follows `--`.
+- **Read-only for review.** Its work is never committed, so `accept` takes it as a read-only task,
+  and it does not hold its folder as a writer. It is not sandboxed, though. It refuses `--brief`,
+  `--tier`, `--model`, `--effort`, `--sandbox`, `--confine`, `--offline`, `--no-publish` and
+  `--babysit`.
+- **Never silent.** A script often prints nothing while the agent it started works, so a command
+  task is never flagged silent. Give one that may hang a `--timeout`.
+
 ## Native sub-agents
 
 `orch.mjs` also finds sub-agents that a session started with its host's own tool, so that the

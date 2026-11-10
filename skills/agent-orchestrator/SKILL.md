@@ -247,6 +247,13 @@ not pass `--model`. Only the Claude `frontier` tier takes `--effort`, and only `
 - **Codex**, lightest first: `light` runs `gpt-6-luna`, `standard` `gpt-6.1-terra`, and `strong`
   `gpt-6.1-sol`, all at effort `medium`. `complex` runs `gpt-6-astra` at `high`.
 
+**A command needs no model.** Run a script that starts its own agents (such as a review script that
+runs `claude -p` or `codex exec`), or any long command whose output you only need to check, as a
+command task: `$ORCH start <run> <task> --agent command --why "<reason>" [--done "<marker>"] --
+<command> [args...]`. Never start an agent just to run a command and wait for it: it spends tokens
+watching, and it hides the agent the script starts. A command task takes no `--tier` or `--brief`;
+[references/agents.md](references/agents.md) ("Command tasks") describes it.
+
 Assess each task with these questions, then weigh the answers together:
 
 1. **Did the user choose?** Then keep that choice ("Keep the user's choices" above).
