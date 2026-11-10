@@ -190,7 +190,7 @@ function attemptState(dir, task, n) {
   const file = path.join(dir, `attempt-${n}`, "result.json");
   const result = readJson(file);
   if (result || n < task.attempt) return { result, ended: true };
-  if (!task.pid || relayAlive(task.pid, task.startedAt)) return { result: null, ended: false };
+  if (!task.pid || relayAlive(task.pid, task.startedAt, task.outDir)) return { result: null, ended: false };
   // The relay may have published its result and exited between the two checks.
   return { result: readJson(file), ended: true };
 }
