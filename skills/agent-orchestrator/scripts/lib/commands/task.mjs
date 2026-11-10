@@ -214,6 +214,11 @@ export function closeTask(run, task, extra = {}) {
     task = loadTask(run, task.id) || task; // a resume may have saved its attempt first: stopped below
   }
   if (relayAlive(task.pid)) {
+    const latest = loadTask(run, task.id) || task;
+    const stop = latest.attempt === task.attempt
+      ? { stoppedAt: latest.stoppedAt || now, stoppedBy: latest.stoppedBy || extra.closedBy }
+      : { attemptStops: { ...(latest.attemptStops || {}), [task.attempt]: now } };
+    saveTask(run, { ...latest, ...stop });
     try {
       process.kill(-task.pid, "SIGTERM");
     } catch {

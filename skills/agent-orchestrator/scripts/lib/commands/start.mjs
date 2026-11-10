@@ -10,7 +10,7 @@ import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
 import { claimParked, keptEnd, reviveParked } from "../park.mjs";
 import { reviewRoundsOf } from "../lifecycle.mjs";
-import { escalationFor, failureHistory } from "../escalation.mjs";
+import { escalationFor, failureHint } from "../escalation.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
@@ -122,6 +122,8 @@ export function startTask(args, extra = {}) {
   const relay = findRelay(key) || refuse(`no ${key}-delegate relay found in: ${SKILL_ROOTS.join(", ")}`);
 
   const prev = loadTask(run, id) || { id, createdAt: new Date().toISOString() };
+  const previousRow = prev.attempt ? describe(run, prev) : null;
+  const previousAttempts = (previousRow?.attempts || []).slice().reverse();
   const sameAgent = Boolean(prev.attempt && prev.agent === key);
   const babysit = Boolean(args.babysit || (sameAgent && prev.babysit));
   // A new task needs --tier (modelFor refuses it without). A Claude follow-up keeps the earlier
@@ -129,9 +131,9 @@ export function startTask(args, extra = {}) {
   // `complex`. A babysitter always runs `complex`, and --babysit implies it.
   const prevTier = sameAgent ? prev.tier || (key === "claude" ? CLAUDE_DEFAULT_TIER : null) : null;
   const automatic = !babysit && sameAgent && !args.tier && !args["no-escalate"]
-    ? escalationFor(run, prev, describe(run, prev).state) : null;
+    ? escalationFor(prev, previousAttempts) : null;
   if (automatic?.refusal) refuse(automatic.refusal, 2);
-  const escalation = automatic?.note || null;
+  let escalation = automatic?.note || null;
   const effectiveArgs = automatic?.tier ? { ...args, tier: automatic.tier } : args;
   const tierArgs = babysit && key === "claude" ? { ...args, tier: args.tier || CLAUDE_DEFAULT_TIER } : effectiveArgs;
   let choice;
@@ -143,6 +145,7 @@ export function startTask(args, extra = {}) {
     throw error;
   }
   const { tier, model, effort } = choice;
+  if (!escalation && extra.attemptReason !== "retry") escalation = failureHint(prev, previousAttempts, key, tier);
   if (!babysit) refuseStronger(key, tier);
   if (relayAlive(prev.pid)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
@@ -220,10 +223,15 @@ export function startTask(args, extra = {}) {
   relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
   relayArgs.push(...net.args);
   if (automatic?.tier && !args.passthrough.some((arg) => arg === "--session" || arg.startsWith("--session=") || arg === "--resume-last")) {
-    const session = describe(run, prev).session;
+    const session = previousRow?.session;
     if (session) relayArgs.push("--session", session);
   }
   relayArgs.push(...args.passthrough);
+  if (automatic?.tier) {
+    const sessionAt = relayArgs.indexOf("--session");
+    const hasSession = (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
+    escalation += hasSession ? "; continuing the same session" : "; this attempt starts a fresh session";
+  }
 
   // The orch task that runs this `start` is the parent this attempt reports to (finish-notice.mjs).
   // The record is ready before the relay starts, so that a resume can record both at once.
@@ -236,7 +244,7 @@ export function startTask(args, extra = {}) {
     effort,
     why,
     attemptAgents: { ...(prev.attemptAgents || {}), [attempt]: key },
-    attemptTiers: { ...Object.fromEntries(failureHistory(run, prev).attempts.map((a) => [a.n, a.tier])), [attempt]: tier },
+    attemptTiers: { ...Object.fromEntries(previousAttempts.map((a) => [a.n, a.tier])), [attempt]: tier },
     attemptStops: { ...(prev.attemptStops || {}), ...(prev.stoppedAt ? { [prev.attempt]: prev.stoppedAt } : {}) },
     automaticEscalations: { ...(prev.automaticEscalations || {}), ...(automatic?.tier ? { [attempt]: { from: prevTier, to: tier } } : {}) },
     attemptReason,
