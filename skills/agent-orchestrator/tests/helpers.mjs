@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -100,7 +100,12 @@ export async function fixture(t) {
       return result.stdout.trim();
     },
     async newRun(name = `run-${runs.length}`, extra = {}) {
-      const run = await f.json(['new', '--repo', repo, '--name', name, '--goal', 'Black-box CLI fixture'], { env: extra });
+      // Wait discovery scans the real process table across all fixture state roots.
+      // Encode case losslessly and reserve the suffix within the CLI's 40-character
+      // slug limit, even when an explicit name is long.
+      const suffix = Buffer.from(path.basename(root)).toString('hex');
+      const uniqueName = `${String(name).slice(0, 39 - suffix.length)}-${suffix}`;
+      const run = await f.json(['new', '--repo', repo, '--name', uniqueName, '--goal', 'Black-box CLI fixture'], { env: extra });
       runs.push(run);
       return run;
     },
@@ -220,6 +225,18 @@ export async function fixture(t) {
           }
         }
       } finally {
+        // A finish notice can still be writing after its relay and park were
+        // closed. Only fixtures that launched watchers need a process scan.
+        const watcherFiles = fs.readdirSync(state, { recursive: true }).some((file) =>
+          path.basename(file) === 'parent-notice.log' || /^park-watcher-\d+\.json$/.test(path.basename(file)));
+        if (watcherFiles) await eventually(() => {
+          const result = spawnSync('ps', ['-axww', '-o', 'pid=,command='], {
+            encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024,
+          });
+          if (result.status !== 0) return false;
+          return !result.stdout.split('\n').some((line) => line.includes(`${root}${path.sep}`)
+            && (line.includes('finish-notice.mjs') || line.includes(' park-watch ')));
+        }, 'fixture background writers did not exit');
         fs.rmSync(root, { recursive: true, force: true });
       }
     }

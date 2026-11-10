@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fixture } from './helpers.mjs';
+import { eventually, fixture, readJson } from './helpers.mjs';
 
 test('fixtures copy the initial repository without sharing writable Git state', async (t) => {
+  // Guard against sharing writable state between fixtures. Pinned commit dates
+  // mean this also passes with per-fixture git init; it does not enforce reuse.
   const one = await fixture(t);
   const two = await fixture(t);
   assert.equal(await one.git(['rev-parse', 'HEAD']), await two.git(['rev-parse', 'HEAD']));
@@ -16,6 +19,58 @@ test('fixtures copy the initial repository without sharing writable Git state', 
   assert.equal(await two.git(['branch', '--show-current']), 'main');
   assert.equal(await two.git(['status', '--porcelain']), '');
   assert.equal((await two.git(['config', '--list'])).includes('fixture.private'), false);
+});
+
+test('fixture run IDs stay distinct across roots at the same clock and name', async (t) => {
+  const one = await fixture(t);
+  const two = await fixture(t);
+  const preload = path.join(one.root, 'clock.cjs');
+  fs.writeFileSync(preload, "const D=Date;global.Date=class extends D{constructor(...a){super(...(a.length?a:['2026-11-09T12:00:00Z']))}static now(){return D.parse('2026-11-09T12:00:00Z')}};");
+  const clock = { NODE_OPTIONS: `--require=${JSON.stringify(preload)}` };
+  for (const name of [undefined, 'shared-name', 'long-name'.repeat(8)]) {
+    const [a, b] = await Promise.all([one.newRun(name, clock), two.newRun(name, clock)]);
+    assert.notEqual(a.id, b.id, `name: ${name}`);
+    for (const [run, f] of [[a, one], [b, two]]) {
+      assert.ok(run.id.endsWith(Buffer.from(path.basename(f.root)).toString('hex')), 'explicit and default names retain the full fixture suffix');
+      assert.equal(readJson(path.join(run.dir, 'run.json')).id, run.id);
+    }
+  }
+});
+
+test('fixture cleanup waits for its last finish-notice writer before deleting state', async (t) => {
+  const callbacks = [];
+  const f = await fixture({ after(callback) { callbacks.push(callback); } });
+  const control = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-writer-control-'));
+  const release = path.join(control, 'release');
+  const ready = path.join(control, 'ready');
+  const writer = path.join(f.root, 'finish-notice.mjs');
+  fs.writeFileSync(path.join(f.state, 'parent-notice.log'), '');
+  fs.writeFileSync(writer, `import fs from 'node:fs';
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(release)})) return;
+  fs.writeFileSync(${JSON.stringify(path.join(f.state, 'last-record.json'))}, '{}');
+  clearInterval(timer);
+}, 10);
+setTimeout(() => process.exit(99), 30000).unref();
+fs.writeFileSync(${JSON.stringify(ready)}, '');\n`);
+  const child = spawn(process.execPath, [writer], { env: f.env, stdio: 'ignore' });
+  const ended = new Promise((resolve) => child.once('close', (code) => resolve(code)));
+  t.after(async () => {
+    fs.writeFileSync(release, '');
+    await ended;
+    if (fs.existsSync(f.root)) await callbacks[0]();
+    fs.rmSync(control, { recursive: true, force: true });
+  });
+  await eventually(() => fs.existsSync(ready), 'writer did not become ready');
+  const cleaning = callbacks[0]();
+  try {
+    assert.equal(fs.existsSync(f.root), true, 'cleanup must leave state intact while a writer is alive');
+  } finally {
+    fs.writeFileSync(release, '');
+    await cleaning;
+  }
+  assert.equal(await ended, 0, 'the final write must succeed before deletion');
+  assert.equal(fs.existsSync(f.root), false);
 });
 
 test('fixture launchers stop at the test worker instead of the user session', async (t) => {
@@ -42,6 +97,22 @@ test('clean session', () => {
   } });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /clean session/);
+});
+
+test('repository test instructions describe the current entry points and fixture behavior', () => {
+  for (const location of ['../../../AGENTS.md', '../AGENTS.md', './README.md']) {
+    const text = fs.readFileSync(new URL(location, import.meta.url), 'utf8');
+    assert.ok(text.includes('bash tools/test.sh'), location);
+    assert.ok(text.includes('--quick') && text.includes('<file>...'), location);
+    assert.doesNotMatch(text, /node --test tests\//, 'instructions must not direct agents to serial directory imports');
+  }
+  const readme = fs.readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert.match(readme, /process\.title = 'codex'/);
+  assert.match(readme, /100 ms/);
+  assert.match(readme, /3000 ms/);
+  assert.doesNotMatch(readme, /without impersonating a host|preserving the real three-second interval/);
+  const instructions = fs.readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8');
+  assert.ok(instructions.includes('Keep `SKILL.md` at most 300 lines (`tests/skill-doc.test.mjs` checks it); put step detail in a file under `references/` and point to it from the step.'));
 });
 
 test('wait polling defaults to three seconds and accepts a shorter configured interval', async (t) => {

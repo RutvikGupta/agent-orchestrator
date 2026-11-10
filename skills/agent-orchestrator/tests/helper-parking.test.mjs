@@ -134,6 +134,10 @@ const sleepPid = (pid) => {
 
 test('unchanged files stay in the same shell checkpoint across one-second ticks', { skip: !supported }, async (t) => {
   const f = await fixture(t), { run } = await held(f);
+  // The shell intentionally rechecks metadata from its startup second once.
+  // Start this idle-state case with settled metadata, then assert every tick.
+  const settled = new Date(Date.now() - 5000);
+  fs.utimesSync(f.taskFile(run, 'worker'), settled, settled);
   const wait = helper(t, f, ['wait', run.id, '--timeout', '0']);
   await wait.parked();
   const before = checkpoints(f);
