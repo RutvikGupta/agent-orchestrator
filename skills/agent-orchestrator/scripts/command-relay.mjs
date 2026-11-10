@@ -344,10 +344,17 @@ function commandAgents() {
       }
       for (const { agent, id, m, f } of recoveries) record(agent, id, m, f);
     } catch (error) {
-      if (!warned) fs.appendFileSync(logPath, `\ncommand-relay: could not record an agent: ${error.message}\n`);
-      warned = true;
+      warn(error);
     }
   };
+  // One line in the relay's log for the first failure; a log that cannot be written is ignored.
+  function warn(error) {
+    if (warned) return;
+    warned = true;
+    try {
+      fs.appendFileSync(logPath, `\ncommand-relay: could not record an agent: ${error.message}\n`);
+    } catch {}
+  }
   capture.flush = async (pgid) => {
     const until = Date.now() + 3000;
     // Old-date resumes depend on file notifications, which can arrive after the child exit.
@@ -356,7 +363,12 @@ function commandAgents() {
       if (awaitingResume() && changed.size) capture(pgid, true);
       for (const [key, record] of pending) {
         if (!record.pid && excluded.has(key)) { pending.delete(key); continue; }
-        if (appendExternalRecord(file, record) !== false) { saved.set(key, record); pending.delete(key); }
+        // A write error counts like a busy lock: the record stays pending, and the relay goes on.
+        try {
+          if (appendExternalRecord(file, record) !== false) { saved.set(key, record); pending.delete(key); }
+        } catch (error) {
+          warn(error);
+        }
         if (Date.now() >= until) break;
       }
       if ((pending.size || awaitingResume()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -557,17 +569,27 @@ async function onExit(code, signal) {
   clearInterval(poll);
   clearTimeout(timeoutTimer);
   clearTimeout(killTimer);
-  captureAgents(child.pid);
-  const left = endGroup(child.pid, GRACE_MS);
-  // Let pending file notifications identify old-date resumes before the final sweep.
-  await new Promise((resolve) => setImmediate(resolve));
-  captureAgents(child.pid, true);
-  await captureAgents.flush(child.pid);
-  captureAgents.close();
+  // Recording the command's agents must never keep the relay from clearing its group and writing
+  // the result: whatever fails here, the task still ends with a result.json.
+  let left = { found: 0, killed: 0 };
   try {
-    writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
-  } catch {}
-  settle({ code, signal, left });
+    captureAgents(child.pid);
+    left = endGroup(child.pid, GRACE_MS);
+    // Let pending file notifications identify old-date resumes before the final sweep.
+    await new Promise((resolve) => setImmediate(resolve));
+    captureAgents(child.pid, true);
+    await captureAgents.flush(child.pid);
+    captureAgents.close();
+  } catch (error) {
+    try {
+      fs.appendFileSync(logPath, `\ncommand-relay: ${error.message}\n`);
+    } catch {}
+  } finally {
+    try {
+      writeGroup(outDir, { ...readGroup(outDir), endedAt: new Date().toISOString(), leftover: left.found, killed: left.killed, cleared: true, clearedBy: "relay" });
+    } catch {}
+    settle({ code, signal, left });
+  }
 }
 
 // Stopping the relay stops the command, which then ends the run as aborted. Once the command has

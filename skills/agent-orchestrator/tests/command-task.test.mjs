@@ -746,3 +746,21 @@ test('the last capture retries a lock that is released after its first timeout',
   assert.ok(fs.existsSync(marker), 'the final write really timed out before the lock was released');
   assert.deepEqual(lines(path.join(f.state, 'external.jsonl')).map((r) => r.sessionId), ['last-only']);
 });
+
+test('a failure to record the command\'s agent still leaves the task with its result', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const bin = quickAgent(f, 'claude');
+  const doneFile = path.join(f.root, 'claude-done.json');
+  // The record file cannot be written: a folder stands where it should be.
+  fs.mkdirSync(path.join(f.state, 'external.jsonl'));
+  const wrapper = path.join(f.root, 'run-claude.cjs');
+  fs.writeFileSync(wrapper, `require('node:child_process').spawnSync(process.execPath, ${JSON.stringify([bin, '-p', 'review'])}, { cwd: ${JSON.stringify(f.repo)}, env: process.env, stdio: 'inherit' });\n`);
+  const started = await startCommand(f, run, 'quick', [process.execPath, wrapper], { env: {
+    ...withoutLiveCapture(f), QUICK_SESSION: 'unrecorded', QUICK_DONE: doneFile, QUICK_REMOVE_SESSION: '1',
+  } });
+  await f.finished(run, 'quick');
+  const result = readJson(path.join(started.outDir, 'result.json'));
+  assert.deepEqual([result.status, result.exitCode], ['completed', 0]);
+  assert.match(fs.readFileSync(path.join(started.outDir, 'relay.log'), 'utf8'), /command-relay: could not record/);
+});
