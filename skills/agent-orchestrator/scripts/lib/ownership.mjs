@@ -254,7 +254,8 @@ function askHow(o) {
   return "ask the user";
 }
 
-function ownerText(own) {
+// Whose run it is, in words: its launcher, and for a nested run the session at the top of its chain.
+export function ownerText(own) {
   const d = own.direct;
   if (d?.agent !== "delegated-agent") return launcherLabel(d);
   return `${launcherLabel(d)} (an orch task)${own.links.length > 1 ? `, under ${launcherLabel(own.top)}` : ""}`;

@@ -166,9 +166,17 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
   return report;
 }
 
+// A size a person reads: "1.2 GB", "310 MB", "4 KB".
+export function sizeText(bytes) {
+  const units = [['GB', 1024 ** 3], ['MB', 1024 ** 2], ['KB', 1024]];
+  const [unit, size] = units.find(([, n]) => bytes >= n) || ['bytes', 1];
+  return unit === 'bytes' ? `${bytes} bytes` : `${(bytes / size).toFixed(bytes / size >= 100 ? 0 : 1)} ${unit}`;
+}
+
 export function collectionText(report, dryRun = false) {
   return [...[...report.removed, ...report.kept].flatMap((r) => (r.teardownFailures || []).map((f) => `teardown ${r.task} failed (${f.exitCode ?? f.signal}): ${f.command}\n${f.output}`)),
     ...report.removed.map((r) => `${dryRun ? 'would remove' : 'removed'} worktree ${r.path} (branch kept: ${r.branch || '(none)'})\n  recreate with: ${r.recreateCommand}`),
     ...report.kept.map((r) => `skip ${r.task}: ${r.reason} (${r.path})`),
-    `${dryRun ? 'would free' : 'freed'} ${report.bytesFreed} bytes${report.removed.some((r) => r.bytes === null) ? ' (some sizes unavailable)' : ''}`].join('\n');
+    // Only a run that removed something says what it freed.
+    ...(report.removed.length ? [`${dryRun ? 'would free' : 'freed'} ${sizeText(report.bytesFreed)}${report.removed.some((r) => r.bytes === null) ? ' (some sizes unavailable)' : ''}`] : [])].join('\n');
 }

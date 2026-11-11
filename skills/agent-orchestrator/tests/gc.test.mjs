@@ -550,3 +550,45 @@ test('a worktree on another local branch, as a babysitter\'s is, is collected; o
   assert.equal(fs.existsSync(loose.path), true);
   assert.equal((await f.git(['rev-parse', 'feature/pull-request'])).trim(), String(onBranch).trim(), 'the branch and its commit remain');
 });
+
+test('gc text lists only runs with something to report, names sizes in units, and ends with a total', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const empty = await f.newRun('empty'); // no worktrees, nothing to expire
+  const wt = await worktree(f, run, 'done', { closedAt: daysAgo(3) });
+  fs.writeFileSync(path.join(wt.path, 'big.bin'), Buffer.alloc(3 * 1024 * 1024, 1));
+  await f.git(['-C', wt.path, 'add', 'big.bin']);
+  await f.git(['-C', wt.path, 'commit', '-qm', 'Large fixture file']);
+  idleRun(f, run);
+  idleRun(f, empty);
+  const text = (await f.command(['gc'])).stdout;
+  assert.ok(!text.includes(empty.id), 'a run with nothing to report is left out');
+  assert.match(text, new RegExp(`${run.id}\\nremoved worktree `));
+  assert.doesNotMatch(text, /freed 0 bytes/);
+  assert.match(text, /\nfreed \d+(\.\d)? MB\n/);
+  assert.match(text.trim().split('\n').at(-1), /^removed 1 worktree and freed \d+(\.\d)? MB; kept 0; expired 0 tasks; 2 runs checked$/);
+});
+
+test('a refused run names its owner, and a main session collects the runs its own delegated task started', async (t) => {
+  const f = await fixture(t);
+  const session = (id) => ({ CLAUDE_CODE_SESSION_ID: id, CODEX_THREAD_ID: id });
+  const A = session('session-a'), B = session('session-b');
+  const parent = await f.newRun('parent', A);
+  f.launchingSession(parent, 'session-a');
+  await f.start(parent, 'lead', { flags: ['--read-only'], env: A });
+  await f.finished(parent, 'lead');
+  // The run that task `lead` started for its own agents, with a closed task's worktree.
+  const child = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: parent.id, AGENT_ORCH_TASK: 'lead' };
+  const nested = await f.newRun('nested', child);
+  const wt = await f.json(['worktree', nested.id, 'kid', '--no-prep'], { env: child });
+  patch(f, nested, 'kid', { closedAt: daysAgo(3), closedExplicitlyAttempt: 0 });
+  idleRun(f, parent);
+  idleRun(f, nested);
+
+  const other = await f.command(['gc', '--dry-run'], { env: B });
+  assert.match(other.stdout, new RegExp(`${nested.id}: ownership refused \\(belongs to task lead of run ${parent.id} \\(an orch task\\), under (claude|codex) session session-a[^)]*\\)\\)`));
+  assert.equal(fs.existsSync(wt.path), true);
+
+  const mine = await f.json(['gc'], { env: A });
+  assert.deepEqual(mine.runs.find((r) => r.run === nested.id).removed.map((r) => r.task), ['kid']);
+  assert.equal(fs.existsSync(wt.path), false);
+});

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.2 (2026-11-10)
+
+- `gc` prints only the runs with something to report, names the owner of each run it refuses,
+  shows sizes in MB or GB, and ends with one line of totals. Before, a "freed 0 bytes" line for
+  every run with nothing removed buried the result.
+
 ## 2.0.1 (2026-11-10)
 
 - `gc` and the automatic cleanup now accept a worktree whose commits any local or remote-tracking

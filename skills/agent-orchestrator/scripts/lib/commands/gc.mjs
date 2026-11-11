@@ -1,10 +1,10 @@
 // Collect inactive runs owned by the caller, retaining every branch and unsafe worktree.
 import fs from 'node:fs';
 import path from 'node:path';
-import { guard, ownershipOf, recordChange } from '../ownership.mjs';
+import { guard, ownerText, ownershipOf, recordChange } from '../ownership.mjs';
 import { listRuns, loadTask, saveTask } from '../runs.mjs';
 import { die, emit, parseDuration } from '../util.mjs';
-import { collectWorktrees, collectionText, gcTasks } from '../worktree-gc.mjs';
+import { collectWorktrees, collectionText, gcTasks, sizeText } from '../worktree-gc.mjs';
 
 // The existing duration parser accepts hours; GC also accepts days for its longer defaults.
 const duration = (s) => /^\d+(?:\.\d+)?d$/.test(String(s)) ? Number.parseFloat(s) * 86400000 : parseDuration(s);
@@ -37,6 +37,8 @@ export async function cmdGc(args) {
     const reason = !(own.caller.kind === 'user' || (own.caller.kind !== 'unknown' && own.mine)) ? 'ownership refused' : rows.some((r) => r.state === 'running' || r.phase === 'parked') ? 'run has running tasks' : now - activity(run, rows) < olderThan ? 'run is too recent' : null;
     if (reason) {
       report.reason = reason;
+      // Whose run it is, so that a refused caller knows whom to ask.
+      if (reason === 'ownership refused') report.owner = ownerText(own);
       for (const row of rows) {
         const wt = loadTask(run, row.id)?.worktree;
         if (wt) report.kept.push({ task: row.id, path: wt.path, branch: wt.branch, reason });
@@ -66,6 +68,12 @@ export async function cmdGc(args) {
     totals.expired += r.expired.length; totals.bytesFreed += r.bytesFreed;
     for (const k of r.kept) totals.keptByReason[k.reason] = (totals.keptByReason[k.reason] || 0) + 1;
   }
+  // The text lists only the runs with something to say (a worktree removed or kept, or a task
+  // expired), then one line of totals: a line per empty run buried the result.
+  const shown = reports.filter((r) => r.removed.length || r.kept.length || r.expired.length);
+  const kept = Object.entries(totals.keptByReason).map(([why, n]) => `${n} ${why}`).join(', ');
+  const total = `${dryRun ? 'would remove' : 'removed'} ${totals.removed} worktree${totals.removed === 1 ? '' : 's'} and ${dryRun ? 'free' : 'freed'} ${sizeText(totals.bytesFreed)}`
+    + `; kept ${totals.kept}${kept ? ` (${kept})` : ''}; ${dryRun ? 'would expire' : 'expired'} ${totals.expired} task${totals.expired === 1 ? '' : 's'}; ${reports.length} runs checked`;
   emit(args, { dryRun, olderThan, expireAfter, runs: reports, totals },
-    reports.map((r) => `${r.run}${r.reason ? `: ${r.reason}` : ''}\n${r.expired.length ? `  ${dryRun ? 'would expire' : 'expired'}: ${r.expired.join(', ')}\n` : ''}${collectionText(r, dryRun)}`).join('\n\n') || 'no runs');
+    [...shown.map((r) => `${r.run}${r.reason ? `: ${r.reason}${r.owner ? ` (belongs to ${r.owner})` : ''}` : ''}\n${r.expired.length ? `  ${dryRun ? 'would expire' : 'expired'}: ${r.expired.join(', ')}\n` : ''}${collectionText(r, dryRun)}`), total].join('\n\n'));
 }
