@@ -284,9 +284,10 @@ export function startTask(args, extra = {}) {
     if (babysit) {
       fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
       // Keep the brief a babysitter's session starts from, as it was given: a fresh session that
-      // takes over from a handoff note starts from it again. A brief that continues a session, or
-      // the one the watcher composes for that fresh session, is not it.
-      if (!args.fromHandoff && !args.passthrough.includes("--session")) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
+      // takes over from a handoff note starts from it again. A brief that continues a babysitter's
+      // session, or the one the watcher composes for that fresh session, is not it. The brief that
+      // makes a finished task (its implementer) the babysitter, in that task's session, is.
+      if (!args.fromHandoff && (!args.passthrough.includes("--session") || !prev.babysit)) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
     }
     fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key));
     // Files the brief points to, such as the messages a parked task's watcher delivers in full.

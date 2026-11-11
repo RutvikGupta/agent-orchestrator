@@ -109,7 +109,7 @@ async function refresh(){
   const forUser=lane.filter(a=>a.to!=="agent"),theirs=lane.filter(a=>a.to==="agent");
   const need=document.getElementById("need");need.hidden=!forUser.length;need.textContent=forUser.length+(forUser.length===1?" needs":" need")+" attention";
   const attn=a=>$("div",{class:"attn a-"+a.kind+(a.to==="agent"?" for-agent":"")+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",title:a.reason,...(a.to==="agent"?{style:"opacity:.6"}:{})},
-    $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)",title:"Asked while it keeps working: answer in the box under its details"}:{})},a.label),$("b",{},a.id),$("span",{class:"where",...(a.runId?{title:"run "+a.runId}:{})},a.runGoal||(a.runId?a.runId.replace(/^\d{8}-\d{6}-/,""):sectionTitle(a.run))),
+    $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)",title:"Asked while it keeps working: answer in the box under its details"}:{})},a.label),$("b",a.name?{title:"task "+a.id}:{},a.name||a.id),$("span",{class:"where",...(a.runId?{title:"run "+a.runId}:{})},a.runGoal||(a.runId?a.runId.replace(/^\d{8}-\d{6}-/,""):sectionTitle(a.run))),
     a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs),title:"waiting since "+new Date(a.sinceMs).toLocaleTimeString()},dur(Date.now()-a.sinceMs)):null,
     $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,"")),
     a.to==="agent"?$("span",{class:"muted",style:"flex:none",title:"It reaches "+a.agent+" through its inbox or its wait; you get it only if that agent is gone"},"for "+a.agent)
@@ -132,7 +132,8 @@ function staleNote(r,body){const age=r.headers.get("x-orch-stale"),head=r.header
   if(!why.trim()&&refused){try{why=String(JSON.parse(body)?.error||"")}catch{why=String(body||"")}}
   why=why.split("\n")[0].trim()||(refused?"HTTP "+r.status:"cached board");
   const n=age==null||age===""?NaN:Number(age);return{why,age:Number.isFinite(n)?n:null,failed:refused}}
-// One section of the board: its header and its session tree.
+// One section of the board: its header and its session tree. A task that `rename` named shows its name,
+// with its id in the tooltip; the id stays the row's key. Only orch.mjs tasks have names.
 function sectionView(run){
   const by=run.orchestrator?.agent?("launched by "+run.orchestrator.agent+(run.orchestrator.sessionId?" session "+run.orchestrator.sessionId.slice(0,8):"")):"";
   // One <tbody> per session, so its row and its activity line hover and select as one item.
@@ -152,7 +153,7 @@ function sectionView(run){
     return $("tbody",{class:c,"data-key":key,tabindex:"0"},$("tr",{},
       $("td",{...indent(0),title:t.native&&t.parent!=="orchestrator"?"started by "+t.parent:""},
         nk?$("span",{class:"caret","data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
-        $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.id,
+        $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+m.text).join("\n")},"✉ "+t.inbox.unread+" unread"):null,
         shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
@@ -295,9 +296,9 @@ function paint(key,t,ext,ev,keep){
   const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d);
   const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
-  d.replaceChildren($("div",{class:"dhead"},$("h2",{},t.id+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
+  d.replaceChildren($("div",{class:"dhead"},$("h2",{},(t.name||t.id)+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
       $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
-    $("dl",{},...[["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["runs",t.runs?t.runs.map(a=>a.kind+" · "+(a.modelLabel||"model not known yet")+" · "+a.state+(a.session?" · "+a.session.slice(0,8):"")).join("\n"):null],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
+    $("dl",{},...[["id",t.name?t.id:null],["earlier names",[...new Set((t.names||[]).map(n=>n&&n.name).filter(n=>n&&n!==t.name))].join(", ")],["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["runs",t.runs?t.runs.map(a=>a.kind+" · "+(a.modelLabel||"model not known yet")+" · "+a.state+(a.session?" · "+a.session.slice(0,8):"")).join("\n"):null],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
     ...agentsView(key,t),
@@ -479,7 +480,7 @@ function showReply(t){const box=document.getElementById("compose-reply"),r=t?.in
   if(!r||closedReplies.has(id)){box.replaceChildren();box.hidden=true;return}
   box.replaceChildren($("button",{type:"button",class:"x",title:"Close","aria-label":"Close the reply",onclick:()=>{closedReplies.add(id);
       try{localStorage.setItem("orchClosedReplies",JSON.stringify([...closedReplies].slice(-200)))}catch{}showReply(t)}},"×"),
-    $("span",{class:"rh"},t.id+" replied · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text));box.hidden=false}
+    $("span",{class:"rh"},(t.name||t.id)+" replied · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text));box.hidden=false}
 // Messages sent but not yet read: they reach the agent after its next step. Those sent from this page
 // that the board does not list yet are here too, "sending" until the server answers. Once a queued one
 // has waited unread for 30 seconds, a line says how to interrupt; `hintDue` is when the one waiting
@@ -508,7 +509,7 @@ function compose(){settle(); // every read of the board ends here, so what it li
     :t.external?"A command started this agent outside the orchestrator, so it takes no messages. Message the session or task that ran the command."
     :t.native?"This agent was started by its session's own sub-agent tool, which takes no messages from outside. Message the session or task that started it."
     :!["running","parked"].includes(outcome(t))?"This task is not running ("+outcome(t)+"). A message reaches only a running agent: ask its orchestrator to resume it.":"";
-  document.getElementById("compose-title").textContent=why?"Messages":"Message "+t.id;
+  document.getElementById("compose-title").textContent=why?"Messages":"Message "+(t.name||t.id);
   note.textContent=why||(sendKey()?"":NO_KEY);note.hidden=!note.textContent;
   area.hidden=document.querySelector("#compose .crow").hidden=!!why;document.getElementById("compose-send").disabled=sending||!sendKey();box.hidden=false;
   showReply(t);showQueue(why?null:t,sel);if(why)document.getElementById("compose-files").hidden=true;else showFiles();

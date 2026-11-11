@@ -111,15 +111,17 @@ const question = (d) => {
 // The notice text for a finished attempt's row from describe(). `current` is the task's latest
 // attempt, which may have started since this one ended.
 export function noticeText(run, row, current = row.attempt) {
-  const name = `${run.id}/${row.id}`;
-  const read = `node ${CLI_PATH} result ${run.id} ${row.id}`;
+  // A named task (`rename`) is named, and addressed in each command, by its name; commands take either.
+  const ref = row.name || row.id;
+  const name = `${run.id}/${ref}`;
+  const read = `node ${CLI_PATH} result ${run.id} ${ref}`;
   const head = `Agent ${name} (attempt ${row.attempt})`;
   const later = current > row.attempt
     ? `\nAttempt ${current} has started since, so \`result\` shows that one; this attempt's report is in ${path.join(row.outDir || "", "result.json")}.`
     : "";
   if (row.state === "needs-decision" || row.phase === "needs-decision") {
     const asked = row.decisions?.length ? row.decisions : (row.report?.decisions || []).map(question);
-    const resume = `node ${CLI_PATH} start ${run.id} ${row.id} --agent ${row.agent} --brief <answer-file>${row.session ? ` -- --session ${row.session}` : ""}`;
+    const resume = `node ${CLI_PATH} start ${run.id} ${ref} --agent ${row.agent} --brief <answer-file>${row.session ? ` -- --session ${row.session}` : ""}`;
     return [
       `${head} needs a decision and is waiting on you:`,
       ...(asked.length ? asked : ["(read its final message)"]).map((q) => `- ${q}`),

@@ -140,9 +140,11 @@ export function lifecycleHints(run, tasks) {
   const planned = new Set((plan?.tasks || []).map((t) => t.id));
   const lines = [];
   if (plan) {
+    // A planned task that has a record (prepared by `worktree`, say) shows its name (`rename`).
+    const nameOf = (id) => readJson(path.join(run.dir, "tasks", id, "task.json"))?.name || id;
     const { ready, unbriefed } = planProgress(plan, phaseMap(run, tasks, plan), run.dir);
-    if (ready.length) lines.push(`ready to dispatch: ${ready.map((t) => t.id).join(", ")} (run \`dispatch\`)`);
-    if (unbriefed.length) lines.push(`ready, waiting for a brief: ${unbriefed.map((u) => `${u.task.id} (${u.problem})`).join(", ")} (run \`brief\`, fill it in, then \`dispatch\`)`);
+    if (ready.length) lines.push(`ready to dispatch: ${ready.map((t) => nameOf(t.id)).join(", ")} (run \`dispatch\`)`);
+    if (unbriefed.length) lines.push(`ready, waiting for a brief: ${unbriefed.map((u) => `${nameOf(u.task.id)} (${u.problem})`).join(", ")} (run \`brief\`, fill it in, then \`dispatch\`)`);
   }
   // Outside the plan, a task whose result was already collected has been seen; only the plan's
   // tasks wait on acceptance.
@@ -150,9 +152,9 @@ export function lifecycleHints(run, tasks) {
     (t) => t.mode?.split("+")[0] !== "babysit" && t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
   );
   if (reviewing.length) {
-    lines.push(`awaiting review: ${reviewing.map((t) => `${t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);
+    lines.push(`awaiting review: ${reviewing.map((t) => `${t.name || t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);
   }
   const accepted = tasks.filter((t) => t.phase === "accepted");
-  if (accepted.length) lines.push(`accepted, not integrated: ${accepted.map((t) => t.id).join(", ")} (run \`integrate\`)`);
+  if (accepted.length) lines.push(`accepted, not integrated: ${accepted.map((t) => t.name || t.id).join(", ")} (run \`integrate\`)`);
   return lines;
 }

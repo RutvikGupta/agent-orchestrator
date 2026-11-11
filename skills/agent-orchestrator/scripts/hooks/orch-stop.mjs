@@ -119,16 +119,18 @@ async function stop() {
       if (!task || task.startedBy || !NAME.test(id)) continue;
       const attempt = task.attempt || 0;
       if (!attempt || !task.pid) continue;
-      const label = `${run.id}/${id}`;
+      // A named task (`rename`) is shown, and named in each command, by its name; the keys keep its id.
+      const ref = task.name && NAME.test(task.name) ? task.name : id;
+      const label = `${run.id}/${ref}`;
       const alive = relayAlive(task.pid, task.startedAt, task.outDir);
       const parked = !alive && isParked(run, task);
       if (alive || parked) {
-        running.push(id);
+        running.push(ref);
         for (const q of openQuestions(readQuestions(dir), readInbox(dir), attempt)) {
           if (q.to !== ORCHESTRATOR) continue;
           items.push({
             key: [run.id, id, attempt, "question", q.id].join(":"),
-            text: `${label} asked a question and keeps working: "${quote(q.question)}". Answer it with \`${cli(`send ${run.id} ${id} "<answer>"`)}\`.`,
+            text: `${label} asked a question and keeps working: "${quote(q.question)}". Answer it with \`${cli(`send ${run.id} ${ref} "<answer>"`)}\`.`,
           });
         }
         continue;
@@ -142,7 +144,7 @@ async function stop() {
         if (task.decisionSeenAttempt !== attempt) {
           items.push({
             key: [run.id, id, attempt, "result"].join(":"),
-            text: `${label} handed back a decision and nobody has read its result. Read it with \`${cli(`result ${run.id} ${id}`)}\`.`,
+            text: `${label} handed back a decision and nobody has read its result. Read it with \`${cli(`result ${run.id} ${ref}`)}\`.`,
           });
           continue;
         }
@@ -150,7 +152,7 @@ async function stop() {
         const session = result.sessionId || result.threadId || "<session id from result>";
         items.push({
           key: [run.id, id, attempt, "decision"].join(":"),
-          text: `${label} handed back a decision that you read and have not resolved: "${quote(decisions[0])}". Decide what the request covers, then resume it with \`${cli(`start ${run.id} ${id} --agent ${agent} --brief <answer-file> -- --session ${session}`)}\`, or run \`${cli(`resolve ${run.id} ${id} --note "<how>"`)}\` if you handled it another way, or \`${cli(`close ${run.id} ${id}`)}\`.`,
+          text: `${label} handed back a decision that you read and have not resolved: "${quote(decisions[0])}". Decide what the request covers, then resume it with \`${cli(`start ${run.id} ${ref} --agent ${agent} --brief <answer-file> -- --session ${session}`)}\`, or run \`${cli(`resolve ${run.id} ${ref} --note "<how>"`)}\` if you handled it another way, or \`${cli(`close ${run.id} ${ref}`)}\`.`,
         });
         continue;
       }
@@ -159,7 +161,7 @@ async function stop() {
       if (!task.closedAt && !acceptedNow(task) && !resolved) {
         items.push({
           key: [run.id, id, attempt, "result"].join(":"),
-          text: `${label} finished (${result.status || "unknown"}) and nobody has read its result. Read it with \`${cli(`result ${run.id} ${id}`)}\`, then accept it, send it back with \`verdict ... changes\`, or close it; or run \`${cli(`close ${run.id} ${id}`)}\` if you handled it another way.`,
+          text: `${label} finished (${result.status || "unknown"}) and nobody has read its result. Read it with \`${cli(`result ${run.id} ${ref}`)}\`, then accept it, send it back with \`verdict ... changes\`, or close it; or run \`${cli(`close ${run.id} ${ref}`)}\` if you handled it another way.`,
         });
       }
     }

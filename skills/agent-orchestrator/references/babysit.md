@@ -27,6 +27,46 @@ $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits
   request, and repository settings stay denied.
 - Its timeout defaults to `24h`.
 
+## Keep it with its implementer
+
+When a Claude task of the run implemented the pull request, that task keeps it: make it the
+babysitter instead of starting a new task. Its session already holds the pull request's context,
+and the run keeps one task for it, whose row, attempts and token totals go on adding up.
+
+1. Once the task has finished (it is not running), write the babysitter brief to a file of its own
+   (`$ORCH brief <run> <task> --type babysit --out <file>`), and fill it in as above.
+2. Start the task's next attempt as the babysitter, in its own session (`$ORCH result <run> <task>`
+   prints the session id):
+
+   ```bash
+   $ORCH start <run> <task> --agent claude --babysit --pr <n> --brief <file> -- --session <id>
+   ```
+
+   It is then a babysitter like any other: it runs `complex`, with the same permissions and timeout,
+   and parks and resumes as below. `start` checks the pull request as it does for a new babysitter.
+3. Rename it, so that its name shows it babysits that pull request:
+   `$ORCH rename <run> <task> --to babysit-<n>`.
+
+A Codex implementer cannot keep its pull request this way: a babysitter runs on Claude, which cannot
+continue a Codex session. Start a new babysitter for it.
+
+### Names
+
+`$ORCH rename <run> <task> --to <name>` gives a task a name. `status`, `wait`, `result`, `recover`,
+`stop`, the Stop hook, finish notices and the dashboard show the name in place of the task's id;
+`result` and the dashboard's details also show the id and earlier names. Every command that takes a
+task takes the name too, in that run, and an id always wins over a name.
+
+- The id stays the key of everything the task has: its folder, inbox, worktree, branch, nested runs,
+  park watcher, and `AGENT_ORCH_TASK` in its shell. A rename restarts nothing, on a running, parked,
+  finished or closed task.
+- A name must be a valid task id, and not the id or name of another task of the run, or a task of
+  its plan.
+- The task records each name with when and who set it. `rename` again changes it, and `--to` the
+  task's own id removes it.
+- The run's owner renames any of its tasks. A task's own agent may rename itself, and the owner
+  gets a notice of it, as of a change by the user.
+
 ## How it waits
 
 It waits with `orch.mjs pr-watch`, which spends no tokens while waiting. `pr-watch` exits:

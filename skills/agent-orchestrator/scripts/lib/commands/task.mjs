@@ -11,7 +11,7 @@ import { endPark } from "../park.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
-import { attemptAgent, describe, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask, waitForExit } from "../runs.mjs";
+import { attemptAgent, describe, earlierNames, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -99,8 +99,11 @@ export function cmdResult(args) {
   if (mine && d.state === "needs-decision" && task.decisionSeenAttempt !== d.attempt) saveTask(run, { ...task, decisionSeenAttempt: d.attempt });
   const r = d.result;
   const session = d.session;
+  // A named task (`rename`) shows its name, then its id and the names it had before.
+  const earlier = earlierNames(task);
   const lines = [
-    `task ${id} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
+    `task ${shownName(d)} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
+    d.name || earlier.length ? `id: ${id}${d.name ? ` · name: ${d.name}` : ""}${earlier.length ? ` · earlier names: ${earlier.join(", ")}` : ""}` : null,
     `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
@@ -150,14 +153,14 @@ export function cmdStop(args) {
     if (latest.attempt === task.attempt || !relayAlive(latest.pid, null, latest.outDir)) {
       const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
       stopped();
-      process.stdout.write(`stopped parked ${id}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
+      process.stdout.write(`stopped parked ${shownName(task)}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
       return;
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
   if (!relayAlive(task.pid, null, task.outDir)) {
     const left = endCommandGroups(run, task);
-    if (!left) die(`task ${id} is not running`);
+    if (!left) die(`task ${shownName(task)} is not running`);
     if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
     stopped();
     process.stdout.write(`stopped the ${leftText(left)}; its relay had already exited\n`);
@@ -173,7 +176,7 @@ export function cmdStop(args) {
   }
   const gone = waitForExit(task.pid, 15000, task.outDir);
   const left = gone ? endCommandGroups(run, task) : null;
-  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${id} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
+  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${shownName(task)} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
 }
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark
@@ -193,7 +196,7 @@ export async function cmdClose(args) {
     // Reading a result or restoring its folder needs a fresh explicit close.
     const explicitlyClosed = task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) &&
       (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt));
-    lines.push(`${task.id}: ${closeTask(run, task, explicitlyClosed ? {} : { closedBy: g.actor })}`);
+    lines.push(`${shownName(task)}: ${closeTask(run, task, explicitlyClosed ? {} : { closedBy: g.actor })}`);
     // The owner hears of a task that was open; one it had closed already changed nothing.
     if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }

@@ -15,7 +15,7 @@ import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { CLI_PATH, RUNS_DIR, WAIT_POLL_MS } from "../config.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
-import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
+import { listRuns, listTasks, loadRun, loadTask, shownName } from "../runs.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
 
@@ -33,8 +33,10 @@ function plannedTasksOf(run, plan, rows) {
   const waiting = new Map(progress.blocked.map((b) => [b.task.id, b.waitsOn]));
   const unbriefed = new Map(progress.unbriefed.map((u) => [u.task.id, u.problem]));
   const manual = new Set(progress.manual.map((t) => t.id));
+  // A planned task that has a record shows its name (`rename`).
+  const names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name]));
   return plan.tasks.map((t) => {
-    const base = { id: t.id, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
+    const base = { id: t.id, name: names.get(t.id) || null, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
     if (waiting.has(t.id)) return { ...base, status: "waiting", waitsOn: waiting.get(t.id) };
     if (unbriefed.has(t.id)) return { ...base, status: "ready", briefProblem: unbriefed.get(t.id) };
     if (manual.has(t.id)) return { ...base, status: "ready", manual: true };
@@ -48,20 +50,20 @@ function plannedTasksOf(run, plan, rows) {
 
 const STATUS_ORDER = ["waiting", "ready", "running", "needs-decision", "awaiting-review", "accepted", "integrated", "failed"];
 
-function planLines(plan, planned, unplanned) {
+function planLines(plan, planned, unplanned, shown = new Map()) {
   if (!plan) return [];
   const counts = new Map();
   for (const t of planned) counts.set(t.status, (counts.get(t.status) || 0) + 1);
   const order = [...STATUS_ORDER, ...[...counts.keys()].filter((s) => !STATUS_ORDER.includes(s))].filter((s) => counts.has(s));
   const note = (t) => (t.waitsOn
-    ? `waits on ${waitsOnText(t.waitsOn)}`
+    ? `waits on ${waitsOnText(t.waitsOn.map((w) => ({ ...w, id: shown.get(w.id) || w.id })))}`
     : t.briefProblem ? `brief ${t.briefProblem}`
       : t.manual ? "start by hand: it babysits a pull request"
         : t.integratedCommit ? `at ${short(t.integratedCommit)}${t.integratedInto ? ` in ${t.integratedInto}` : ""}`
           : "");
   return [
     `plan: ${shortText(plan.goal, 100)} (${planned.length} task${planned.length === 1 ? "" : "s"}: ${order.map((s) => `${counts.get(s)} ${s}`).join(", ")})`,
-    table(planned.map((t) => ({ id: t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
+    table(planned.map((t) => ({ id: t.name || t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
     ...(unplanned.length ? [`recorded outside the plan: ${unplanned.join(", ")}`] : []),
   ];
 }
@@ -83,11 +85,11 @@ function manualMergesOf(run, rows) {
 }
 
 // `integrate --already-merged` takes an accepted task only, so the line names what is left to do.
-function manualMergeLines(run, merges) {
+function manualMergeLines(run, merges, shown = new Map()) {
   const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
   const record = (id) => cmd(`integrate ${run.id} ${id} --already-merged`);
   return merges.flatMap((m) => [
-    `warning: ${m.id}'s branch ${m.branch} (${short(m.commit)}) is already in ${m.into}, but ${m.id} is not recorded as integrated (${m.phase}).`,
+    `warning: ${shown.get(m.id) || m.id}'s branch ${m.branch} (${short(m.commit)}) is already in ${m.into}, but ${shown.get(m.id) || m.id} is not recorded as integrated (${m.phase}).`,
     m.phase === "accepted"
       ? `  record it: ${record(m.id)}`
       : m.phase === "awaiting-review"
@@ -108,11 +110,12 @@ export function cmdStatus(args) {
   const plan = readPlan(run.dir);
   const plannedTasks = plan ? plannedTasksOf(run, plan, tasks) : [];
   const unplannedTasks = plan ? tasks.filter((t) => !plan.tasks.some((p) => p.id === t.id)).map((t) => t.id) : [];
+  const shown = new Map(tasks.map((t) => [t.id, shownName(t)]));
   const manualMerges = manualMergesOf(run, tasks);
   emit(
     args,
     { run: run.id, dir: run.dir, tasks, plannedTasks, unplannedTasks, manualMerges, ownership, ...(notices.length ? { changedByOthers: notices.map((n) => ({ ...n, text: noticeText(n) })) } : {}) },
-    [statusText(run, tasks, notices), ...planLines(plan, plannedTasks, unplannedTasks), ...manualMergeLines(run, manualMerges)].join("\n"),
+    [statusText(run, tasks, notices), ...planLines(plan, plannedTasks, unplannedTasks.map((id) => shown.get(id) || id), shown), ...manualMergeLines(run, manualMerges, shown)].join("\n"),
   );
 }
 
@@ -205,13 +208,13 @@ function reviewsDue(run, tasks, now = Date.now()) {
 function remindText(run, t) {
   const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
   const ways = t.mode === "read-only"
-    ? [`read it, which closes it: ${cmd(`result ${run.id} ${t.id}`)}`, `or close it: ${cmd(`close ${run.id} ${t.id}`)}`]
+    ? [`read it, which closes it: ${cmd(`result ${run.id} ${shownName(t)}`)}`, `or close it: ${cmd(`close ${run.id} ${shownName(t)}`)}`]
     : [
-      `accept it after committing its work: ${cmd(`accept ${run.id} ${t.id} --note "<why>"`)}`,
-      `or ask for changes, then resume it: ${cmd(`verdict ${run.id} ${t.id} changes --note "<fixes>"`)}`,
-      `or close it if you handled it another way: ${cmd(`close ${run.id} ${t.id}`)}`,
+      `accept it after committing its work: ${cmd(`accept ${run.id} ${shownName(t)} --note "<why>"`)}`,
+      `or ask for changes, then resume it: ${cmd(`verdict ${run.id} ${shownName(t)} changes --note "<fixes>"`)}`,
+      `or close it if you handled it another way: ${cmd(`close ${run.id} ${shownName(t)}`)}`,
     ];
-  return [`${t.id} has waited ${agoText(t.awaitingReviewMs || 0)} for review: not accepted, closed or given a verdict. Handle it now:`, ...ways.map((w) => `  ${w}`)].join("\n");
+  return [`${shownName(t)} has waited ${agoText(t.awaitingReviewMs || 0)} for review: not accepted, closed or given a verdict. Handle it now:`, ...ways.map((w) => `  ${w}`)].join("\n");
 }
 
 export async function cmdWait(args, resumed = null) {
@@ -294,22 +297,24 @@ export async function cmdWait(args, resumed = null) {
     const asked = main ? tasks.filter((t) => t.state === "running" && t.sessionQuestion) : [];
     const wakes = newAttention || due.length > 0 || asked.length > 0;
     if (wakes || done || message || notes.length || Date.now() >= deadline) {
-      const asking = tasks.filter((t) => t.state === "needs-decision").map((t) => t.id);
+      // A named task (`rename`) shows its name in place of its id; commands take either.
+      const label = (id) => shownName(tasks.find((t) => t.id === id)) || id;
+      const asking = tasks.filter((t) => t.state === "needs-decision").map(shownName);
       // Questions this wait does not own: for the user, or, in a wait that an orch task runs, any.
-      const questions = needing.filter((item) => item.kind === "question" && !asked.some((t) => t.id === item.task)).map((item) => item.task);
-      const limited = tasks.filter((t) => t.limitHit).map((t) => `${t.id} (${t.agent})`);
+      const questions = needing.filter((item) => item.kind === "question" && !asked.some((t) => t.id === item.task)).map((item) => label(item.task));
+      const limited = tasks.filter((t) => t.limitHit).map((t) => `${shownName(t)} (${t.agent})`);
       const hint =
         // A change someone else made shows in statusText(), once.
-        needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${item.task}: ${item.label} — ${item.reason}`).join("") +
+        needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${label(item.task)}: ${item.label} — ${item.reason}`).join("") +
         (questions.length ? `\n${questions.join(", ")} asked ${main ? "the user" : "a question"} and ${questions.length > 1 ? "keep" : "keeps"} working: ${main ? "it waits on the dashboard for the user's answer" : `answer what your brief covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\``} (SKILL.md, "Decisions agents hand back")` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
         (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +
         [...lifecycleHints(run, tasks), ...reportHints(run, tasks)].map((line) => `\n${line}`).join("") +
         due.map((t) => `\n${remindText(run, t)}`).join("");
-      const unreadText = finishedNow.length ? `\n(${finishedNow.map((t) => t.id).join(", ")} finished and nobody has read ${finishedNow.length > 1 ? "their results" : "its result"}: review ${finishedNow.length > 1 ? "them" : "it"} now with \`result\`, or \`close\` what you handled another way${running.length ? `, then wait again for ${running.map((t) => t.id).join(", ")}` : ""})` : "";
-      const reminded = `\n(review overdue: ${due.map((t) => t.id).join(", ")})${done ? unreadText : ""}`;
-      const open = asked.map((t) => `\n${t.id} asked you, ${agoText(Date.now() - Date.parse(t.sessionQuestion.time))} ago, and keeps working: "${t.sessionQuestion.text.replace(/\s+/g, " ").slice(0, 300)}"${t.sessionQuestion.open > 1 ? ` (+${t.sessionQuestion.open - 1} more)` : ""}. Answer it now with \`node ${CLI_PATH} send ${run.id} ${t.id} "<answer>"\`: wait exits 5 until you do.`).join("");
-      const tail = newAttention ? "\n(a task needs attention)" : due.length ? reminded : asked.length ? `\n(${asked.map((t) => t.id).join(", ")} ${asked.length > 1 ? "wait" : "waits"} for your answer)${done ? unreadText : ""}` : done ? unreadText : message || notes.length ? "" : "\n(still running: wait timed out)";
+      const unreadText = finishedNow.length ? `\n(${finishedNow.map(shownName).join(", ")} finished and nobody has read ${finishedNow.length > 1 ? "their results" : "its result"}: review ${finishedNow.length > 1 ? "them" : "it"} now with \`result\`, or \`close\` what you handled another way${running.length ? `, then wait again for ${running.map(shownName).join(", ")}` : ""})` : "";
+      const reminded = `\n(review overdue: ${due.map(shownName).join(", ")})${done ? unreadText : ""}`;
+      const open = asked.map((t) => `\n${shownName(t)} asked you, ${agoText(Date.now() - Date.parse(t.sessionQuestion.time))} ago, and keeps working: "${t.sessionQuestion.text.replace(/\s+/g, " ").slice(0, 300)}"${t.sessionQuestion.open > 1 ? ` (+${t.sessionQuestion.open - 1} more)` : ""}. Answer it now with \`node ${CLI_PATH} send ${run.id} ${shownName(t)} "<answer>"\`: wait exits 5 until you do.`).join("");
+      const tail = newAttention ? "\n(a task needs attention)" : due.length ? reminded : asked.length ? `\n(${asked.map(shownName).join(", ")} ${asked.length > 1 ? "wait" : "waits"} for your answer)${done ? unreadText : ""}` : done ? unreadText : message || notes.length ? "" : "\n(still running: wait timed out)";
       const noted = notes.length ? `\n${notes.map(noteText).join("\n")}\n(${notes.length > 1 ? "notes" : "a note"} from your tasks, sent with \`tell\`: no answer needed)` : "";
       emit(args, {
         run: run.id, finished: done, tasks, attention: needing, ...(message ? { message } : {}),

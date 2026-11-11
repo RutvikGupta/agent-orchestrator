@@ -7,7 +7,7 @@ import { compact, shortText, table } from "./format.mjs";
 import { listNative, mainRow } from "./native.mjs";
 import { noticeText, ownershipOf, readOnlyMark, unseenNotices } from "./ownership.mjs";
 import { reviveParked } from "./park.mjs";
-import { listRuns, listTasks } from "./runs.mjs";
+import { listRuns, listTasks, shownName } from "./runs.mjs";
 
 export function totals(tasks) {
   const t = { running: 0, finished: 0, tokensIn: 0, tokensOut: 0, exact: true };
@@ -41,7 +41,8 @@ function attemptsLabel(t) {
 
 function statusRows(tasks) {
   return tasks.map((t) => ({
-    id: t.native && t.parent !== "orchestrator" ? `${t.parent}/${t.id}` : t.id,
+    // A named task shows its name in place of its id (`rename`).
+    id: t.native && t.parent !== "orchestrator" ? `${t.parent}/${t.id}` : shownName(t),
     agent: t.agent,
     model: t.modelLabel,
     mode: t.mode,
@@ -63,7 +64,8 @@ function stuckMarker(t) {
 export function statusText(run, tasks, notices = unseenNotices(run)) {
   const native = listNative(run, tasks);
   const main = mainRow(run);
-  const changed = notices.map((n) => `${n.task || "run"}: ${noticeText(n)}`);
+  const names = new Map(tasks.filter((t) => t.name).map((t) => [t.id, t.name]));
+  const changed = notices.map((n) => `${names.get(n.task) || n.task || "run"}: ${noticeText(n)}`);
   const own = ownershipOf(run);
   if (!tasks.length && !native.length) return [`run ${run.id}: no tasks yet${readOnlyMark(own)}`, ...changed].join("\n");
   // A parked task whose watcher is not running (after a reboot, say) gets a new one, and is reported.
@@ -77,30 +79,30 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
     ...(native.length ? ["native sub-agents (started with the host's own tool, not orch.mjs):", table(statusRows(native), cols)] : []),
     `total: ${totalsText(totals([...tasks, ...native]))}`,
     ...revived.map((r) => (r.adopted
-      ? `${r.id}: a resume died after starting its relay (pid ${r.pid}), which still runs; recorded it as attempt ${r.adopted}`
-      : `${r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
-    ...nestedLines(run),
+      ? `${names.get(r.id) || r.id}: a resume died after starting its relay (pid ${r.pid}), which still runs; recorded it as attempt ${r.adopted}`
+      : `${names.get(r.id) || r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
+    ...nestedLines(run, names),
     ...whyLines(tasks),
-    ...tasks.map((t) => `  ${t.id}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
+    ...tasks.map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
     ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }
 
 // Runs that this run's tasks started in turn.
-function nestedLines(run) {
+function nestedLines(run, names = new Map()) {
   const kids = listRuns().filter((r) => r.orchestrator?.parentRun === run.id);
   if (!kids.length) return [];
   return [
     "nested runs (started by this run's tasks):",
-    ...kids.map((r) => `  ${r.orchestrator.parentTask || "?"} → ${r.id}: ${totalsText(totals(listTasks(r)))}  (status: node ${CLI_PATH} status ${r.id})`),
+    ...kids.map((r) => `  ${names.get(r.orchestrator.parentTask) || r.orchestrator.parentTask || "?"} → ${r.id}: ${totalsText(totals(listTasks(r)))}  (status: node ${CLI_PATH} status ${r.id})`),
   ];
 }
 
 function whyLines(tasks) {
   const chosen = tasks.filter((t) => t.why);
   if (!chosen.length) return [];
-  const width = Math.max(...chosen.map((t) => t.id.length));
-  return ["why:", ...chosen.map((t) => `  ${t.id.padEnd(width)}  ${t.agent}${t.tier ? ` ${t.tier}` : ""}: ${shortText(t.why, 110)}`)];
+  const width = Math.max(...chosen.map((t) => shownName(t).length));
+  return ["why:", ...chosen.map((t) => `  ${shownName(t).padEnd(width)}  ${t.agent}${t.tier ? ` ${t.tier}` : ""}: ${shortText(t.why, 110)}`)];
 }
 
 function orchestratorLabel(run) {
@@ -191,7 +193,7 @@ export function renderTree(runs, tty) {
     if (run.goal) out.push(`   goal: ${shortText(run.goal, 90)}`);
     const rows = statusRows(tasks).map((row, i) => ({
       ...row,
-      id: `${tasks[i].treePrefix}${tasks[i].main ? "main session" : tasks[i].id}`,
+      id: `${tasks[i].treePrefix}${tasks[i].main ? "main session" : tasks[i].native ? tasks[i].id : shownName(tasks[i])}`,
       session: tasks[i].session ? tasks[i].session.slice(0, 8) : "-",
     }));
     const cols = ["id", "agent", "model", "mode", "state", "elapsed", "steps", "tokens", "session", "now"];

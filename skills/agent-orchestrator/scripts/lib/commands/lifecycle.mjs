@@ -738,27 +738,32 @@ function recoverRun(run, rows, own) {
   const planned = new Set((plan?.tasks || []).map((t) => t.id));
   const phase = (p) => rows.filter((r) => r.phase === p);
   const closed = (r) => Boolean(records.get(r.id)?.closedAt);
-  const id1 = (items) => (items.length === 1 ? (items[0].id ?? items[0].task.id) : "<task>"); // the id in a group's next command
+  // A task shows its name (`rename`) in place of its id, a planned one too once it has a record;
+  // commands take either.
+  const nameOf = (id) => records.get(id)?.name || id;
+  const label = (r) => nameOf(r.id);
+  const id1 = (items) => (items.length === 1 ? nameOf(items[0].id ?? items[0].task.id) : "<task>"); // the task in a group's next command
+  const waitsOn = (b) => waitsOnText(b.waitsOn.map((w) => ({ ...w, id: nameOf(w.id) })));
   const groups = [
     {
       key: "running",
       label: "running",
       items: phase("running"),
-      show: (r) => `${r.id} (${r.agent}, ${r.elapsed}${r.quietMs > QUIET_AFTER_MS ? `, quiet ${formatElapsed(r.quietMs)}` : ""})`,
+      show: (r) => `${label(r)} (${r.agent}, ${r.elapsed}${r.quietMs > QUIET_AFTER_MS ? `, quiet ${formatElapsed(r.quietMs)}` : ""})`,
       next: () => `${CLI} wait ${run.id} --timeout 0 (in the background)`,
     },
     {
       key: "parked",
       label: "parked babysitters (a watcher resumes each on its next pull-request event or message)",
       items: phase("parked"),
-      show: (r) => `${r.id} (${r.parked?.waitsFor || "waits for its pull request"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
+      show: (r) => `${label(r)} (${r.parked?.waitsFor || "waits for its pull request"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
       next: (items) => (items.some((r) => !["alive", "starting"].includes(r.parked?.watcher)) ? `${CLI} status ${run.id} (starts a watcher that is not running)` : null),
     },
     {
       key: "needs-decision",
       label: "needs decision",
       items: phase("needs-decision"),
-      show: (r) => r.id,
+      show: label,
       next: (items) =>
         `${CLI} result ${run.id} ${id1(items)}; decide, then resume it: ${CLI} start ${run.id} ${id1(items)} --agent ${items.length === 1 ? items[0].agent : "<same>"} --brief <answer> -- --session ${items.length === 1 && items[0].session ? items[0].session : "<session>"}`,
     },
@@ -766,44 +771,44 @@ function recoverRun(run, rows, own) {
       key: "failed",
       label: "failed",
       items: phase("failed").filter((r) => !closed(r)),
-      show: (r) => `${r.id} (${r.limitHit ? "usage limit" : r.state})`,
+      show: (r) => `${label(r)} (${r.limitHit ? "usage limit" : r.state})`,
       next: (items) => `${CLI} result ${run.id} ${id1(items)}; then resume it, give it to the other agent, or close it`,
     },
     {
       key: "awaiting-review",
       label: "awaiting review",
       items: phase("awaiting-review").filter((r) => r.mode?.split("+")[0] !== "babysit"),
-      show: (r) => `${r.id} (waited ${agoText(r.awaitingReviewMs || 0)})`,
+      show: (r) => `${label(r)} (waited ${agoText(r.awaitingReviewMs || 0)})`,
       next: (items) => `${CLI} result ${run.id} ${id1(items)}; review and commit its work; then ${CLI} accept ${run.id} ${id1(items)}`,
     },
     {
       key: "accepted",
       label: "accepted, not integrated",
       items: phase("accepted"),
-      show: (r) => r.id,
+      show: label,
       next: (items) => `${CLI} integrate ${run.id} ${id1(items)}`,
     },
-    { key: "ready", label: "ready to dispatch", items: progress.ready, show: (t) => t.id, next: () => `${CLI} dispatch ${run.id}` },
+    { key: "ready", label: "ready to dispatch", items: progress.ready, show: label, next: () => `${CLI} dispatch ${run.id}` },
     {
       key: "unbriefed",
       label: "ready, waiting for a brief",
       items: progress.unbriefed,
-      show: (u) => `${u.task.id} (${u.problem})`,
+      show: (u) => `${nameOf(u.task.id)} (${u.problem})`,
       next: (items) => `${CLI} brief ${run.id} ${id1(items)}; fill it in; then ${CLI} dispatch ${run.id}`,
     },
     {
       key: "manual",
       label: "babysitters to start by hand",
       items: progress.manual,
-      show: (t) => t.id,
+      show: label,
       next: (items) => `${CLI} start ${run.id} ${id1(items)} --agent claude --babysit --pr <n> --why "..." --brief <brief>`,
     },
-    { key: "blocked", label: "blocked", items: progress.blocked, show: (b) => `${b.task.id} waits on ${waitsOnText(b.waitsOn)}`, next: () => null },
+    { key: "blocked", label: "blocked", items: progress.blocked, show: (b) => `${nameOf(b.task.id)} waits on ${waitsOn(b)}`, next: () => null },
     {
       key: "prepared",
       label: "prepared, not started",
       items: phase("prepared").filter((r) => !planned.has(r.id)),
-      show: (r) => r.id,
+      show: label,
       next: (items) => `${CLI} start ${run.id} ${id1(items)} --agent <agent> --why "..." --brief <brief>`,
     },
   ];
@@ -814,15 +819,15 @@ function recoverRun(run, rows, own) {
     const merged = manualMerge(run, records.get(r.id));
     return merged ? [{ id: r.id, ...merged }] : [];
   });
-  const warnings = manualMerges.map((m) => `${m.id}: branch ${m.branch} was merged into ${m.into} without integrate; review and accept it, then record it with: ${CLI} integrate ${run.id} ${m.id} --already-merged`);
+  const warnings = manualMerges.map((m) => `${nameOf(m.id)}: branch ${m.branch} was merged into ${m.into} without integrate; review and accept it, then record it with: ${CLI} integrate ${run.id} ${m.id} --already-merged`);
   for (const r of rows) {
     const wt = records.get(r.id)?.worktree?.path;
     if (r.state === "running" || !wt || !fs.existsSync(wt)) continue;
     const dirty = uncommitted(wt);
-    if (dirty.length) warnings.push(`${r.id}: ${plural(dirty.length, "uncommitted change")} in its worktree ${wt} (git -C ${wt} status)`);
+    if (dirty.length) warnings.push(`${label(r)}: ${plural(dirty.length, "uncommitted change")} in its worktree ${wt} (git -C ${wt} status)`);
   }
   for (const r of rows.filter((r) => r.state === "aborted" && !r.result)) {
-    warnings.push(`${r.id}: its process is gone without a result (${CLI} log ${run.id} ${r.id})`);
+    warnings.push(`${label(r)}: its process is gone without a result (${CLI} log ${run.id} ${r.id})`);
   }
 
   const mark = readOnlyMark(own);
@@ -836,8 +841,8 @@ function recoverRun(run, rows, own) {
     const next = g.next(g.items);
     if (next) lines.push(`    next: ${next}`);
   }
-  if (integrated.length) lines.push(`  integrated (${integrated.length}): ${integrated.map((r) => r.id).join(", ")}`);
-  if (closedFailed.length) lines.push(`  closed after failing (${closedFailed.length}): ${closedFailed.map((r) => r.id).join(", ")}`);
+  if (integrated.length) lines.push(`  integrated (${integrated.length}): ${integrated.map(label).join(", ")}`);
+  if (closedFailed.length) lines.push(`  closed after failing (${closedFailed.length}): ${closedFailed.map(label).join(", ")}`);
   if (!rows.length && !plan) lines.push("  no tasks yet");
   for (const w of warnings) lines.push(`  ! ${w}`);
 
