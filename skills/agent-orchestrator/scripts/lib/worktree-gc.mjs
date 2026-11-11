@@ -112,14 +112,21 @@ function diskBytes(wt) {
   return r.status === 0 && Number.isFinite(kb) ? kb * 1024 : null;
 }
 
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false } = {}) {
+// `reclaimKept`: `cleanup` also stops the build daemons a finished task left in a worktree that is
+// kept, as `result` and `accept` do; a worktree whose task still runs, or that another task uses,
+// is left alone.
+export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
     let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed });
-    if (reason) { report.kept.push({ ...entry, reason }); continue; }
+    if (reason) {
+      report.kept.push({ ...entry, reason });
+      if (reclaimKept && !dryRun && fs.existsSync(entry.path) && !isParked(run, task) && !relayAlive(task.pid, task.startedAt, task.outDir)) reclaimTask(run, task);
+      continue;
+    }
     let g;
     if (!dryRun) {
       g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id] });

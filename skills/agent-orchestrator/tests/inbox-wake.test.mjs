@@ -133,5 +133,7 @@ test('pr-watch wakes between GitHub polls with status and a single-line message'
   assert.match(result.stdout, /^PR #42 OPEN/);
   assert.ok(result.stdout.includes(`message waiting (${sent.time}): check this please`));
   assert.equal(result.stdout.trim().split('\n').length, 4);
-  assert.equal(fs.readFileSync(gh.calls, 'utf8').trim().split('\n').length, 2, 'no extra GitHub requests');
+  // Two looks at the pull request, the first check and the status it prints on waking, each of two
+  // requests: the pull request and its merge-queue entry. The wake itself adds none.
+  assert.equal(fs.readFileSync(gh.calls, 'utf8').trim().split('\n').length, 4, 'no extra GitHub requests');
 });

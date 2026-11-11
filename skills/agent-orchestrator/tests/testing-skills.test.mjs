@@ -162,7 +162,7 @@ test('reviews check that the skill ran, research and babysitters get no section,
   }
 
   // The note that start appends to every brief asks for the testing check in the structured result.
-  const started = await f.start(run, 'note-check');
+  const started = await f.start(run, 'note-check', { flags: ['--unplanned'] }); // the run has a plan, which does not name it
   const sent = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
   assert.match(sent, /- `checks`: one object per check[^\n]*\n {2}- List the testing-skill or synthetic end-to-end check you ran \(name the skill in its `cmd`\), or one marked `not-run` with the reason in its `note`\.\n/);
   await f.finished(run, 'note-check');

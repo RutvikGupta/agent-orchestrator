@@ -121,7 +121,7 @@ test('help explains the plan options, and each option is accepted only by its ow
   const f = await fixture(t);
   const help = (await f.command(['--help'])).stdout;
   for (const text of [
-    'dispatch RUN [--max N] [--dry-run] [--follow]',
+    'dispatch RUN [--max N] [--dry-run] [--follow [--timeout DUR]]',
     '--follow stays after that first wave',
     'a decision handed back, or a failure',
     'from the head of the branch they were integrated into',

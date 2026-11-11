@@ -108,7 +108,7 @@ export async function cmdCleanup(args) {
     adopt: args.adopt,
     refused: () => rows.filter((t) => loadTask(run, t.id)?.worktree).map((t) => `${t.id}'s worktree`),
   });
-  const report = await collectWorktrees(run, { actor: g.actor });
+  const report = await collectWorktrees(run, { actor: g.actor, reclaimKept: true });
   emit(args, report, `${args.force || args["delete-branches"] ? "Safety checks cannot be overridden; branches are always kept.\n" : ""}${collectionText(report)}`);
 }
 
