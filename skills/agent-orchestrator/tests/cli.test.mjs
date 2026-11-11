@@ -2,7 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fixture, readJson } from './helpers.mjs';
+
+// Count a normal installed path even when this test runs in a long worktree path.
+const installedCliPath = '/Users/example/agent-orchestrator/skills/agent-orchestrator/scripts/orch.mjs';
+const delegationNoteLength = (note, cliPath = fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url))) =>
+  note.replaceAll(cliPath, installedCliPath).length;
+
+test('delegation note length keeps the installed path budget at the 2500-character boundary', () => {
+  for (const cliPath of ['/short/orch.mjs', '/long/worktree/'.repeat(10) + 'orch.mjs']) {
+    const note = 'x'.repeat(2500 - 2 * 76) + cliPath + cliPath;
+    assert.equal(delegationNoteLength(note, cliPath), 2500, 'both installed paths count toward the unchanged cap');
+    assert.equal(delegationNoteLength(note, cliPath) < 2500, false, 'a note at the limit must be rejected');
+  }
+});
 
 test('new records the repository and worktree prepares an isolated branch', async (t) => {
   const f = await fixture(t);
@@ -90,7 +104,8 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   const started = await f.start(run, 'writer');
   const brief = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
   const note = brief.slice(brief.indexOf('## Delegating further'), brief.indexOf('## Decisions'));
-  assert.ok(note.length > 0 && note.length < 2500, `the note stays short: ${note.length} characters`);
+  const noteLength = delegationNoteLength(note);
+  assert.ok(noteLength > 0 && noteLength < 2500, `the note stays short: ${noteLength} characters`);
   // Delegate through the skill, rather than doing parts one after another.
   assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
   assert.match(note, /run it as a command task with no model .*never as an agent that runs it and waits/);

@@ -20,6 +20,9 @@ export const SKILL_ROOTS = process.env.AGENT_ORCH_SKILLS_DIR
   : [path.dirname(SKILL_DIR), path.join(HOME, ".agents", "skills"), path.join(HOME, ".claude", "skills"), path.join(HOME, ".codex", "skills")];
 export const DEFAULT_MAX_PARALLEL = Number(process.env.AGENT_ORCH_MAX_PARALLEL || 8);
 export const DEPTH = Number(process.env.AGENT_ORCH_DEPTH || 0);
+// Tests can poll promptly without changing the normal three-second wait cadence.
+const configuredWaitPollMs = Number(process.env.AGENT_ORCH_WAIT_POLL_MS);
+export const WAIT_POLL_MS = Number.isFinite(configuredWaitPollMs) && configuredWaitPollMs > 0 ? configuredWaitPollMs : 3000;
 // A delegated agent may delegate in turn, down to this many levels of agents below the user's
 // session. Deeper levels run fewer tasks at once, since every level multiplies the agents:
 // the user's session 8 (AGENT_ORCH_MAX_PARALLEL), an agent it started 6, then 4, then 2.

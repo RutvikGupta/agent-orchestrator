@@ -13,7 +13,7 @@ import { reviveParked } from "../park.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
-import { CLI_PATH, RUNS_DIR } from "../config.mjs";
+import { CLI_PATH, RUNS_DIR, WAIT_POLL_MS } from "../config.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
 import { listRuns, listTasks, loadRun, loadTask } from "../runs.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
@@ -354,7 +354,7 @@ export async function cmdWait(args, resumed = null) {
     }
     // Short waits usually finish within the first interval; avoid a handoff for those.
     polled = true;
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
   }
 }
 

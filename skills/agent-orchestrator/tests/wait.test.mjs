@@ -32,7 +32,7 @@ test('wait --all keeps waiting until every task has finished', async (t) => {
   await f.ready(fast);
   f.release(fast);
   await f.finished(run, 'fast');
-  const waited = await f.command(['wait', run.id, '--all', '--timeout', '4s'], { code: 3 });
+  const waited = await f.command(['wait', run.id, '--all', '--timeout', '300ms'], { code: 3 });
   assert.match(waited.stdout, /still running: wait timed out/);
   f.release(slow);
   await f.finished(run, 'slow');
@@ -65,7 +65,7 @@ test('a finished result that was read, closed or accepted does not wake wait', a
   await f.command(['close', run.id, 'closed']);
   const slow = await f.start(run, 'slow', { config: { hold: true }, flags: ['--read-only'] });
   await f.ready(slow);
-  const waited = await f.command(['wait', run.id, '--timeout', '4s'], { code: 3 });
+  const waited = await f.command(['wait', run.id, '--timeout', '300ms'], { code: 3 });
   assert.match(waited.stdout, /still running: wait timed out/);
   f.release(slow);
   await f.finished(run, 'slow');
@@ -83,7 +83,7 @@ test('a decision handed back while no wait ran wakes the next wait until its res
   assert.match(woke.stdout, /asks handed back a decision/);
   await f.command(['result', run.id, 'asks']);
   assert.equal((await f.json(['status', run.id])).tasks.find((row) => row.id === 'asks').state, 'needs-decision');
-  const quiet = await f.command(['wait', run.id, '--timeout', '4s'], { code: 3 });
+  const quiet = await f.command(['wait', run.id, '--timeout', '300ms'], { code: 3 });
   assert.match(quiet.stdout, /still running: wait timed out/);
   f.release(slow);
   await f.finished(run, 'slow');

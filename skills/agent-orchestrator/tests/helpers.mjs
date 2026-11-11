@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { after } from 'node:test';
 
 const cli = fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url));
 const relay = fileURLToPath(new URL('./fixtures/relay.mjs', import.meta.url));
+// Make the test worker the nearest fake host. CLI children stop here instead of
+// walking the user's session ancestry; explicit fake hosts below it still win.
+// All process scans keep using the real table, including PID and group checks.
+process.title = 'codex';
+let baseRepository;
+let baseRoot;
+after(() => { if (baseRoot) fs.rmSync(baseRoot, { recursive: true, force: true }); });
 export const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 export function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -67,6 +75,7 @@ export async function fixture(t) {
     PATH: process.env.PATH, HOME: home, TMPDIR: path.join(root, 'tmp'),
     LANG: 'C', LC_ALL: 'C', TZ: 'UTC',
     AGENT_ORCH_HOME: state, AGENT_ORCH_SKILLS_DIR: skills,
+    AGENT_ORCH_WAIT_POLL_MS: '100',
     CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
@@ -91,7 +100,12 @@ export async function fixture(t) {
       return result.stdout.trim();
     },
     async newRun(name = `run-${runs.length}`, extra = {}) {
-      const run = await f.json(['new', '--repo', repo, '--name', name, '--goal', 'Black-box CLI fixture'], { env: extra });
+      // Wait discovery scans the real process table across all fixture state roots.
+      // Encode case losslessly and reserve the suffix within the CLI's 40-character
+      // slug limit, even when an explicit name is long.
+      const suffix = Buffer.from(path.basename(root)).toString('hex');
+      const uniqueName = `${String(name).slice(0, 39 - suffix.length)}-${suffix}`;
+      const run = await f.json(['new', '--repo', repo, '--name', uniqueName, '--goal', 'Black-box CLI fixture'], { env: extra });
       runs.push(run);
       return run;
     },
@@ -211,13 +225,40 @@ export async function fixture(t) {
           }
         }
       } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        // A finish notice can still be writing after its relay and park were
+        // closed. Only fixtures that launched watchers need a process scan.
+        const watcherFiles = fs.readdirSync(state, { recursive: true }).some((file) =>
+          path.basename(file) === 'parent-notice.log' || /^park-watcher-\d+\.json$/.test(path.basename(file)));
+        // The folder is removed whether or not the writers exit in time.
+        try {
+          if (watcherFiles) await eventually(() => {
+            const result = spawnSync('ps', ['-axww', '-o', 'pid=,command='], {
+              encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024,
+            });
+            if (result.status !== 0) return false;
+            return !result.stdout.split('\n').some((line) => line.includes(`${root}${path.sep}`)
+              && (line.includes('finish-notice.mjs') || line.includes(' park-watch ')));
+          }, 'fixture background writers did not exit');
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
       }
     }
   });
-  await f.git(['init', '-q', '--initial-branch=main']);
-  fs.writeFileSync(path.join(repo, 'README.md'), 'Temporary fixture repository.\n');
-  await f.git(['add', 'README.md']);
-  await f.git(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fixture base']);
+  // Build the immutable initial commit once per test file. Copy its files, rather than
+  // sharing a checkout or hard links: each fixture may change refs, config and objects.
+  const initializesBase = !baseRepository;
+  if (initializesBase) {
+    baseRepository = (async () => {
+      await f.git(['init', '-q', '--initial-branch=main']);
+      fs.writeFileSync(path.join(repo, 'README.md'), 'Temporary fixture repository.\n');
+      await f.git(['add', 'README.md']);
+      await f.git(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fixture base']);
+      baseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-base-'));
+      fs.cpSync(repo, baseRoot, { recursive: true });
+    })();
+  }
+  await baseRepository;
+  if (!initializesBase) fs.cpSync(baseRoot, repo, { recursive: true });
   return f;
 }

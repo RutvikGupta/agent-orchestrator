@@ -1,19 +1,23 @@
 # CLI regression tests
 
-Run from the skill root with Node 22:
+Run from the repository root with Node 22:
 
 ```sh
-env -u AGENT_ORCH_DEPTH -u AGENT_ORCH_RUN -u AGENT_ORCH_TASK node --test tests/
+bash tools/test.sh                 # full suite
+bash tools/test.sh --quick         # quick lane
+bash tools/test.sh <file>...       # selected files
 ```
 
-There are no npm dependencies. The tests use Node's standard library and the same
-local `git`/process tools the CLI uses. `package.json` and `index.mjs` make the
-explicit directory argument work on Node 22. Individual files can also be run with
-`node --test tests/cli.test.mjs` or `node --test tests/dashboard.test.mjs`.
+From the skill root, use `../../tools/test.sh` with the same arguments. The script
+clears `AGENT_ORCH_DEPTH`, `AGENT_ORCH_RUN`, `AGENT_ORCH_TASK`,
+`CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID`. It defaults to four workers normally
+or two when delegated; set `AGENT_ORCH_TEST_CONCURRENCY` to override the count.
+There are no npm dependencies; tests use Node's standard library and the same local
+`git`/process tools the CLI uses.
 
 Every test creates a temporary repository, state root, home, skills folder, Claude
-projects folder, and Codex sessions folder. The initial commit exists only in the
-temporary fixture repository. Child environments are allowlisted: inherited
+projects folder, and Codex sessions folder. A shared immutable per-worker seed is
+copied into independent temporary repositories. Child environments are allowlisted: inherited
 `AGENT_ORCH_DEPTH`, `AGENT_ORCH_RUN`, `AGENT_ORCH_TASK`, session IDs, git settings,
 and Node preloads are excluded. Nesting tests explicitly set only their intended
 depth. No real agents, network services, credentials, browser, or user state are
@@ -23,8 +27,9 @@ The tests invoke the CLI in child processes and inspect its public output,
 artifacts, and HTTP endpoints. They never import `orch.mjs` or its internal modules.
 The only seeded CLI metadata is the launching-session identity in temporary
 `run.json` files: ancestor process detection depends on the test runner's host, so
-this connects transcript fixtures deterministically without impersonating a host
-process. All other run/task bookkeeping is produced by CLI commands.
+this connects transcript fixtures deterministically. The helper sets `process.title = 'codex'`
+to act as a fake nearest host, while process scans remain real. All other run/task
+bookkeeping is produced by CLI commands.
 
 `fixtures/relay.mjs` is copied into each fake delegate skill. A brief can contain
 `<!-- fake-relay {"status":"failed","error":"Usage limit reached"} -->`.
@@ -47,7 +52,8 @@ Use `hold: true` and `f.release(task)` when the test must decide when a relay
 finishes. An unreleased relay fails after 30 seconds. For changes that must happen
 after `wait` has observed its initial state, use `f.waitAfterPoll(args, change,
 opts)`. Its child-only preload signals the first polling interval and holds the
-next callback until `change` completes, preserving the real three-second interval.
+next callback until `change` completes. Fixtures poll every 100 ms; production
+polling remains at 3000 ms.
 This avoids guessing CLI startup or retry timing with sleeps. Tests asserting
 timeout behavior keep explicit deadlines; other handshake waits use timeout zero
 and remain bounded by the command helper's watchdog.

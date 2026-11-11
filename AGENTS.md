@@ -33,6 +33,9 @@ symlinks into this checkout (`~/agent-orchestrator`), so a change here reaches e
   neutral examples such as `example-org/example-repo`.
 - No secrets or tokens, in files or in commit messages.
 - Test the orchestrator with
-  `cd skills/agent-orchestrator && env -u AGENT_ORCH_DEPTH -u AGENT_ORCH_RUN -u AGENT_ORCH_TASK node --test tests/`
-  before each push that changes it.
+  `bash tools/test.sh` from the repository root before each push that changes it. Use
+  `bash tools/test.sh --quick` for the quick lane or `bash tools/test.sh <file>...` for selected files.
+  The script clears `AGENT_ORCH_DEPTH`, `AGENT_ORCH_RUN`, `AGENT_ORCH_TASK`,
+  `CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID`; it defaults to four workers normally
+  or two when delegated. Override this with `AGENT_ORCH_TEST_CONCURRENCY`.
 - No dependencies beyond Node's standard library.

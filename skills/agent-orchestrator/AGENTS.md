@@ -22,9 +22,12 @@ committing and pushing.
 
 ## Rules
 
-- Run the suite with `env -u AGENT_ORCH_DEPTH -u AGENT_ORCH_RUN -u AGENT_ORCH_TASK node --test tests/`.
-  Delegated agents have those variables set, and they change parallel limits and nesting.
-  `tests/index.mjs` loads every `*.test.mjs` file.
+- From the repository root, run `bash tools/test.sh` for the suite, `bash tools/test.sh --quick`
+  for the quick lane, or `bash tools/test.sh <file>...` for selected files. From this skill root,
+  use `../../tools/test.sh` with the same arguments. The script clears `AGENT_ORCH_DEPTH`,
+  `AGENT_ORCH_RUN`, `AGENT_ORCH_TASK`, `CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID`.
+  It defaults to four workers normally or two when delegated; override with
+  `AGENT_ORCH_TEST_CONCURRENCY`.
 - Tests synchronize with the helpers' handshakes, never with sleeps: `f.finished` waits for a
   finished result, `f.ready` and `f.release` (with the fake relay's `hold`) decide when a relay
   ends, and `f.waitAfterPoll` changes a fixture after `wait`'s first poll. A relay can publish its
@@ -38,5 +41,6 @@ committing and pushing.
 - Keep CLI output, exit codes, file formats and HTTP endpoints stable unless the task changes them.
   Other sessions and agents parse them.
 - `SKILL.md` and the references use plain English, short sentences, and terms defined on first use.
-  Update them when behavior changes, and keep `SKILL.md` near 600 lines.
+  Update them when behavior changes.
+- Keep `SKILL.md` at most 300 lines (`tests/skill-doc.test.mjs` checks it); put step detail in a file under `references/` and point to it from the step.
 - No dependencies beyond Node's standard library.
