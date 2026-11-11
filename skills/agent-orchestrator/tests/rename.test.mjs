@@ -395,6 +395,34 @@ test('two renames to one name at once cannot both succeed: the second waits for 
   assert.equal(fs.existsSync(path.join(run.dir, 'rename.lock')), false);
 });
 
+test('a live holder keeps the rename lock however old it is, and a dead reclaim lock refuses renames', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'impl', { flags: ['--read-only'] });
+  await f.finished(run, 'impl');
+  const lock = path.join(run.dir, 'rename.lock');
+  // Held by a live process (this test), with a time far in the past: age alone never evicts it.
+  writeJson(lock, { pid: process.pid, at: new Date(Date.now() - 3600_000).toISOString(), id: 'live' });
+  const waited = await f.command(['rename', run.id, 'impl', '--to', 'renamed'], { code: 1 });
+  assert.match(waited.stderr, new RegExp(`another rename in run \\S+ holds \\S+ \\(pid ${process.pid}\\); nothing changed`));
+  assert.equal(readJson(lock).id, 'live', 'the live lock is untouched');
+  assert.equal(record(f, run, 'impl').name, undefined);
+  // The same PID with another start time is a different, ended process: its lock is reclaimed.
+  writeJson(lock, { pid: process.pid, started: 'Thu Jan  1 00:00:00 2026', at: new Date().toISOString(), id: 'reused' });
+  await f.command(['rename', run.id, 'impl', '--to', 'renamed']);
+  assert.equal(record(f, run, 'impl').name, 'renamed');
+  // A reclaim lock left by a process that died fails closed, naming the file to remove.
+  const dead = spawnSync('true').pid;
+  writeJson(lock, { pid: dead, at: new Date().toISOString(), id: 'dead' });
+  writeJson(`${lock}.reclaim`, { pid: dead, at: new Date().toISOString(), id: 'dead-reclaim' });
+  const closed = await f.command(['rename', run.id, 'impl', '--to', 'again'], { code: 1 });
+  assert.match(closed.stderr, /died while clearing a stale lock; nothing changed\. Remove \S+rename\.lock\.reclaim and try again/);
+  assert.equal(record(f, run, 'impl').name, 'renamed');
+  fs.rmSync(`${lock}.reclaim`);
+  await f.command(['rename', run.id, 'impl', '--to', 'again']);
+  assert.equal(record(f, run, 'impl').name, 'again');
+});
+
 test('rework --from takes a reviewer by its name, even the name coordinator; verdict --reviewer coordinator stays the coordinator', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();

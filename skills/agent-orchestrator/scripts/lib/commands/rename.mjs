@@ -14,7 +14,7 @@ import path from "node:path";
 import { TASK_ID } from "../config.mjs";
 import { actorLabel, actorOf, callerIdentity, guard, ownershipOf, recordChange, runNamed } from "../ownership.mjs";
 import { readPlan } from "../plan.mjs";
-import { earlierNames, exists, loadRun, loadTask, saveTask, taskIdOf, taskNamed, validTask } from "../runs.mjs";
+import { earlierNames, exists, loadRun, loadTask, processStarted, saveTask, taskIdOf, taskNamed, validTask } from "../runs.mjs";
 import { die, emit, readJson } from "../util.mjs";
 
 // Where each command reads a task: the positions in its arguments (an index, or "rest" for every
@@ -65,18 +65,26 @@ function nameProblem(run, id, name) {
 
 // The run's rename lock: one rename at a time checks that a name is free and saves it, so two
 // renames of different tasks to one name cannot both pass the check. The lock file is created
-// whole and exclusively (a temporary file linked to its name), and names its holder. A holder that
-// has exited, or a lock older than LOCK_STALE_MS (a rename takes milliseconds), is stale and taken
-// over: the stale file is moved away first, so only one waiter takes it, and a waiter that finds it
-// moved a live lock instead (taken just before) puts it back.
+// whole and exclusively (a temporary file linked to its name), and names its holder by PID and
+// start time. A live holder is never evicted, however old its lock: a waiter waits LOCK_WAIT_MS
+// and then refuses. A lock whose holder has exited is removed only by the waiter that holds the
+// reclaim lock (created exclusively, for the moment the removal takes), and only if the lock is
+// still the dead holder's when that waiter reads it again: two waiters can then never both remove
+// a lock, and none removes a live one. After a removal every waiter competes for the lock afresh.
+// A reclaim lock left by a process that died while holding it is not taken over: renames of the
+// run refuse and name the file to remove, which fails closed.
 const LOCK_FILE = "rename.lock";
+const RECLAIM_FILE = "rename.lock.reclaim";
 const LOCK_WAIT_MS = 10_000;
-const LOCK_STALE_MS = 30_000;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// Whether the process a lock names still runs: the same PID with the same start time. A lock
+// written before start times were recorded is judged by its PID alone.
+const holderAlive = (holder) => Boolean(holder?.pid) && exists(holder.pid) && (!holder.started || processStarted(holder.pid) === holder.started);
 
 function lockRenames(run) {
   const file = path.join(run.dir, LOCK_FILE);
-  const me = { pid: process.pid, at: new Date().toISOString(), id: randomUUID() };
+  const reclaim = path.join(run.dir, RECLAIM_FILE);
+  const me = { pid: process.pid, started: processStarted(process.pid), at: new Date().toISOString(), id: randomUUID() };
   const until = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     const tmp = `${file}.${process.pid}.${me.id.slice(0, 8)}.tmp`;
@@ -92,20 +100,25 @@ function lockRenames(run) {
       fs.rmSync(tmp, { force: true });
     }
     const holder = readJson(file);
-    if (holder && (!exists(holder.pid) || Date.now() - (Date.parse(holder.at) || 0) > LOCK_STALE_MS)) {
-      const moved = `${file}.${process.pid}.${me.id.slice(0, 8)}.stale`;
+    if (holder && !holderAlive(holder)) {
+      let mine = false;
       try {
-        fs.renameSync(file, moved);
-      } catch {
-        continue; // another waiter moved it first
+        fs.writeFileSync(reclaim, `${JSON.stringify(me)}\n`, { flag: "wx" });
+        mine = true;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        const other = readJson(reclaim);
+        if (other && !holderAlive(other)) die(`a rename in run ${run.id} died while clearing a stale lock; nothing changed. Remove ${reclaim} and try again`, 1);
       }
-      if (readJson(moved)?.id !== holder.id) {
+      if (mine) {
         try {
-          fs.linkSync(moved, file);
-        } catch {}
+          // Still the dead holder's lock, read again now that no other waiter can remove it.
+          if (readJson(file)?.id === holder.id) fs.rmSync(file, { force: true });
+        } finally {
+          fs.rmSync(reclaim, { force: true });
+        }
+        continue;
       }
-      fs.rmSync(moved, { force: true });
-      continue;
     }
     if (Date.now() >= until) die(`another rename in run ${run.id} holds ${file}${holder?.pid ? ` (pid ${holder.pid})` : ""}; nothing changed, so try again`, 1);
     pause(20);
