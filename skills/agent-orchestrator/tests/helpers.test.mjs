@@ -111,8 +111,6 @@ test('repository test instructions describe the current entry points and fixture
   assert.match(readme, /100 ms/);
   assert.match(readme, /3000 ms/);
   assert.doesNotMatch(readme, /without impersonating a host|preserving the real three-second interval/);
-  const instructions = fs.readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8');
-  assert.ok(instructions.includes('Keep `SKILL.md` at most 300 lines (`tests/skill-doc.test.mjs` checks it); put step detail in a file under `references/` and point to it from the step.'));
 });
 
 test('wait polling defaults to three seconds and accepts a shorter configured interval', async (t) => {

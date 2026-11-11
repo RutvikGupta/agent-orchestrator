@@ -229,15 +229,19 @@ export async function fixture(t) {
         // closed. Only fixtures that launched watchers need a process scan.
         const watcherFiles = fs.readdirSync(state, { recursive: true }).some((file) =>
           path.basename(file) === 'parent-notice.log' || /^park-watcher-\d+\.json$/.test(path.basename(file)));
-        if (watcherFiles) await eventually(() => {
-          const result = spawnSync('ps', ['-axww', '-o', 'pid=,command='], {
-            encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024,
-          });
-          if (result.status !== 0) return false;
-          return !result.stdout.split('\n').some((line) => line.includes(`${root}${path.sep}`)
-            && (line.includes('finish-notice.mjs') || line.includes(' park-watch ')));
-        }, 'fixture background writers did not exit');
-        fs.rmSync(root, { recursive: true, force: true });
+        // The folder is removed whether or not the writers exit in time.
+        try {
+          if (watcherFiles) await eventually(() => {
+            const result = spawnSync('ps', ['-axww', '-o', 'pid=,command='], {
+              encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024,
+            });
+            if (result.status !== 0) return false;
+            return !result.stdout.split('\n').some((line) => line.includes(`${root}${path.sep}`)
+              && (line.includes('finish-notice.mjs') || line.includes(' park-watch ')));
+          }, 'fixture background writers did not exit');
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
       }
     }
   });
