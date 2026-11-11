@@ -738,9 +738,12 @@ function recoverRun(run, rows, own) {
   const planned = new Set((plan?.tasks || []).map((t) => t.id));
   const phase = (p) => rows.filter((r) => r.phase === p);
   const closed = (r) => Boolean(records.get(r.id)?.closedAt);
-  // A task row shows its name (`rename`) in place of its id; commands take either.
-  const id1 = (items) => (items.length === 1 ? (items[0].name || (items[0].id ?? items[0].task.id)) : "<task>"); // the task in a group's next command
-  const label = (r) => r.name || r.id;
+  // A task shows its name (`rename`) in place of its id, a planned one too once it has a record;
+  // commands take either.
+  const nameOf = (id) => records.get(id)?.name || id;
+  const label = (r) => nameOf(r.id);
+  const id1 = (items) => (items.length === 1 ? nameOf(items[0].id ?? items[0].task.id) : "<task>"); // the task in a group's next command
+  const waitsOn = (b) => waitsOnText(b.waitsOn.map((w) => ({ ...w, id: nameOf(w.id) })));
   const groups = [
     {
       key: "running",
@@ -785,22 +788,22 @@ function recoverRun(run, rows, own) {
       show: label,
       next: (items) => `${CLI} integrate ${run.id} ${id1(items)}`,
     },
-    { key: "ready", label: "ready to dispatch", items: progress.ready, show: (t) => t.id, next: () => `${CLI} dispatch ${run.id}` },
+    { key: "ready", label: "ready to dispatch", items: progress.ready, show: label, next: () => `${CLI} dispatch ${run.id}` },
     {
       key: "unbriefed",
       label: "ready, waiting for a brief",
       items: progress.unbriefed,
-      show: (u) => `${u.task.id} (${u.problem})`,
+      show: (u) => `${nameOf(u.task.id)} (${u.problem})`,
       next: (items) => `${CLI} brief ${run.id} ${id1(items)}; fill it in; then ${CLI} dispatch ${run.id}`,
     },
     {
       key: "manual",
       label: "babysitters to start by hand",
       items: progress.manual,
-      show: (t) => t.id,
+      show: label,
       next: (items) => `${CLI} start ${run.id} ${id1(items)} --agent claude --babysit --pr <n> --why "..." --brief <brief>`,
     },
-    { key: "blocked", label: "blocked", items: progress.blocked, show: (b) => `${b.task.id} waits on ${waitsOnText(b.waitsOn)}`, next: () => null },
+    { key: "blocked", label: "blocked", items: progress.blocked, show: (b) => `${nameOf(b.task.id)} waits on ${waitsOn(b)}`, next: () => null },
     {
       key: "prepared",
       label: "prepared, not started",
@@ -816,8 +819,7 @@ function recoverRun(run, rows, own) {
     const merged = manualMerge(run, records.get(r.id));
     return merged ? [{ id: r.id, ...merged }] : [];
   });
-  const names = new Map(rows.map((r) => [r.id, label(r)]));
-  const warnings = manualMerges.map((m) => `${names.get(m.id) || m.id}: branch ${m.branch} was merged into ${m.into} without integrate; review and accept it, then record it with: ${CLI} integrate ${run.id} ${m.id} --already-merged`);
+  const warnings = manualMerges.map((m) => `${nameOf(m.id)}: branch ${m.branch} was merged into ${m.into} without integrate; review and accept it, then record it with: ${CLI} integrate ${run.id} ${m.id} --already-merged`);
   for (const r of rows) {
     const wt = records.get(r.id)?.worktree?.path;
     if (r.state === "running" || !wt || !fs.existsSync(wt)) continue;

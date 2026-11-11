@@ -276,8 +276,9 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Stop any of these tasks that still run, and mark them closed.
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
-  rename RUN TASK --to NAME       Give a task a name that status, wait, result, recover, the Stop hook
-                                  and the dashboard show in place of its id; result and the
+  rename RUN TASK --to NAME       Give a task a name that status, wait, result, recover, stop, the
+                                  Stop hook, finish notices and the dashboard show in place of its
+                                  id; result and the
                                   dashboard's details also show the id and earlier names. Every
                                   command that takes a task takes the name too, in that run; an id
                                   always wins over a name. NAME must be a valid task id, and not the
@@ -287,7 +288,9 @@ Usage: node orch.mjs <command> [args] [--json]
                                   parked, finished or closed task and restarts nothing. Each name is
                                   recorded with when and who set it; --to the task's own id removes
                                   the name. The run's owner may rename any of its tasks, and a task's
-                                  own agent itself. For example, an implementer kept as its pull
+                                  own agent itself, which the owner is told of as of a change by the
+                                  user. One rename at a time checks and saves a name in a run (a
+                                  lock in its folder). For example, an implementer kept as its pull
                                   request's babysitter (start RUN TASK --babysit --pr N -- --session
                                   ID) is renamed babysit-N
   cleanup RUN                    Remove only explicitly closed (or accepted and integrated),

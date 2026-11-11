@@ -153,14 +153,14 @@ export function cmdStop(args) {
     if (latest.attempt === task.attempt || !relayAlive(latest.pid, null, latest.outDir)) {
       const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
       stopped();
-      process.stdout.write(`stopped parked ${id}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
+      process.stdout.write(`stopped parked ${shownName(task)}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
       return;
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
   if (!relayAlive(task.pid, null, task.outDir)) {
     const left = endCommandGroups(run, task);
-    if (!left) die(`task ${id} is not running`);
+    if (!left) die(`task ${shownName(task)} is not running`);
     if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
     stopped();
     process.stdout.write(`stopped the ${leftText(left)}; its relay had already exited\n`);
@@ -176,7 +176,7 @@ export function cmdStop(args) {
   }
   const gone = waitForExit(task.pid, 15000, task.outDir);
   const left = gone ? endCommandGroups(run, task) : null;
-  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${id} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
+  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${shownName(task)} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
 }
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark

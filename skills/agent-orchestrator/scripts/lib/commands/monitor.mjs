@@ -33,8 +33,10 @@ function plannedTasksOf(run, plan, rows) {
   const waiting = new Map(progress.blocked.map((b) => [b.task.id, b.waitsOn]));
   const unbriefed = new Map(progress.unbriefed.map((u) => [u.task.id, u.problem]));
   const manual = new Set(progress.manual.map((t) => t.id));
+  // A planned task that has a record shows its name (`rename`).
+  const names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name]));
   return plan.tasks.map((t) => {
-    const base = { id: t.id, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
+    const base = { id: t.id, name: names.get(t.id) || null, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
     if (waiting.has(t.id)) return { ...base, status: "waiting", waitsOn: waiting.get(t.id) };
     if (unbriefed.has(t.id)) return { ...base, status: "ready", briefProblem: unbriefed.get(t.id) };
     if (manual.has(t.id)) return { ...base, status: "ready", manual: true };
@@ -48,20 +50,20 @@ function plannedTasksOf(run, plan, rows) {
 
 const STATUS_ORDER = ["waiting", "ready", "running", "needs-decision", "awaiting-review", "accepted", "integrated", "failed"];
 
-function planLines(plan, planned, unplanned) {
+function planLines(plan, planned, unplanned, shown = new Map()) {
   if (!plan) return [];
   const counts = new Map();
   for (const t of planned) counts.set(t.status, (counts.get(t.status) || 0) + 1);
   const order = [...STATUS_ORDER, ...[...counts.keys()].filter((s) => !STATUS_ORDER.includes(s))].filter((s) => counts.has(s));
   const note = (t) => (t.waitsOn
-    ? `waits on ${waitsOnText(t.waitsOn)}`
+    ? `waits on ${waitsOnText(t.waitsOn.map((w) => ({ ...w, id: shown.get(w.id) || w.id })))}`
     : t.briefProblem ? `brief ${t.briefProblem}`
       : t.manual ? "start by hand: it babysits a pull request"
         : t.integratedCommit ? `at ${short(t.integratedCommit)}${t.integratedInto ? ` in ${t.integratedInto}` : ""}`
           : "");
   return [
     `plan: ${shortText(plan.goal, 100)} (${planned.length} task${planned.length === 1 ? "" : "s"}: ${order.map((s) => `${counts.get(s)} ${s}`).join(", ")})`,
-    table(planned.map((t) => ({ id: t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
+    table(planned.map((t) => ({ id: t.name || t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
     ...(unplanned.length ? [`recorded outside the plan: ${unplanned.join(", ")}`] : []),
   ];
 }
@@ -83,11 +85,11 @@ function manualMergesOf(run, rows) {
 }
 
 // `integrate --already-merged` takes an accepted task only, so the line names what is left to do.
-function manualMergeLines(run, merges) {
+function manualMergeLines(run, merges, shown = new Map()) {
   const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
   const record = (id) => cmd(`integrate ${run.id} ${id} --already-merged`);
   return merges.flatMap((m) => [
-    `warning: ${m.id}'s branch ${m.branch} (${short(m.commit)}) is already in ${m.into}, but ${m.id} is not recorded as integrated (${m.phase}).`,
+    `warning: ${shown.get(m.id) || m.id}'s branch ${m.branch} (${short(m.commit)}) is already in ${m.into}, but ${shown.get(m.id) || m.id} is not recorded as integrated (${m.phase}).`,
     m.phase === "accepted"
       ? `  record it: ${record(m.id)}`
       : m.phase === "awaiting-review"
@@ -108,11 +110,12 @@ export function cmdStatus(args) {
   const plan = readPlan(run.dir);
   const plannedTasks = plan ? plannedTasksOf(run, plan, tasks) : [];
   const unplannedTasks = plan ? tasks.filter((t) => !plan.tasks.some((p) => p.id === t.id)).map((t) => t.id) : [];
+  const shown = new Map(tasks.map((t) => [t.id, shownName(t)]));
   const manualMerges = manualMergesOf(run, tasks);
   emit(
     args,
     { run: run.id, dir: run.dir, tasks, plannedTasks, unplannedTasks, manualMerges, ownership, ...(notices.length ? { changedByOthers: notices.map((n) => ({ ...n, text: noticeText(n) })) } : {}) },
-    [statusText(run, tasks, notices), ...planLines(plan, plannedTasks, unplannedTasks), ...manualMergeLines(run, manualMerges)].join("\n"),
+    [statusText(run, tasks, notices), ...planLines(plan, plannedTasks, unplannedTasks.map((id) => shown.get(id) || id), shown), ...manualMergeLines(run, manualMerges, shown)].join("\n"),
   );
 }
 

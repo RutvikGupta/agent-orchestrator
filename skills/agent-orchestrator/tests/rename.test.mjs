@@ -87,7 +87,7 @@ test('a named task is addressed by its name in send, result, stop and close, and
   assert.deepEqual(inbox.messages.map((m) => m.text), ['Use the new name.']);
 
   const stopped = await f.command(['stop', run.id, 'builder']);
-  assert.match(stopped.stdout, /stopped worker/);
+  assert.match(stopped.stdout, /^stopped builder \(pid \d+\)/);
   const ended = await f.finished(run, 'worker');
   assert.notEqual(ended.state, 'running');
   assert.match((await f.command(['result', run.id, 'builder'])).stdout, /^task builder → /);
@@ -170,14 +170,23 @@ test('only the run\'s owner renames a task, and a task\'s own agent may rename i
   assert.match(sibling.stderr, /Nothing was changed/);
   assert.equal(record(f, run, 'impl').name, undefined);
 
-  // Its own agent: allowed, recorded as set by that task, and nothing goes to the owner's notices.
+  assert.equal(fs.existsSync(path.join(run.dir, 'owner-notices.jsonl')), false, 'a refused rename leaves no notice');
+
+  // Its own agent: allowed, recorded as set by that task, and the run's owner gets a notice of it,
+  // as for a rename by the user: its status lists the change, and its wait wakes for it.
   await f.command(['rename', run.id, 'impl', '--to', 'mine', '--json'], { env: as(run, 'impl') });
   const [named] = record(f, run, 'impl').names;
   assert.deepEqual([named.name, named.by], ['mine', { agent: 'delegated-agent', run: run.id, task: 'impl' }]);
-  assert.equal(fs.existsSync(path.join(run.dir, 'owner-notices.jsonl')), false);
-  // The owner renames it again, by its name.
+  const notices = fs.readFileSync(path.join(run.dir, 'owner-notices.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(notices.map((n) => [n.task, n.action, n.byLabel]), [['impl', 'renamed', `task impl of run ${run.id}`]]);
+  const status = await f.command(['status', run.id], { env: A });
+  assert.match(status.stdout, /changed by someone other than you, the owner:\n {2}mine: renamed by task impl of run \S+ at \S+, not by you: check it/);
+  const woke = await f.command(['wait', run.id, '--timeout', '0'], { code: 5, env: A });
+  assert.match(woke.stdout, /mine: renamed by task impl/);
+  // The owner renames it again, by its name, and is told nothing of its own change.
   await f.command(['rename', run.id, 'mine', '--to', 'owned'], { env: A });
   assert.equal(record(f, run, 'impl').name, 'owned');
+  assert.equal(fs.readFileSync(path.join(run.dir, 'owner-notices.jsonl'), 'utf8').trim().split('\n').length, 1);
 });
 
 // The implementer of a pull request keeps it: its next attempt, in its own session, is the
@@ -320,4 +329,133 @@ test('the dashboard page shows a name in place of the id, and its id and earlier
   for (const use of ['"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id', '$("b",a.name?{title:"task "+a.id}:{},a.name||a.id)', '(t.name||t.id)+" replied', '"Message "+(t.name||t.id)']) {
     assert.ok(app.includes(use), `app.js: ${use}`);
   }
+});
+
+// A child-only preload for the race below. With RENAME_PAUSE set, the process stops just before it
+// saves a task record (writeJson moves a temporary file onto task.json), says so in <pause>.paused,
+// and goes on once <pause>.release exists. With RENAME_CONTENDED set, it writes that file when it
+// finds the run's rename lock taken. No production hook is needed.
+const RACE_PRELOAD = `
+const fs = require('fs');
+const path = require('path');
+const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const { RENAME_PAUSE: pause, RENAME_CONTENDED: contended } = process.env;
+const rename = fs.renameSync;
+fs.renameSync = function (from, to) {
+  if (pause && path.basename(String(to)) === 'task.json') {
+    fs.writeFileSync(pause + '.paused', '');
+    while (!fs.existsSync(pause + '.release')) nap(20);
+  }
+  return rename.apply(this, arguments);
+};
+const link = fs.linkSync;
+fs.linkSync = function (from, to) {
+  try {
+    return link.apply(this, arguments);
+  } catch (error) {
+    if (contended && error.code === 'EEXIST' && path.basename(String(to)) === 'rename.lock') fs.writeFileSync(contended, '');
+    throw error;
+  }
+};
+`;
+
+test('two renames to one name at once cannot both succeed: the second waits for the first, then is refused', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'impl', { flags: ['--read-only'] });
+  await f.start(run, 'other', { flags: ['--read-only'] });
+  await f.finished(run, 'impl');
+  await f.finished(run, 'other');
+  const preload = path.join(f.root, 'rename-race.cjs');
+  fs.writeFileSync(preload, RACE_PRELOAD);
+  const NODE_OPTIONS = `--require=${JSON.stringify(preload)}`;
+  const pause = path.join(f.root, 'pause');
+  const contended = path.join(f.root, 'contended');
+
+  // The first rename has checked that the name is free, and stops just before it saves it.
+  const first = f.command(['rename', run.id, 'impl', '--to', 'shared'], { env: { NODE_OPTIONS, RENAME_PAUSE: pause } });
+  await eventually(() => fs.existsSync(`${pause}.paused`), 'the first rename did not reach its save');
+  // The second checks the same name meanwhile. It must wait for the first (then find the name
+  // taken), not pass its check before the first has saved.
+  let settled = false;
+  const second = f.command(['rename', run.id, 'other', '--to', 'shared'], { code: 2, env: { NODE_OPTIONS, RENAME_CONTENDED: contended } });
+  second.then(() => {}, () => {}).finally(() => { settled = true; });
+  await eventually(() => settled || fs.existsSync(contended), 'the second rename neither finished nor waited for the first');
+  fs.writeFileSync(`${pause}.release`, '');
+  await first;
+  const refused = await second;
+  assert.match(refused.stderr, /task impl of run \S+ is already named shared/);
+  assert.deepEqual([record(f, run, 'impl').name, record(f, run, 'other').name], ['shared', undefined]);
+  assert.equal(fs.existsSync(path.join(run.dir, 'rename.lock')), false, 'the lock is released');
+
+  // A lock left by a rename that died is taken over.
+  writeJson(path.join(run.dir, 'rename.lock'), { pid: spawnSync('true').pid, at: new Date().toISOString(), id: 'dead' });
+  await f.command(['rename', run.id, 'other', '--to', 'own']);
+  assert.equal(record(f, run, 'other').name, 'own');
+  assert.equal(fs.existsSync(path.join(run.dir, 'rename.lock')), false);
+});
+
+test('rework --from takes a reviewer by its name, even the name coordinator; verdict --reviewer coordinator stays the coordinator', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'work');
+  await f.start(run, 'check', { config: { finalMessage: 'Looks right.\nVERDICT: clean' }, flags: ['--read-only'] });
+  await f.finished(run, 'work');
+  await f.finished(run, 'check');
+  await f.command(['rename', run.id, 'check', '--to', 'coordinator']);
+  // In `verdict`, --reviewer coordinator is the coordinator, whatever a task is named.
+  const verdict = await f.json(['verdict', run.id, 'work', 'changes', '--reviewer', 'coordinator', '--note', 'Handle empty input.']);
+  assert.equal(verdict.reviewer, 'coordinator');
+  // In `rework`, --from names a task: the one named coordinator, whose review found nothing.
+  const rework = await f.command(['rework', run.id, 'work', '--from', 'coordinator'], { code: 1 });
+  assert.match(rework.stderr, /check found nothing to fix \(VERDICT: clean\)/);
+});
+
+test('a named planned task shows its name in status, recover and wait before it starts', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const entry = (id, dependsOn) => ({ id, goal: `Build ${id}`, type: 'implement', owns: [`src/${id}`], uses: [], produces: [], resources: [], dependsOn, agent: 'claude', tier: 'standard', why: 'Small change', readOnly: false, brief: `briefs/${id}.md` });
+  const planFile = path.join(f.root, 'plan.json');
+  writeJson(planFile, { goal: 'Fixture plan', acceptance: ['works'], tasks: [entry('first', []), entry('second', ['first'])] });
+  await f.command(['plan', run.id, planFile]);
+  // Prepared, with a record of its own, but not started; its brief is not written yet.
+  await f.command(['worktree', run.id, 'first', '--no-prep']);
+  await f.command(['rename', run.id, 'first', '--to', 'alpha']);
+
+  const recover = await f.command(['recover', run.id]);
+  assert.match(recover.stdout, /ready, waiting for a brief \(1\): alpha \(/);
+  assert.match(recover.stdout, /next: node \S+ brief \S+ alpha;/);
+  assert.match(recover.stdout, /blocked \(1\): second waits on alpha \(/);
+  assert.doesNotMatch(recover.stdout, /\bfirst\b/);
+  const status = await f.command(['status', run.id]);
+  assert.match(status.stdout, /^alpha +ready +brief /m);
+  assert.match(status.stdout, /^second +waiting +waits on alpha \(/m);
+  assert.deepEqual((await f.json(['status', run.id])).plannedTasks.map((p) => [p.id, p.name]), [['first', 'alpha'], ['second', null]]);
+  // wait's hints, once a task has finished.
+  await f.start(run, 'side', { flags: ['--read-only', '--unplanned'] });
+  await f.finished(run, 'side');
+  const waited = await f.command(['wait', run.id, 'side', '--timeout', '0']);
+  assert.match(waited.stdout, /ready, waiting for a brief: alpha \(/);
+});
+
+test('stop and the finish notice to a parent name a task by its name', async (t) => {
+  const f = await fixture(t);
+  const parent = await f.newRun('parent');
+  const lead = await f.start(parent, 'lead', { config: { hold: true }, flags: ['--read-only'] });
+  await f.ready(lead);
+  const env = as(parent, 'lead');
+  const child = await f.newRun('child', env);
+  const kid = await f.start(child, 'kid', { config: { hold: true }, flags: ['--read-only'], env });
+  await f.ready(kid);
+  await f.command(['rename', child.id, 'kid', '--to', 'helper'], { env });
+  f.release(kid);
+  const inbox = path.join(parent.dir, 'tasks', 'lead', 'inbox.jsonl');
+  const notice = await eventually(() => fs.existsSync(inbox) && fs.readFileSync(inbox, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((m) => m.kind === 'finished'), 'no finish notice reached the parent', 15_000);
+  assert.ok(notice.text.startsWith(`Agent ${child.id}/helper (attempt 1) completed and is ready for your review.`), notice.text);
+  assert.ok(notice.text.includes(`result ${child.id} helper\``), notice.text);
+  assert.deepEqual(notice.about, { run: child.id, task: 'kid', attempt: 1 }, 'the notice still keys the task by its id');
+  // stop, by the name, names it by the name.
+  await f.command(['rename', parent.id, 'lead', '--to', 'leader']);
+  const stopped = await f.command(['stop', parent.id, 'leader']);
+  assert.match(stopped.stdout, /^stopped leader \(pid \d+\)/);
 });

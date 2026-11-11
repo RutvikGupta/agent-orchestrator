@@ -53,9 +53,9 @@ continue a Codex session. Start a new babysitter for it.
 ### Names
 
 `$ORCH rename <run> <task> --to <name>` gives a task a name. `status`, `wait`, `result`, `recover`,
-the Stop hook and the dashboard show the name in place of the task's id; `result` and the dashboard's
-details also show the id and earlier names. Every command that takes a task takes the name too, in
-that run, and an id always wins over a name.
+`stop`, the Stop hook, finish notices and the dashboard show the name in place of the task's id;
+`result` and the dashboard's details also show the id and earlier names. Every command that takes a
+task takes the name too, in that run, and an id always wins over a name.
 
 - The id stays the key of everything the task has: its folder, inbox, worktree, branch, nested runs,
   park watcher, and `AGENT_ORCH_TASK` in its shell. A rename restarts nothing, on a running, parked,
@@ -64,7 +64,8 @@ that run, and an id always wins over a name.
   its plan.
 - The task records each name with when and who set it. `rename` again changes it, and `--to` the
   task's own id removes it.
-- The run's owner renames any of its tasks, and a task's own agent may rename itself.
+- The run's owner renames any of its tasks. A task's own agent may rename itself, and the owner
+  gets a notice of it, as of a change by the user.
 
 ## How it waits
 

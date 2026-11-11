@@ -140,9 +140,11 @@ export function lifecycleHints(run, tasks) {
   const planned = new Set((plan?.tasks || []).map((t) => t.id));
   const lines = [];
   if (plan) {
+    // A planned task that has a record (prepared by `worktree`, say) shows its name (`rename`).
+    const nameOf = (id) => readJson(path.join(run.dir, "tasks", id, "task.json"))?.name || id;
     const { ready, unbriefed } = planProgress(plan, phaseMap(run, tasks, plan), run.dir);
-    if (ready.length) lines.push(`ready to dispatch: ${ready.map((t) => t.id).join(", ")} (run \`dispatch\`)`);
-    if (unbriefed.length) lines.push(`ready, waiting for a brief: ${unbriefed.map((u) => `${u.task.id} (${u.problem})`).join(", ")} (run \`brief\`, fill it in, then \`dispatch\`)`);
+    if (ready.length) lines.push(`ready to dispatch: ${ready.map((t) => nameOf(t.id)).join(", ")} (run \`dispatch\`)`);
+    if (unbriefed.length) lines.push(`ready, waiting for a brief: ${unbriefed.map((u) => `${nameOf(u.task.id)} (${u.problem})`).join(", ")} (run \`brief\`, fill it in, then \`dispatch\`)`);
   }
   // Outside the plan, a task whose result was already collected has been seen; only the plan's
   // tasks wait on acceptance.
