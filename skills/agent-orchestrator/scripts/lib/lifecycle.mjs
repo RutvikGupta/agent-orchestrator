@@ -150,9 +150,9 @@ export function lifecycleHints(run, tasks) {
     (t) => t.mode?.split("+")[0] !== "babysit" && t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
   );
   if (reviewing.length) {
-    lines.push(`awaiting review: ${reviewing.map((t) => `${t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);
+    lines.push(`awaiting review: ${reviewing.map((t) => `${t.name || t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);
   }
   const accepted = tasks.filter((t) => t.phase === "accepted");
-  if (accepted.length) lines.push(`accepted, not integrated: ${accepted.map((t) => t.id).join(", ")} (run \`integrate\`)`);
+  if (accepted.length) lines.push(`accepted, not integrated: ${accepted.map((t) => t.name || t.id).join(", ")} (run \`integrate\`)`);
   return lines;
 }

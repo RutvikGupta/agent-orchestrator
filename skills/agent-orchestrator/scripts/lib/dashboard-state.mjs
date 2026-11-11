@@ -653,8 +653,9 @@ export function buildDashboardState() {
       // This section's part of the attention lane; the page merges every section's in the same order.
       // Each item names its own run's goal: a section holds every run of one session, and the
       // section's goal is only its newest run's. Its `to`, `agent` and `gone` say who must act
-      // (addresseeOf); the page counts and leads with the user's items only.
-      attention: tasks.filter((t) => t.attention).map((t) => ({ key: t.key, id: t.id, runId: t.run || null, runGoal: secRuns.find((r) => r.id === t.run)?.goal || null, ...t.attention })).sort(byUrgency),
+      // (addresseeOf); the page counts and leads with the user's items only. `name` is the task's
+      // name (`rename`), which the lane shows in place of its id.
+      attention: tasks.filter((t) => t.attention).map((t) => ({ key: t.key, id: t.id, name: t.native ? null : t.name || null, runId: t.run || null, runGoal: secRuns.find((r) => r.id === t.run)?.goal || null, ...t.attention })).sort(byUrgency),
       totals: totals(work),
       totalsText: `${totalsText(totals(work))}${main ? " (without the main session)" : ""}`,
     };

@@ -587,12 +587,13 @@ export function reportHints(run, tasks) {
   const lines = [];
   for (const task of tasks) {
     const target = `${quote(run.id)} ${quote(task.id)}`;
-    if (task.health === "dead") lines.push(`${task.id}: dead (relay exited without result.json); read the log: node ${quote(CLI_PATH)} log ${target}`);
-    if (task.health === "silent") lines.push(`${task.id}: silent; quiet for ${formatElapsed(task.quietMs)}`);
-    if (task.health === "transient-error") lines.push(`${task.id}: transient error; resume with: ${resumeCommand(run, task)}`);
-    if (task.scopeViolations?.length) lines.push(`${task.id}: scope violations: ${task.scopeViolations.join(", ")}`);
-    if (task.reportLines > 60) lines.push(`${task.id}: long report (${task.reportLines} lines)`);
-    if (task.report?.invalid) lines.push(`${task.id}: invalid orch-result report: ${task.report.error}`);
+    const label = task.name || task.id; // a task's name (`rename`) shows in place of its id
+    if (task.health === "dead") lines.push(`${label}: dead (relay exited without result.json); read the log: node ${quote(CLI_PATH)} log ${target}`);
+    if (task.health === "silent") lines.push(`${label}: silent; quiet for ${formatElapsed(task.quietMs)}`);
+    if (task.health === "transient-error") lines.push(`${label}: transient error; resume with: ${resumeCommand(run, task)}`);
+    if (task.scopeViolations?.length) lines.push(`${label}: scope violations: ${task.scopeViolations.join(", ")}`);
+    if (task.reportLines > 60) lines.push(`${label}: long report (${task.reportLines} lines)`);
+    if (task.report?.invalid) lines.push(`${label}: invalid orch-result report: ${task.report.error}`);
   }
   return lines;
 }

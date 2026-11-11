@@ -52,6 +52,8 @@ export const GUARDED_COMMANDS = {
   plan: { self: true, open: (a) => a.check },
   worktree: { self: true }, brief: { self: true }, verify: { self: true },
   review: { self: true }, rework: { self: true },
+  // `rename` lets a task's own agent rename itself; it checks that itself (commands/rename.mjs).
+  rename: { self: true },
   inbox: { open: (a) => !a.ack, ownTask: true },
   reply: { ownTask: true },
 };
@@ -359,6 +361,7 @@ const ACTIONS = {
   closed: { leave: "closed", undo: true }, stopped: { leave: "stopped", undo: true }, rejected: { leave: "closed", undo: true },
   "worktree removed": { undo: true }, resumed: { leave: "running" }, accepted: { leave: "accepted" }, integrated: { leave: "integrated" },
   "marked resolved": { leave: "resolved" },
+  renamed: { user: "it now shows under its new name, and every command takes that name or its id; nothing to undo" },
   steered: { user: "its command was stopped so the user's message reached it at once; nothing to undo" },
   "gate rerun": { user: "a gate was rerun in its working directory and recorded; nothing to undo" },
 };

@@ -237,6 +237,9 @@ $ORCH brief <run> babysit-<pr> --type babysit
 $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits PR #<n>; Claude costs less than Codex" --brief <brief> --cd <checkout>
 ```
 
+To keep a pull request with the Claude task that implemented it, start that task's next attempt as the
+babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>` (`references/babysit.md`).
+
 ## 9. Close what you no longer need, clean up, and report
 
 - **Worktrees are collected for you:** after `close` closes a run's last task, after `integrate`,

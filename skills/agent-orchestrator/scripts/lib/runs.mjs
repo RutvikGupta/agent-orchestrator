@@ -62,6 +62,44 @@ export function saveTask(run, task) {
   writeJson(path.join(taskDir(run, task.id), "task.json"), task);
 }
 
+// Names (`rename`). A task's id is the stable key of everything it has: its folder, its relay's
+// --out-dir, AGENT_ORCH_TASK in its shell, its inbox, worktree, branch and nested runs. A name is
+// what people and agents see and type instead: the views show it in place of the id, and every
+// command that takes a task accepts it, for that run. An id always wins over a name.
+
+// The task of `run` whose current name is `name`, or null.
+export function taskNamed(run, name) {
+  if (!name || !TASK_ID.test(name)) return null;
+  let ids = [];
+  try {
+    ids = fs.readdirSync(path.join(run.dir, "tasks"));
+  } catch {
+    return null;
+  }
+  for (const id of ids) {
+    const task = loadTask(run, id);
+    if (task?.name === name) return task;
+  }
+  return null;
+}
+
+// The task id that `ref` names in `run`: a task's own id, which always wins, or a task's current
+// name. Anything else comes back unchanged, for the command to report as it always has.
+export function taskIdOf(run, ref) {
+  if (!ref || typeof ref !== "string" || !TASK_ID.test(ref)) return ref;
+  if (fs.existsSync(path.join(taskDir(run, ref), "task.json"))) return ref;
+  return taskNamed(run, ref)?.id ?? ref;
+}
+
+// What views show for a task or a row: its name, or its id when it has none.
+export const shownName = (t) => t?.name || t?.id;
+
+// A task's names before its current one, oldest first, each once.
+export function earlierNames(task) {
+  const names = (task?.names || []).map((n) => n?.name).filter((n) => n && n !== task.name);
+  return [...new Set(names)];
+}
+
 // One `ps` lists every process's parent and command for all the tasks a refresh checks, instead
 // of one `ps` per task. A PID missing from a snapshot (a process started since) refreshes it. In
 // the dashboard server, which answers every request from one thread, an expired snapshot refreshes
@@ -623,6 +661,10 @@ export function describe(run, task) {
 
   const row = {
     id: task.id,
+    // The name `rename` gave the task, which views show in place of its id, and every name it had,
+    // with when and by whom it was set (a null name records that the name was removed).
+    name: task.name || null,
+    names: Array.isArray(task.names) ? task.names : [],
     agent: task.agent || "-",
     mode: !task.pid
       ? "-"

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.0 (2026-11-11)
+
+- `rename RUN TASK --to NAME` gives a task a name. `status`, `wait`, `result`, `recover`, the Stop
+  hook and the dashboard (rows, the attention lane, the details panel) show the name in place of
+  the id; `result` and the details panel also show the id and earlier names. Every command that
+  takes a task takes the name too, in that run, and an id always wins over a name.
+- The id stays the key of the task's folder, inbox, worktree, branch, nested runs and park watcher,
+  so a rename restarts nothing, on a running, parked, finished or closed task. The task records
+  each name with when and who set it, and `--to` its own id removes the name.
+- The run's owner renames any of its tasks, and a task's own agent may rename itself.
+- An implementer can keep its pull request: `start RUN TASK --babysit --pr N -- --session ID` makes
+  the finished task its babysitter in the same session, with one row, its attempts and its tokens,
+  and `rename` then names it `babysit-N`. `start` now keeps that babysitter brief as the one a fresh
+  session starts from after a handoff, where before it kept the implementer's.
+
 ## 2.0.2 (2026-11-10)
 
 - `gc` prints only the runs with something to report, names the owner of each run it refuses,

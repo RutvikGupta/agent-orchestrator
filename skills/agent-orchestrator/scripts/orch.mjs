@@ -30,6 +30,7 @@ import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs
 import { cmdSkill } from "./lib/commands/skill.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
 import { cmdModel } from "./lib/commands/model.mjs";
+import { cmdRename, resolveTaskNames } from "./lib/commands/rename.mjs";
 import { cmdStart } from "./lib/commands/start.mjs";
 import { cmdTell } from "./lib/commands/tell.mjs";
 import { cmdClose, cmdLog, cmdResult, cmdStop } from "./lib/commands/task.mjs";
@@ -275,6 +276,20 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Stop any of these tasks that still run, and mark them closed.
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
+  rename RUN TASK --to NAME       Give a task a name that status, wait, result, recover, the Stop hook
+                                  and the dashboard show in place of its id; result and the
+                                  dashboard's details also show the id and earlier names. Every
+                                  command that takes a task takes the name too, in that run; an id
+                                  always wins over a name. NAME must be a valid task id, and not the
+                                  id or name of another task of the run or a task of its plan.
+                                  The id stays the key of the task's folder, inbox, worktree,
+                                  branch, nested runs and AGENT_ORCH_TASK. Works on a running,
+                                  parked, finished or closed task and restarts nothing. Each name is
+                                  recorded with when and who set it; --to the task's own id removes
+                                  the name. The run's owner may rename any of its tasks, and a task's
+                                  own agent itself. For example, an implementer kept as its pull
+                                  request's babysitter (start RUN TASK --babysit --pr N -- --session
+                                  ID) is renamed babysit-N
   cleanup RUN                    Remove only explicitly closed (or accepted and integrated),
                                   clean worktrees; only untracked gate caches are ignored.
                                   Commits stay on kept branches; running or parked users protect
@@ -350,6 +365,7 @@ const specs = {
   log: { value: ["lines"] },
   stop: { bool: ["adopt"] },
   close: { bool: ["all", "adopt"] },
+  rename: { value: ["to"], bool: ["adopt"] },
   gc: { value: ["older-than"], bool: ["dry-run"] },
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
@@ -392,6 +408,7 @@ const handlers = {
   log: cmdLog,
   stop: cmdStop,
   close: cmdClose,
+  rename: cmdRename,
   cleanup: cmdCleanup,
   gc: cmdGc,
   runs: cmdRuns,
@@ -432,7 +449,8 @@ if (command === "wait" && rest.includes("--help")) {
 } else if (!handlers[command]) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
-  const args = parseArgs(rest, specs[command]);
+  // A task's name (`rename`) becomes its id before anything reads the arguments, ownership included.
+  const args = resolveTaskNames(command, parseArgs(rest, specs[command]));
   // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
   gateCommand(command, args);
   if (VERDICT_SYNC.has(command)) {
