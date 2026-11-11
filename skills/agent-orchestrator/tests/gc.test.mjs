@@ -47,7 +47,8 @@ test('gc removes clean closed folders, preserves branches and unmerged commits, 
   const open = await worktree(f, run, 'open');
   const detached = await worktree(f, run, 'detached', { closedAt: daysAgo(3) });
   await f.git(['-C', detached.path, 'checkout', '--detach']);
-  const detachedTip = await commit(f, detached);
+  // Its own file, so that no branch happens to hold the same commit.
+  const detachedTip = await commit(f, detached, 'detached.txt');
   const report = await f.json(['gc', '--older-than', '0s']);
   assert.equal(report.totals.removed, 2);
   assert.ok(report.totals.bytesFreed > 0);
@@ -529,4 +530,23 @@ test('idle gc collects a restored worktree whose task was resumed and only read 
   assert.equal(fs.existsSync(wt.path), true);
   assert.equal((await f.json(['gc'])).totals.removed, 1);
   assert.equal(fs.existsSync(wt.path), false);
+});
+
+test('a worktree on another local branch, as a babysitter\'s is, is collected; one on a detached commit no branch holds is kept', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  // On the pull request's own branch: the commit is on neither the task's branch nor the base.
+  const pr = await worktree(f, run, 'babysit', { closedAt: daysAgo(3) });
+  await f.git(['-C', pr.path, 'switch', '-q', '-c', 'feature/pull-request']);
+  const onBranch = await commit(f, pr);
+  // On a detached HEAD with a commit that no branch holds.
+  const loose = await worktree(f, run, 'detached', { closedAt: daysAgo(3) });
+  await f.git(['-C', loose.path, 'switch', '-q', '--detach']);
+  await commit(f, loose, 'loose.txt');
+  idleRun(f, run);
+  const out = await f.json(['gc']);
+  assert.deepEqual(out.runs[0].removed.map((r) => r.task), ['babysit']);
+  assert.match(out.runs[0].kept.find((k) => k.task === 'detached').reason, /not reachable from a retained branch/);
+  assert.equal(fs.existsSync(pr.path), false);
+  assert.equal(fs.existsSync(loose.path), true);
+  assert.equal((await f.git(['rev-parse', 'feature/pull-request'])).trim(), String(onBranch).trim(), 'the branch and its commit remain');
 });

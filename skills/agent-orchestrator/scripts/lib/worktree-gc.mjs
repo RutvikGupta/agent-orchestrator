@@ -100,7 +100,12 @@ export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   const head = exists ? value(wt, ['rev-parse', '--verify', 'HEAD']) : registered.head;
   const refs = [task.worktree.branch, run.baseBranch].filter(Boolean)
     .map((branch) => value(run.repo, ['rev-parse', '--verify', `refs/heads/${branch}`])).filter(Boolean);
-  const retained = (commit) => refs.some((ref) => git(run.repo, ['merge-base', '--is-ancestor', commit, ref]).status === 0);
+  // A commit is safe when the task's branch or the run's base holds it, or any other local branch or
+  // remote-tracking branch does: a babysitter's worktree sits on its pull request's branch. Removing a
+  // worktree deletes no branch, so such a commit stays reachable. A commit that only a detached HEAD
+  // holds is not safe.
+  const onAnyBranch = (commit) => Boolean(value(run.repo, ['for-each-ref', '--count=1', '--contains', commit, '--format=%(refname)', 'refs/heads', 'refs/remotes']));
+  const retained = (commit) => refs.some((ref) => git(run.repo, ['merge-base', '--is-ancestor', commit, ref]).status === 0) || onAnyBranch(commit);
   if ((exists && !head) || (head && !retained(head)) || (task.acceptedCommit && !retained(task.acceptedCommit))) return 'commits are not reachable from a retained branch';
   return null;
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1 (2026-11-10)
+
+- `gc` and the automatic cleanup now accept a worktree whose commits any local or remote-tracking
+  branch holds, not only the task's branch or the run's base. A babysitter's worktree sits on its
+  pull request's branch, so these were all kept. A commit that only a detached HEAD holds still
+  keeps its worktree.
+
 ## 2.0.0 (2026-11-10)
 
 A major update to the `agent-orchestrator` skill: the review loop, the plan, cleanup and cost
