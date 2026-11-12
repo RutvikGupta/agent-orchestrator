@@ -173,7 +173,7 @@ run `dispatch` after every `integrate`. A task the plan omits needs `start --unp
 ## 5. Wait and monitor
 
 ```bash
-$ORCH wait <run> [<task-id>...] [--all] [--timeout 9m|0]   # 0 a result, 3 timeout, 5 attention, 6 a message
+$ORCH wait <run> [<task-id>...] [--all] [--timeout 9m|0]   # 0 a result, 3 timeout, 5 attention, 6 a message; `tell` notes print with the next exit
 $ORCH status <run>          # every task: state, elapsed, steps, tokens in/out, current activity
 $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 ```

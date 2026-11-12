@@ -1,8 +1,9 @@
 // `tell`: a delegated agent sends the agent that started it a one-way note, such as a status update
 // ("pushed #123; ready for review"), and keeps working. The note goes into the parent task's inbox.
 // In a top-level run, whose parent is the launching main session (which has no inbox), it goes into
-// the run's notes.jsonl, and that session's next `wait` on the run prints it and exits 6
-// (addressee.mjs). A note needs no answer: it never reaches the user's lane and never escalates.
+// the run's notes.jsonl, and that session's `wait` on the run prints it with its next exit, or
+// ends on it (exit 6) with --notes (addressee.mjs). A note needs no answer: it never reaches the
+// user's lane and never escalates.
 // A question or a decision goes through `ask` instead.
 
 import fs from "node:fs";

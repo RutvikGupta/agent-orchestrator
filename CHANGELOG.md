@@ -26,6 +26,9 @@
 - `recover --all` is about three times faster on a state folder with hundreds of runs. It
   described every task of every run before it left out the runs with nothing to resume, and
   checked worktrees one at a time; it now filters first and checks four worktrees at once.
+- `wait` keeps waiting when a task sends a `tell` note, which needs no answer, and prints every
+  held note with its next exit. Each note ended `wait` with exit 6, so a task that sent several
+  woke its orchestrator for a turn each time. `wait --notes` keeps the old behavior.
 
 ## 2.1.0 (2026-11-11)
 
