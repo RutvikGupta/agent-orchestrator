@@ -9,7 +9,7 @@ import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
 import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
 import { describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
-import { awaitInterrupt, claimResume, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
+import { adoptResume, awaitInterrupt, claimResume, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration, readJson } from "../util.mjs";
 
 // How a message reaches this attempt of the task: { delivery, reaches }. An attempt started before
@@ -53,7 +53,11 @@ function interrupt(run, task, plan, g) {
 // task, a refusal when an earlier resume left a relay running, else the helper for this claim.
 function startClaimed(run, task, plan, g, claim) {
   if (claim.busy) return BUSY;
-  if (claim.orphan) return { waiting: `an earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs, so it is not interrupted`, refused: true };
+  if (claim.orphan) {
+    // That relay becomes the task's attempt (steer.mjs, adoptResume): the next interrupt reaches it.
+    const adopted = adoptResume(run, task);
+    return { waiting: `an earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs${adopted ? `: it is now attempt ${adopted.attempt}` : ""}, so nothing was interrupted; send again to reach it`, refused: true };
+  }
   if (!launchInterrupt(run, task, claim)) return { waiting: readJson(claim.file)?.error || "the interrupt could not start" };
   recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "interrupted" });
   return { resuming: true, was: plan.resume.was, doing: plan.resume.doing, attempt: task.attempt, generation: claim.generation };
@@ -70,6 +74,8 @@ function settleInterrupt(run, id, steer) {
   const record = awaitInterrupt(path.join(taskDir(run, id), `attempt-${steer.attempt}`), steer.generation);
   const { resuming, ...rest } = steer;
   if (record?.attempt) return { ...rest, resumed: record.attempt, pid: record.pid ?? null };
+  // A shell command that started meanwhile was stopped in the session's place.
+  if (record?.released && record.command) return { stopped: record.command, seconds: record.seconds ?? null };
   if (record?.released) return { ...rest, failed: record.error || "the resume failed", kept: record.stopped !== true };
   return steer;
 }

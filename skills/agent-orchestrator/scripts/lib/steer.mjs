@@ -16,10 +16,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
 import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
-import { markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
+import { watchForFinish } from "./finish-notice.mjs";
+import { markRead, markSteered, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { parkEnv } from "./park.mjs";
 import { COMMAND_AGENT } from "./policy.mjs";
-import { exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
+import { describe, exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 
 // Commands that publish or rewrite history are never stopped part-way: the message waits.
@@ -376,18 +377,52 @@ function claimHandle(claim) {
     since: record.since,
     save,
     get record() { return record; },
-    spawned: (planned) => save({ relay: { pid: planned.pid, started: processStarted(planned.pid) } }),
+    // The planned task goes with the relay, so that a claimant after a crash can adopt it (adoptResume).
+    spawned: (planned) => save({ relay: { pid: planned.pid, started: processStarted(planned.pid) }, task: planned }),
     release: (error = null) => save({ released: true, releasedAt: new Date().toISOString(), ...(error ? { error } : {}) }),
     done: (saved) => save({ attempt: saved.attempt, pid: saved.pid, resumedAt: saved.startedAt }),
   };
 }
 
+// A resume that ended (its owner is gone) after starting its relay and before saving the task leaves
+// that relay running with no record. The next claimant (a start, an interrupt, `stop` or `close`)
+// adopts it: it saves the attempt the resume had planned, with that relay, keeping a close or stop
+// that came since, and starts its finish watcher. Then the relay is the task's attempt, which `stop`
+// stops and `status` shows. Returns the saved task; null when there is nothing to adopt, or another
+// claimant adopted it first.
+export function adoptResume(run, task) {
+  const dir = task?.outDir;
+  const current = resumeClaim(dir);
+  const planned = current.record?.task;
+  if (current.state !== "abandoned" || !planned?.id || !relayRunning(current.record.relay)) return null;
+  const file = resumeFile(dir, current.generation + 1);
+  const record = { kind: "adopt", claimedAt: new Date().toISOString(), owner: { pid: process.pid, started: processStarted(process.pid) }, replaces: task.attempt, takesOver: current.generation, relay: current.record.relay };
+  if (!createExclusive(file, record)) return null;
+  const latest = loadTask(run, task.id);
+  const since = current.record.since || {};
+  const saved = {
+    ...planned, pid: current.record.relay.pid,
+    ...(latest?.closedAt && latest.closedAt !== since.closedAt ? { closedAt: latest.closedAt } : {}),
+    ...(latest?.stoppedAt && latest.stoppedAt !== since.stoppedAt ? { stoppedAt: latest.stoppedAt } : {}),
+  };
+  saveTask(run, saved);
+  writeJson(file, { ...record, attempt: saved.attempt, pid: saved.pid, resumedAt: saved.startedAt, adopted: true });
+  if (saved.startedBy || saved.babysit) watchForFinish(run, saved);
+  return saved;
+}
+
 // For startTask: claim the attempt `task` is in before a resume writes anything. Null when the task
-// has no attempt folder; { refused } when another resume holds it; else the claim's handle.
-export function resumeLock(task, kind = "start") {
+// has no attempt folder; { refused } when another resume holds it, or when an earlier resume's
+// relay was adopted instead; else the claim's handle.
+export function resumeLock(run, task, kind = "start") {
   if (!task?.attempt || !task.outDir || !fs.existsSync(task.outDir)) return null;
   const claim = claimResume(task, kind);
-  if (claim.orphan) return { refused: `task ${shownName(task)}'s earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs; stop that process before you resume the task` };
+  if (claim.orphan) {
+    const adopted = adoptResume(run, task);
+    return { refused: adopted
+      ? `task ${shownName(task)}'s earlier resume ended after starting its relay (pid ${adopted.pid}), which still runs: it is now attempt ${adopted.attempt}, so nothing new was started`
+      : `task ${shownName(task)}'s earlier resume ended after starting its relay (pid ${claim.orphan}), which another command is taking over right now; run \`status\` to see it` };
+  }
   if (claim.busy) {
     const r = claim.busy.record;
     return { refused: r?.attempt ? `task ${shownName(task)} was resumed meanwhile, in attempt ${r.attempt}; run \`status\` to see it` : `task ${shownName(task)} is being resumed right now (${r?.kind === "interrupt" ? "an interrupt is delivering a message" : `by \`${r?.kind || "start"}\``}); run \`status\` to see its new attempt` };
@@ -402,6 +437,9 @@ export function resumeLock(task, kind = "start") {
 // Null when no resume holds the task: the caller goes on as before. { task } when the resume saved
 // an attempt whose relay runs, which the caller then stops; { text } when nothing runs any more.
 export function stopResume(run, task, mark) {
+  // A relay that a resume left running when it ended becomes the task's attempt, which the caller stops.
+  const adopted = adoptResume(run, task);
+  if (adopted) return { task: adopted };
   const held = resumeClaim(task.outDir);
   if (held.state === "done") {
     const latest = loadTask(run, task.id);
@@ -447,6 +485,12 @@ export function launchInterrupt(run, task, claim) {
     child.on("error", () => {});
     child.unref();
     if (!child.pid) throw new Error("the helper did not start");
+    // The helper owns the claim from now on: when it ends without a word, the claim is abandoned
+    // and the next sender takes it over, however long this process lives. The helper records the
+    // same owner itself (runInterrupt), in case this process ends first.
+    const owner = { pid: child.pid, started: processStarted(child.pid) };
+    const record = readJson(claim.file);
+    if (record && !record.released && !record.attempt && !record.helper) writeJson(claim.file, { ...record, owner });
     return child.pid;
   } catch (error) {
     writeJson(claim.file, { ...claim.record, released: true, releasedAt: new Date().toISOString(), error: `the interrupt could not start: ${error.message}` });
@@ -504,9 +548,12 @@ export async function runInterrupt(runDir, id, n, generation) {
   const file = resumeFile(dir, generation);
   const first = readJson(file);
   if (!task || task.attempt !== n || first?.kind !== "interrupt" || first.released || first.attempt || resumeClaim(dir).generation !== generation) return null;
-  // From here this process owns the claim: the sender may exit.
-  const claim = claimHandle({ file, record: { ...first, owner: { pid: process.pid, started: processStarted(process.pid) }, helper: process.pid } });
-  claim.save({});
+  // From here this process owns the claim, whether or not the sender lives on: the transfer is
+  // written, then read back, and a helper that does not hold the claim does nothing.
+  const claim = claimHandle({ file, record: first });
+  claim.save({ owner: { pid: process.pid, started: processStarted(process.pid) }, helper: process.pid });
+  const held = resumeClaim(dir);
+  if (held.generation !== generation || held.record?.owner?.pid !== process.pid || held.record.helper !== process.pid || held.state !== "live") return null;
   const fail = (error, fields = {}) => (claim.save({ released: true, releasedAt: new Date().toISOString(), error, ...fields }), claim.record);
   // A stop or close that came since the claim (stopResume) wins.
   const ended = () => {
@@ -550,6 +597,20 @@ export async function runInterrupt(runDir, id, n, generation) {
   if (!relayAlive(task.pid, null, task.outDir)) {
     fail("the attempt finished before it could be interrupted", { stopped: false });
     giveNotice();
+    return claim.record;
+  }
+  // The last look before the session stops: a command that started since the sender planned the
+  // interrupt counts too. A publishing command is never ended with the session, and another shell
+  // command is stopped in its place, which delivers the messages as well. What remains is the
+  // moment between this read and the signal, which nothing outside the agent can close: the agent
+  // starts its commands without asking anyone.
+  const now = planSteer(task, describe(run, task));
+  if (!now.resume) {
+    fs.rmSync(notice, { force: true }); // the attempt runs on: its finish notice goes out as usual
+    if (!now.stop) return fail(now.wait, { stopped: false });
+    markSteered(taskDir(run, id), readInbox(taskDir(run, id)).filter((m) => !m.read).map((m) => m.id), now.stop.command, first.by || null);
+    stopCommand(now);
+    claim.save({ released: true, releasedAt: new Date().toISOString(), stopped: false, command: shorten(now.stop.command), seconds: now.stop.seconds ?? null });
     return claim.record;
   }
   stopRelay(task.pid);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
@@ -242,18 +243,37 @@ test('an interrupt is refused, with the reason and no change, for a command task
   await f.command(['stop', run.id, 'cmd']);
 });
 
-// A fake gh on PATH that serves an open pull request #42, for `start --babysit`.
-function github(f) {
+// A fake gh on PATH that serves an open pull request #42: enough for `start --babysit` and for a
+// parked babysitter's watcher, which reads the pull request and its review threads.
+async function github(f) {
   const bin = path.join(f.root, 'bin');
   fs.mkdirSync(bin, { recursive: true });
-  const pr = { number: 42, url: 'https://github.com/example-org/example-repo/pull/42', state: 'OPEN', isDraft: false };
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nconst a = process.argv.slice(2);\nif (a[0] === 'pr' && a[1] === 'view') console.log(${JSON.stringify(JSON.stringify(pr))});\nelse process.exit(91);\n`, { mode: 0o755 });
+  const pr = { number: 42, url: 'https://github.com/example-org/example-repo/pull/42', title: 'Fixture PR', state: 'OPEN', isDraft: false,
+    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
+    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] };
+  const threads = { data: { repository: { pullRequest: { reviewThreads: { nodes: [] }, comments: { totalCount: 0, nodes: [] }, reviews: { totalCount: 0, nodes: [] } } } } };
+  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nconst a = process.argv.slice(2);\nif (a[0] === 'pr' && a[1] === 'view') console.log(${JSON.stringify(JSON.stringify(pr))});\nelse if (a[0] === 'api' && a[1] === 'graphql') console.log(${JSON.stringify(JSON.stringify(threads))});\nelse process.exit(91);\n`, { mode: 0o755 });
   f.env.PATH = `${bin}:${f.env.PATH}`;
 }
+const PARKED = 'PARKED: PR #42 waits for a human review\n\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```';
+// Start babysitter `id` of PR #42, whose fake relay ends its first attempt parked, and wait for the park.
+async function parkedSitter(f, run, id) {
+  const task = await f.json(['start', run.id, id, '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief', f.brief(id, { finalMessage: PARKED })]);
+  await eventually(async () => (await rowOf(f, run, id))?.phase === 'parked', 'the babysitter did not park', 20_000);
+  return task;
+}
+// The environment that holds one process at one write (fixtures/pause-at-write.cjs), and its marker.
+function pauseAt(f, name, { script, sub = '', file, text = '', after = false }) {
+  const marker = path.join(f.root, name);
+  const preload = new URL('./fixtures/pause-at-write.cjs', import.meta.url).pathname;
+  return { marker, env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_PAUSE_SCRIPT: script, TEST_PAUSE_SUB: sub, TEST_PAUSE_FILE: file, TEST_PAUSE_TEXT: text, TEST_PAUSE_AFTER: after ? '1' : '', TEST_PAUSE_MARKER: marker } };
+}
+const paused = (marker) => eventually(() => fs.existsSync(marker) && fs.readFileSync(marker, 'utf8'), 'the process did not reach the write', 20_000);
+const go = (marker) => fs.writeFileSync(`${marker}.release`, '');
 
 test('an interrupt is refused for a babysitter, running or parked: its park watcher delivers messages', async (t) => {
   const f = await fixture(t);
-  github(f);
+  await github(f);
   const run = await f.newRun();
   const sitter = await f.json(['start', run.id, 'sitter', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief', f.brief('sitter', { hold: true })]);
   await f.ready(sitter);
@@ -263,9 +283,7 @@ test('an interrupt is refused for a babysitter, running or parked: its park watc
   assert.equal(fs.existsSync(path.join(sitter.outDir, 'resume-1.json')), false);
   f.release(sitter);
 
-  const parks = await f.json(['start', run.id, 'parks', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief',
-    f.brief('parks', { finalMessage: 'PARKED: PR #42 waits for a human review\n\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```' })]);
-  await eventually(async () => (await rowOf(f, run, 'parks'))?.phase === 'parked', 'the babysitter did not park', 20_000);
+  const parks = await parkedSitter(f, run, 'parks');
   const parked = await f.json(['send', run.id, 'parks', 'Rebase first.', '--steer']);
   assert.equal(parked.steer.refused, true);
   assert.match(parked.steer.waiting, /^the task is parked: its watcher resumes it with this message within a few seconds/);
@@ -442,4 +460,169 @@ test('an interrupt checks the resume before it stops anything: one that cannot s
   assert.equal(readJson(f.taskFile(run, 'homeless')).attempt, 1);
   f.release(task);
   await f.finished(run, 'homeless');
+});
+
+// Second review: each test below fails without its fix.
+
+test('an interrupt looks again just before it stops the session: a publishing command that started meanwhile is not ended', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = await f.start(run, 'late', { config: { hold: true } });
+  await f.ready(task);
+  // Hold the helper after the sender planned the resume and before its last look.
+  const hold = pauseAt(f, 'late-marker', { script: 'steer\\.mjs$', sub: 'resume', file: 'interrupt-resume\\.md$' });
+  const sending = f.command(['send', run.id, 'late', 'Stop and rebase.', '--steer'], { env: { ...HOLD, ...hold.env } });
+  try {
+    await paused(hold.marker);
+    fs.appendFileSync(path.join(task.outDir, 'events.jsonl'), `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_push', name: 'Bash', input: { command: 'git push origin main' } }] } })}\n`);
+  } finally {
+    go(hold.marker);
+  }
+  assert.match((await sending).stdout, /^not steered: its session cannot be resumed \(the agent is running `git push origin main`, which is not stopped part-way\), so it was not stopped; the message stays unread$/m);
+  assert.ok(alive(task.pid), 'the session was not stopped');
+  assert.equal(readJson(f.taskFile(run, 'late')).attempt, 1);
+  assert.equal(fs.existsSync(path.join(task.outDir, 'parent-notice.json')), false, 'the attempt still sends its finish notice');
+  f.release(task);
+  await f.finished(run, 'late');
+});
+
+test('the session an interrupt resumes is the task\'s own, never a sub-agent\'s', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const events = [
+    { type: 'assistant', message: { id: 'm-task', content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'look around' } }] } },
+    { type: 'system', subtype: 'init', session_id: 'child-session', parent_tool_use_id: 'toolu_task' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'found it', session_id: 'child-session', parent_tool_use_id: 'toolu_task' },
+  ];
+  const task = await f.start(run, 'parent', { config: { hold: true, extraEvents: events } });
+  await f.ready(task);
+  assert.equal((await rowOf(f, run, 'parent')).session, 'fixture-claude');
+  const sent = await f.json(['send', run.id, 'parent', 'Carry on.', '--steer'], { env: HOLD });
+  assert.equal(sent.steer.resumed, 2);
+  await ready(f, run, 'parent', 2);
+  const argv = readJson(path.join(attemptDir(run, 'parent', 2), 'invocation.json')).argv;
+  assert.equal(argv[argv.indexOf('--session') + 1], 'fixture-claude');
+  f.release({ outDir: attemptDir(run, 'parent', 2) });
+  await f.finished(run, 'parent');
+});
+
+test('the helper owns the interrupt\'s claim once it takes over, and a dead owner\'s claim is taken over', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'owned', { config: { hold: true } });
+  await f.ready(first);
+  const sent = await f.json(['send', run.id, 'owned', 'One.', '--steer'], { env: HOLD });
+  assert.equal(sent.steer.resumed, 2);
+  // The claim names the helper as its owner, not the sender that started it and has exited.
+  const claim = readJson(path.join(first.outDir, 'resume-1.json'));
+  assert.ok(Number.isInteger(claim.helper) && claim.helper > 0);
+  assert.equal(claim.owner.pid, claim.helper);
+  await ready(f, run, 'owned', 2);
+  // A claim whose owner has ended without saving anything is abandoned: the next interrupt takes it over.
+  const gone = spawnSync(process.execPath, ['-e', '']).pid;
+  writeJson(path.join(attemptDir(run, 'owned', 2), 'resume-1.json'), { kind: 'interrupt', claimedAt: new Date().toISOString(), owner: { pid: gone }, helper: gone, replaces: 2 });
+  const again = await f.json(['send', run.id, 'owned', 'Two.', '--steer'], { env: HOLD });
+  assert.equal(again.steer.resumed, 3);
+  assert.equal(readJson(path.join(attemptDir(run, 'owned', 2), 'resume-2.json')).attempt, 3);
+  await ready(f, run, 'owned', 3);
+  f.release({ outDir: attemptDir(run, 'owned', 3) });
+  await f.finished(run, 'owned');
+});
+
+test('a stop that comes after a parked task\'s watcher claimed its resume wins: the watcher starts nothing', async (t) => {
+  const f = await fixture(t);
+  await github(f);
+  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
+  // Hold the watcher's check after it claimed the park and before it starts the next attempt. Every
+  // command of this test carries the hold, whichever of them starts the watcher.
+  const hold = pauseAt(f, 'park-marker', { script: 'park\\.mjs$', sub: 'check', file: 'park-resume\\.md$' });
+  Object.assign(f.env, hold.env);
+  const run = await f.newRun();
+  const task = await parkedSitter(f, run, 'sitter');
+  await f.command(['send', run.id, 'sitter', 'Rebase first.']);
+  let stopping;
+  try {
+    await paused(hold.marker);
+    assert.equal(readJson(path.join(task.outDir, 'park-claim-1.json')).by, 'watcher');
+    stopping = f.command(['stop', run.id, 'sitter']);
+    await eventually(() => readJson(f.taskFile(run, 'sitter')).stoppedAt, 'stop did not mark the task');
+  } finally {
+    go(hold.marker);
+  }
+  assert.match((await stopping).stdout, /^stopped parked sitter/);
+  const record = readJson(f.taskFile(run, 'sitter'));
+  assert.equal(record.attempt, 1);
+  assert.ok(record.stoppedAt);
+  assert.equal(fs.existsSync(attemptDir(run, 'sitter', 2)), false, 'the watcher started nothing');
+  assert.deepEqual(readJson(path.join(task.outDir, 'park-claim-1.json')).since, { closedAt: null, stoppedAt: null });
+});
+
+// A `start` that resumes `id` and is killed after it started its relay and before it saved the
+// task. Returns that relay's PID.
+async function orphaned(f, run, id, name) {
+  const hold = pauseAt(f, name, { script: 'orch\\.mjs$', sub: 'start', file: 'resume-\\d+\\.json$', text: '"relay"', after: true });
+  const starting = f.command(['start', run.id, id, '--agent', 'claude', '--brief', f.brief(`${id}-again`, { hold: true }), '--', '--session', 'fixture-claude'], { code: null, env: hold.env });
+  const starter = Number(await paused(hold.marker));
+  process.kill(starter, 'SIGKILL');
+  await starting;
+  const relay = readJson(path.join(attemptDir(run, id, 1), 'resume-1.json')).relay.pid;
+  assert.ok(alive(relay), 'the relay runs on');
+  assert.equal(readJson(f.taskFile(run, id)).attempt, 1, 'the task was never saved');
+  return relay;
+}
+
+test('a relay left by a start that died before saving the task is adopted by the next start, and stopped by stop', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  for (const id of ['one', 'two']) {
+    await f.start(run, id, { flags: ['--read-only'] });
+    await f.finished(run, id);
+  }
+  // The next start adopts the relay as the task's attempt, and starts nothing new.
+  const relay = await orphaned(f, run, 'one', 'orphan-one');
+  const again = await f.command(['start', run.id, 'one', '--agent', 'claude', '--brief', f.brief('one-third', {}), '--', '--session', 'fixture-claude'], { code: 1 });
+  assert.match(again.stderr, new RegExp(`task one's earlier resume ended after starting its relay \\(pid ${relay}\\), which still runs: it is now attempt 2, so nothing new was started`));
+  assert.deepEqual([readJson(f.taskFile(run, 'one')).attempt, readJson(f.taskFile(run, 'one')).pid], [2, relay]);
+  assert.equal((await rowOf(f, run, 'one')).state, 'running');
+  assert.equal(fs.existsSync(attemptDir(run, 'one', 3)), false);
+  await f.command(['stop', run.id, 'one']);
+  await eventually(() => !alive(relay), 'the adopted relay was not stopped');
+  // `stop` adopts it too, and stops it.
+  const other = await orphaned(f, run, 'two', 'orphan-two');
+  const stopped = await f.command(['stop', run.id, 'two']);
+  assert.match(stopped.stdout, new RegExp(`^stopped two \\(pid ${other}\\)`));
+  await eventually(() => !alive(other), 'the orphaned relay was not stopped');
+  assert.deepEqual([readJson(f.taskFile(run, 'two')).attempt, Boolean(readJson(f.taskFile(run, 'two')).stoppedAt)], [2, true]);
+});
+
+test('a command start of a parked task takes the park\'s claim, as every start does', async (t) => {
+  const f = await fixture(t);
+  await github(f);
+  const run = await f.newRun();
+  const task = await parkedSitter(f, run, 'sitter');
+  // The watcher holds the park: it is resuming the task.
+  const claim = path.join(task.outDir, 'park-claim-1.json');
+  writeJson(claim, { by: 'watcher', claimedAt: new Date().toISOString(), owner: { pid: process.pid } });
+  const refused = await f.command(['start', run.id, 'sitter', '--agent', 'command', '--why', 'Runs a command in its place', '--', 'sleep', '30'], { code: 1 });
+  assert.match(refused.stderr, /task sitter is parked, and its watcher is resuming it right now/);
+  assert.equal(readJson(f.taskFile(run, 'sitter')).attempt, 1);
+  assert.equal(fs.existsSync(attemptDir(run, 'sitter', 2)), false);
+  writeJson(claim, { ...readJson(claim), released: true }); // the claim this test holds, given back
+  await f.command(['stop', run.id, 'sitter']);
+});
+
+test('a parked task\'s watcher delivers a message that reads like a template marker, as written', async (t) => {
+  const f = await fixture(t);
+  await github(f);
+  Object.assign(f.env, { AGENT_ORCH_PARK_INTERVAL: '1s', ...HOLD });
+  const run = await f.newRun();
+  await parkedSitter(f, run, 'sitter');
+  const text = 'Replace <fill in: description> in the template.';
+  await f.command(['send', run.id, 'sitter', text]);
+  await eventually(() => readJson(f.taskFile(run, 'sitter')).attempt === 2, 'the watcher did not resume the task', 20_000);
+  await ready(f, run, 'sitter', 2);
+  const brief = fs.readFileSync(path.join(attemptDir(run, 'sitter', 2), 'orch-brief.md'), 'utf8');
+  assert.ok(brief.includes(`## The messages, quoted\n\n- Message from your orchestrator`) && brief.includes(`\n    > ${text}\n`));
+  assert.ok(fs.readFileSync(path.join(attemptDir(run, 'sitter', 2), 'park-messages.md'), 'utf8').includes(text));
+  await f.command(['stop', run.id, 'sitter']);
 });

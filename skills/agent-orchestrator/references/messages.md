@@ -129,13 +129,22 @@ agent can start again what it still needs. The messages follow as they were writ
 message is ever read as part of the brief.
 
 Before it stops anything, the interrupt checks the resume with every check `start` makes. When one
-fails (the task's folder is gone, say), it says why and the session runs on.
+fails (the task's folder is gone, say), it says why and the session runs on. Just before it stops
+the session it looks at the agent's commands once more. If a publishing command has started
+meanwhile, the session runs on and the message waits. If another shell command has started, that
+command is stopped instead. A command the agent starts in the instant between that look and the stop
+can still be ended with the session: nothing outside the agent can hold it back from starting one.
 
 Every way of resuming a task (`start`, a retry, a rework, an interrupt) first claims the attempt it
 replaces, so two of them never both start the next attempt. When two senders interrupt at once, one
 resumes the session and the other only adds its message, which that resume or the hook delivers.
 A `start` while an interrupt resumes the task is refused. `stop` and `close` end an interrupt that is
-between its two relays: the task ends stopped or closed, and is not resumed.
+between its two relays: the task ends stopped or closed, and is not resumed. A stop or close that
+comes after a resume claimed the task always wins, for a parked task's watcher too.
+
+If a resume ends unexpectedly after it started its relay and before it saved the task, that relay is
+not left alone. The next `start`, interrupt, `stop` or `close` adopts it as the task's next attempt:
+`start` then starts nothing new, and `stop` and `close` stop it.
 
 A resume is refused, with the reason, and nothing changes, for:
 

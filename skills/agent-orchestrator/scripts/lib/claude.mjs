@@ -84,8 +84,10 @@ export function applyClaudeEvent(s, e, cwd) {
     return;
   }
   if (text.startsWith("<command-name>")) s.beforeCommand = { busy: s.busy, ended: s.ended, interrupted: s.interrupted };
+  // The session id is the task's own: a sub-agent's events name another session.
+  const own = !subagentEvent(e);
   if (e.type === "system" && e.subtype === "init") {
-    s.sessionId = e.session_id || s.sessionId;
+    if (own) s.sessionId = e.session_id || s.sessionId;
     s.model = e.model || s.model;
   } else if (e.type === "assistant" && e.message) {
     const m = e.message;
@@ -148,7 +150,7 @@ export function applyClaudeEvent(s, e, cwd) {
     };
     if (typeof e.total_cost_usd === "number") s.costUsd = e.total_cost_usd;
     s.exact = true;
-    s.sessionId = e.session_id || s.sessionId;
+    if (own) s.sessionId = e.session_id || s.sessionId;
     if (e.is_error) s.error = shortText(e.result || e.subtype);
   } else if (e.type === "rate_limit_event") {
     s.limits = claudeLimits(e.rate_limit_info);

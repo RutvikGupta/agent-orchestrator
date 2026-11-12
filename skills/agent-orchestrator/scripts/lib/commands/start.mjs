@@ -306,7 +306,7 @@ export function startTask(args, extra = {}) {
   // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
   // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
   // Any other resume claims the attempt it replaces, for the same reason.
-  const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(prev, extra.attemptReason === "retry" ? "retry" : "start");
+  const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(run, prev, extra.attemptReason === "retry" ? "retry" : "start");
   if (parkClaim?.refused) refuse(parkClaim.refused);
 
   const attempt = (prev.attempt || 0) + 1;
@@ -546,9 +546,11 @@ function startCommand(run, id, args, extra) {
     (sameAgent ? prev.why : null) ||
     refuse("--why is required: one line on why this work runs as a command with no model watching it (see SKILL.md, \"Choose the agent and model\")", 2);
   checkSlots(run, id, args, cd, { writes: false });
-  // Running it again claims the attempt it replaces, as startTask does, so two never both start.
-  const claim = resumeLock(prev, extra.attemptReason === "retry" ? "retry" : "start");
+  // Running it again claims what startTask claims, so two starts never both run: the park of a
+  // parked task, whose watcher may be resuming it, or else the attempt it replaces.
+  const claim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(run, prev, extra.attemptReason === "retry" ? "retry" : "start");
   if (claim?.refused) refuse(claim.refused);
+  const since = claim?.since || prev;
   const attempt = (prev.attempt || 0) + 1;
   const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
   const attemptReason = extra.attemptReason
@@ -598,7 +600,7 @@ function startCommand(run, id, args, extra) {
     resumedBy: null,
     ...extra,
   };
-  const ended = claim ? endedSince(prev, loadTask(run, id)) : null;
+  const ended = claim ? endedSince(since, loadTask(run, id)) : null;
   if (ended) {
     claim.release();
     fs.rmSync(outDir, { recursive: true, force: true });
@@ -612,8 +614,8 @@ function startCommand(run, id, args, extra) {
     throw error;
   }
   task.pid = child.pid;
-  claim?.spawned(task);
-  if (claim) Object.assign(task, endedSince(prev, loadTask(run, id)) || {});
+  claim?.spawned?.(task);
+  if (claim) Object.assign(task, endedSince(since, loadTask(run, id)) || {});
   saveTask(run, task);
   claim?.done(task);
   if (startedBy) watchForFinish(run, task);

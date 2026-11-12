@@ -453,7 +453,8 @@ export function isParked(run, task) {
 // Resume claims (steer.mjs, resumeLock). Every way a task is resumed (a `start` by hand, a retry, a
 // rework, an interrupt) claims the attempt it replaces first: resume-<k>.json in that attempt's
 // folder, created whole and exclusively with the next k, naming its owner (PID and start time) and
-// its `kind` ("start", "retry" or "interrupt"). So two of them never both start the next attempt. A
+// its `kind` ("start", "retry" or "interrupt"; "adopt" for a claimant that took over a relay a dead
+// resume left running, steer.mjs, adoptResume). So two of them never both start the next attempt. A
 // parked babysitter's resume claims its park instead (park.mjs), and an interrupt never resumes one.
 // The highest k is the current claim: `released` when the resume failed or was refused (with
 // `error`), `attempt` once the resumed attempt is saved. An interrupt stops the running relay first,
