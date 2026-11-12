@@ -14,7 +14,7 @@ function session(t, events) {
   const file = jsonl(path.join(dir, 'session.jsonl'), events);
   const read = () => {
     const s = summarizeEvents('claude', file, dir);
-    return { model: s.model, effort: s.effort, busy: s.busy };
+    return { model: s.model, effort: s.effort, busy: Boolean(s.busy), interrupted: Boolean(s.interrupted) };
   };
   return { read, append: (more) => fs.appendFileSync(file, more.map((e) => JSON.stringify(e)).join('\n') + '\n') };
 }
@@ -35,7 +35,7 @@ const setEffort = (level) => command('effort', `Set effort level to ${level} (sa
 
 test('a /model or /effort change shows before the session replies again', (t) => {
   const s = session(t, [reply('claude-opus-5-5', 'xhigh'), turnEnd]);
-  assert.deepEqual(s.read(), { model: 'claude-opus-5-5', effort: 'xhigh', busy: false });
+  assert.deepEqual(s.read(), { model: 'claude-opus-5-5', effort: 'xhigh', busy: false, interrupted: false });
 
   s.append(setEffort('high'));
   assert.deepEqual([s.read().model, s.read().effort], ['claude-opus-5-5', 'high']);
@@ -47,7 +47,7 @@ test('a /model or /effort change shows before the session replies again', (t) =>
 test('the next reply decides the model and effort again', (t) => {
   const s = session(t, [reply('claude-opus-5-5', 'xhigh'), turnEnd, ...setModel('`Fable 5.2`'), ...setEffort('low')]);
   s.append([reply('claude-fable-5-2-20261101', 'medium'), turnEnd]);
-  assert.deepEqual(s.read(), { model: 'claude-fable-5-2-20261101', effort: 'medium', busy: false });
+  assert.deepEqual(s.read(), { model: 'claude-fable-5-2-20261101', effort: 'medium', busy: false, interrupted: false });
 });
 
 test('a model is read from an id, a name in color, or a name with a note after it', (t) => {
@@ -75,4 +75,35 @@ test('output that sets nothing, and a prompt that quotes such output, change not
     const { model, effort } = s.read();
     assert.deepEqual([model, effort], ['claude-fable-5-2', 'high'], JSON.stringify(events));
   }
+});
+
+const prompt = (text) => ({ type: 'user', message: { role: 'user', content: text } });
+
+test('a command Claude Code runs itself leaves an idle session idle', (t) => {
+  for (const events of [
+    setEffort('high'),
+    setModel('`Fable 5.2`'),
+    [...setModel('`Fable 5.2`'), ...setEffort('high')],
+    [command('exit', 'x')[0], { type: 'user', message: { role: 'user', content: '<local-command-stderr>Unknown command</local-command-stderr>' } }],
+  ]) {
+    const s = session(t, [reply('claude-opus-5-5', 'xhigh'), turnEnd, ...events]);
+    assert.equal(s.read().busy, false, JSON.stringify(events));
+  }
+});
+
+test('such a command changes neither a running turn nor an interrupted one', (t) => {
+  const running = session(t, [reply('claude-opus-5-5', 'xhigh'), turnEnd, prompt('fix the bug'), ...setEffort('high')]);
+  assert.deepEqual([running.read().busy, running.read().effort], [true, 'high']);
+
+  const interrupted = session(t, [prompt('fix the bug'), prompt('[Request interrupted by user]'), ...setModel('`Fable 5.2`')]);
+  assert.deepEqual([interrupted.read().busy, interrupted.read().interrupted], [false, true]);
+});
+
+test('a command that sends a prompt opens a turn', (t) => {
+  const s = session(t, [
+    reply('claude-opus-5-5', 'xhigh'), turnEnd,
+    command('review', '')[0],
+    { type: 'user', isMeta: true, message: { role: 'user', content: [{ type: 'text', text: 'Review the current diff.' }] } },
+  ]);
+  assert.equal(s.read().busy, true);
 });

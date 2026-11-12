@@ -37,7 +37,19 @@ function applyLocalCommand(s, text) {
 
 export function applyClaudeEvent(s, e, cwd) {
   if (e.timestamp && (e.type === "assistant" || (e.type === "user" && !e.isCompactSummary && !e.isVisibleInTranscriptOnly))) s.lastAt = e.timestamp;
-  if (e.type === "user" && typeof e.message?.content === "string" && e.message.content.startsWith(LOCAL_OUTPUT)) applyLocalCommand(s, e.message.content);
+  // A command Claude Code runs itself (/model, /effort) is recorded as two user lines: the command,
+  // then its output. The command line reads as a prompt, so it opens a turn below, as a command
+  // that sends a prompt must. Its output shows that nothing went to the model, so the session
+  // goes back to how it was before the command: an idle session stays idle.
+  const before = s.beforeCommand;
+  s.beforeCommand = null;
+  const text = e.type === "user" && typeof e.message?.content === "string" ? e.message.content : "";
+  if (text.startsWith(LOCAL_OUTPUT) || text.startsWith("<local-command-stderr>")) {
+    if (before) Object.assign(s, before);
+    if (text.startsWith(LOCAL_OUTPUT)) applyLocalCommand(s, text);
+    return;
+  }
+  if (text.startsWith("<command-name>")) s.beforeCommand = { busy: s.busy, ended: s.ended, interrupted: s.interrupted };
   if (e.type === "system" && e.subtype === "init") {
     s.sessionId = e.session_id || s.sessionId;
     s.model = e.model || s.model;

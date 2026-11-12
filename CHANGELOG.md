@@ -4,6 +4,9 @@
 
 - A Claude session's row shows a `/model` or `/effort` change as soon as the command runs. The
   row took both from the session's latest reply, so it kept the old setting until the next turn.
+- A command Claude Code runs itself, such as `/model` or `/effort`, no longer makes an idle
+  session's row show `running`. Its record read as a new prompt, so the row stayed `running` for
+  up to 30 minutes.
 
 ## 2.1.0 (2026-11-11)
 
