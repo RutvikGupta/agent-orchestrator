@@ -264,7 +264,7 @@ export async function cmdWait(args, resumed = null) {
   for (;;) {
     const checkedAt = Date.now();
     if (main) noteMainWait(run, checkedAt);
-    let tasks = snapshot().filter((t) => t.state !== "closed" && (ids.length ? ids.includes(t.id) : t.state !== "prepared"));
+    let tasks = snapshot().filter((t) => ids.length ? ids.includes(t.id) : !["prepared", "closed"].includes(t.state));
     if (!tasks.length) die(ids.length ? `no tasks named ${ids.join(", ")}` : "no started tasks in this run");
     // Snapshot before retries, so attention already present at entry never wakes a repeated wait.
     previous ??= new Set(attention(tasks).map(key));

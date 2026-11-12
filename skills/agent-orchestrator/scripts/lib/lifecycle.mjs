@@ -56,10 +56,10 @@ export function attemptReasonOf(task, n = task.attempt || 0) {
   return task.attemptReasons?.[n] || (task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume");
 }
 
-// Restoring a never-started task's folder reopens its preparation until the next close.
+// Preparing a closed, never-started task again reopens it until the next close.
 export function isClosedPreparation(task) {
-  return !task.pid && Boolean(task.closedAt) && (!task.worktree?.restoredAt ||
-    Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt));
+  const preparedAt = task.worktree?.createdAt || task.worktree?.restoredAt;
+  return !task.pid && Boolean(task.closedAt) && (!preparedAt || Date.parse(task.closedAt) >= Date.parse(preparedAt));
 }
 
 // The phase of a task in a given state (describe()'s `state`).
