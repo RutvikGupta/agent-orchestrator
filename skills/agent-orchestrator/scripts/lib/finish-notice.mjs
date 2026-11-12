@@ -23,12 +23,14 @@ import { decisionsIn } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
 import { firstLine } from "./format.mjs";
 import { spawnParkWatcher } from "./park.mjs";
-import { attemptAgent, describe, loadTask, parkedSignal, taskDir } from "./runs.mjs";
+import { attemptAgent, describe, loadTask, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
 export const NOTICE_FILE = "parent-notice.json";
 const NOTICE_LOG = "parent-notice.log";
+// Created once by the process that sends a notice an interrupt left taken (sendFinishNotice).
+const RECOVERY_FILE = "parent-notice-recovery.json";
 const SCRIPT = fileURLToPath(import.meta.url);
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/; // a run or task id, never a path
 const POLL_MS = 1000;
@@ -154,9 +156,24 @@ function endedRow(run, task, n, pid) {
   return { ...row, state, phase: null, health: null, report: null, limitHit: false, decisions, result, session: result?.sessionId || result?.threadId || row.session };
 }
 
+// An interrupt's helper (steer.mjs, runInterrupt) takes an attempt's notice before it stops the
+// relay, since the session goes on in the next attempt, and names itself and its resume claim in the
+// claim file (`interrupt`). A helper that ended before it started that attempt, because it died or
+// failed between its steps, leaves the notice taken with no one to send it. Such a claim is stranded:
+// its helper is gone, and its resume claim records no relay and no saved attempt. A relay that the
+// resume started means the session goes on, even when the helper died before saving it
+// (steer.mjs, adoptResume).
+function stranded(dir, record) {
+  const by = record?.interrupt;
+  if (!by?.generation || helperAlive(by)) return false;
+  const resume = readJson(resumeFile(dir, by.generation));
+  return !resume?.attempt && !resume?.relay;
+}
+
 // Send the notice for attempt `attempt` of task `id` in the run at `runDir`, once, after its relay
 // (PID `pid`, started at `started`) has ended. Returns what was recorded in the claim file, or null
-// when another process already claimed it.
+// when another process already claimed it. A stranded interrupt's claim is taken over by one process
+// only, the one that creates the attempt's recovery file.
 export function sendFinishNotice(runDir, id, attempt, { pid = null, started = null } = {}) {
   const run = { ...readJson(path.join(runDir, "run.json")), dir: runDir };
   const task = loadTask(run, id);
@@ -166,8 +183,20 @@ export function sendFinishNotice(runDir, id, attempt, { pid = null, started = nu
   try {
     fs.writeFileSync(claim, `${JSON.stringify(record)}\n`, { flag: "wx" });
   } catch (error) {
-    if (error.code === "EEXIST") return null;
-    throw error;
+    if (error.code !== "EEXIST") throw error;
+    const taken = readJson(claim);
+    if (!stranded(path.dirname(claim), taken)) return null;
+    // Several processes may find the claim stranded at once: the one that creates the recovery file
+    // takes it over, and the others leave it.
+    const generation = taken.interrupt.generation;
+    try {
+      fs.writeFileSync(path.join(path.dirname(claim), RECOVERY_FILE), `${JSON.stringify({ generation, pid: process.pid, at: new Date().toISOString() })}\n`, { flag: "wx" });
+    } catch (other) {
+      if (other.code === "EEXIST") return null;
+      throw other;
+    }
+    record.recovered = `the interrupt that took this notice (resume claim ${generation}) ended before it resumed the session`;
+    writeJson(claim, record);
   }
   const parent = attemptParent(run, task, attempt);
   try {
@@ -220,6 +249,13 @@ const exists = (pid) => {
 // A process's start time, which tells it apart from a later process with the same PID; null when
 // `ps` cannot read it.
 const startTime = (pid) => spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).stdout?.trim() || null;
+// Whether the interrupt's helper a notice claim names ({ pid, started }, as processStarted() writes
+// the start time) still runs. An unreadable start time proves nothing.
+function helperAlive(helper) {
+  if (!helper?.pid || !exists(helper.pid)) return false;
+  const now = processStarted(helper.pid);
+  return !helper.started || !now || now === helper.started;
+}
 
 // The watcher's shell runs this once the relay is gone; run directly, it waits itself, with the
 // same checks as WAIT_SCRIPT. STARTED is the relay's start time, read now when not given.
@@ -235,6 +271,10 @@ async function main([runDir, id, attempt, pid, started]) {
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
+  // An interrupt's helper that took the notice either resumes the session, and the notice stays
+  // taken, or ends without doing so, and the notice goes out (stranded). Wait for it to end.
+  const claim = path.join(runDir, "tasks", id, `attempt-${n}`, NOTICE_FILE);
+  while (helperAlive(readJson(claim)?.interrupt)) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   // The claim file records what happened; its final write is the watcher's last.
   sendFinishNotice(runDir, id, n, { pid: relay, started: identity });
 }

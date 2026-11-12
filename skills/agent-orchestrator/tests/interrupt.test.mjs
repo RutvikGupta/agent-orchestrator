@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
@@ -10,6 +10,7 @@ import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
 // (steer.mjs, "Interrupts"). A resumed relay's brief has no fake-relay comment, so it takes its
 // controls from FAKE_RELAY_CONFIG in the environment the sender passes on.
 const HOLD = { FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }) };
+const CLI = new URL('../scripts/orch.mjs', import.meta.url).pathname;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const attemptDir = (run, id, n) => path.join(run.dir, 'tasks', id, `attempt-${n}`);
 const rowOf = async (f, run, id) => (await f.json(['status', run.id])).tasks.find((t) => t.id === id);
@@ -436,6 +437,139 @@ test('stop cancels an interrupt between its two relays: the task ends stopped an
   assert.ok(record.stoppedAt);
   assert.equal(fs.existsSync(attemptDir(run, 'gap', 2)), false);
   assert.equal((await rowOf(f, run, 'gap')).state, 'stopped');
+});
+
+// A nested task `kid`, interrupted and held between its two relays (fixtures/interrupt-gap.cjs) until
+// its finish watcher, which reports through fixtures/notice-wait.cjs, has run once its relay was gone:
+// it found the notice taken and the helper alive, and waits (`waits`), or it exited. The sender is
+// started here, so that a test can end it by its PID. `extra` goes into the watcher's environment.
+async function heldInterrupt(f, t, extra = {}) {
+  const parent = await f.newRun('parent');
+  const lead = await f.start(parent, 'lead', { config: { hold: true } });
+  await f.ready(lead);
+  const as = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: parent.id, AGENT_ORCH_TASK: 'lead' };
+  const nested = await f.newRun('nested', as);
+  const watch = path.join(f.root, 'notice-marker');
+  const waiter = new URL('./fixtures/notice-wait.cjs', import.meta.url).pathname;
+  const watcherEnv = { NODE_OPTIONS: `--require=${JSON.stringify(waiter)}`, TEST_NOTICE_MARKER: watch, ...extra };
+  const kid = await f.start(nested, 'kid', { config: { hold: true }, env: { ...as, ...watcherEnv } });
+  await f.ready(kid);
+  const gap = path.join(f.root, 'gap-marker');
+  const preload = new URL('./fixtures/interrupt-gap.cjs', import.meta.url).pathname;
+  const sender = spawn(process.execPath, [CLI, 'send', nested.id, 'kid', 'Switch to plan B.', '--steer'], {
+    cwd: f.repo, env: { ...f.env, ...as, ...HOLD, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_GAP_MARKER: gap }, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  let stdout = '';
+  sender.stdout.setEncoding('utf8').on('data', (s) => { stdout += s; });
+  const sent = new Promise((resolve) => sender.on('close', (code, signal) => resolve({ code, signal, stdout })));
+  const release = () => fs.writeFileSync(`${gap}.release`, '');
+  // On a failure the helper is released and the sender ended here: the fixture's cleanup, which runs
+  // first, waits for the finish watcher, and that waits for the helper.
+  const abort = async () => {
+    release();
+    if (sender.exitCode === null && sender.signalCode === null) sender.kill('SIGKILL');
+    await sent;
+  };
+  t.after(() => sent); // the sender is ended by then: it waits at most 45 seconds
+  try {
+    await eventually(() => fs.existsSync(gap), 'the interrupt did not reach the gap between the relays', 20_000);
+    assert.ok(!alive(kid.pid), 'the first relay has exited');
+    await eventually(() => fs.existsSync(watch) || fs.existsSync(`${watch}.exit`), 'the finish watcher did not run', 20_000);
+  } catch (error) {
+    await abort();
+    throw error;
+  }
+  const notices = () => inboxOf(parent, 'lead').filter((m) => m.kind === 'finished');
+  return { parent, lead, nested, kid, watcherEnv, sender, sent, release, abort, notices, waits: fs.existsSync(watch), exited: () => fs.existsSync(`${watch}.exit`) };
+}
+
+// Kill the held interrupt's helper, as a crash would, after it stopped the first relay and before
+// it started the next one.
+async function killHelper(held) {
+  const resume = readJson(path.join(attemptDir(held.nested, 'kid', 1), 'resume-1.json'));
+  try {
+    assert.equal(resume.stopped, true);
+    // The sender stops waiting first, as one that timed out does: a dead helper whose sender still
+    // runs stays a zombie, which counts as running, until the sender ends.
+    held.sender.kill('SIGKILL');
+    await held.sent;
+    assert.match(spawnSync('ps', ['-o', 'command=', '-p', String(resume.helper)], { encoding: 'utf8' }).stdout, /steer\.mjs resume /);
+    process.kill(resume.helper, 'SIGKILL');
+  } catch (error) {
+    await held.abort();
+    throw error;
+  }
+}
+
+test('an interrupt whose helper dies between the two relays leaves its parent one finish notice for the stopped attempt', async (t) => {
+  const f = await fixture(t);
+  const held = await heldInterrupt(f, t);
+  const { parent, lead, nested } = held;
+  await killHelper(held);
+  const notices = await eventually(() => (held.notices().length ? held.notices() : null), 'the parent got no finish notice', 20_000);
+  // The watcher had seen the helper alive at its first check, and waited on it instead of giving up.
+  assert.ok(held.waits, 'the finish watcher found the notice taken and gave up');
+  await eventually(held.exited, 'the finish watcher did not exit', 20_000);
+  assert.deepEqual(held.notices().map((m) => m.about), [{ run: nested.id, task: 'kid', attempt: 1 }], 'exactly one notice, for the stopped attempt');
+  assert.equal(notices[0].from, `agent:${nested.id}/kid`);
+  const claim = readJson(path.join(attemptDir(nested, 'kid', 1), 'parent-notice.json'));
+  assert.deepEqual([claim.to, claim.message, claim.skipped], [`${parent.id}/lead`, notices[0].id, undefined]);
+  assert.match(claim.recovered, /interrupt/);
+  assert.equal(readJson(f.taskFile(nested, 'kid')).attempt, 1);
+  assert.equal(fs.existsSync(attemptDir(nested, 'kid', 2)), false);
+  f.release(lead);
+  await f.finished(parent, 'lead');
+});
+
+test('watchers that take over the notice a dead interrupt left, at the same moment, send it once', async (t) => {
+  const f = await fixture(t);
+  const barrier = path.join(f.root, 'barrier');
+  fs.mkdirSync(barrier);
+  const held = await heldInterrupt(f, t, { TEST_NOTICE_BARRIER: barrier });
+  const { parent, lead, nested } = held;
+  const go = () => fs.writeFileSync(path.join(barrier, 'go'), '');
+  t.after(() => fs.existsSync(barrier) && go());
+  await killHelper(held);
+  // Two more runs of the attempt's watcher (finish-notice.mjs, run directly) besides its own: each
+  // finds the helper gone and the notice still taken, and stops at the barrier before taking it over.
+  const script = new URL('../scripts/lib/finish-notice.mjs', import.meta.url).pathname;
+  const others = [1, 2].map(() => {
+    const child = spawn(process.execPath, [script, nested.dir, 'kid', '1', String(held.kid.pid), 'Thu Jan  1 00:00:00 1970'], { cwd: nested.dir, env: { ...f.env, ...held.watcherEnv }, stdio: 'ignore' });
+    return new Promise((resolve) => child.on('close', (code) => resolve(code)));
+  });
+  try {
+    await eventually(() => fs.readdirSync(barrier).length === 3, 'three watchers did not reach the takeover', 20_000);
+  } finally {
+    go();
+  }
+  assert.deepEqual(await Promise.all(others), [0, 0]);
+  const waiting = fs.readdirSync(barrier).filter((name) => /^\d+$/.test(name)).map(Number);
+  await eventually(() => waiting.every((pid) => !alive(pid)), 'a watcher did not exit', 20_000);
+  assert.deepEqual(held.notices().map((m) => m.about), [{ run: nested.id, task: 'kid', attempt: 1 }], 'exactly one notice');
+  const claim = readJson(path.join(attemptDir(nested, 'kid', 1), 'parent-notice.json'));
+  assert.deepEqual([claim.to, claim.message], [`${parent.id}/lead`, held.notices()[0].id]);
+  assert.equal(readJson(path.join(attemptDir(nested, 'kid', 1), 'parent-notice-recovery.json')).generation, 1);
+  f.release(lead);
+  await f.finished(parent, 'lead');
+});
+
+test('a finish watcher that waits on an interrupt\'s helper sends nothing once the helper resumes the session', async (t) => {
+  const f = await fixture(t);
+  const held = await heldInterrupt(f, t);
+  const { parent, lead, nested } = held;
+  held.release();
+  const sent = await held.sent;
+  assert.equal(sent.code, 0);
+  assert.match(sent.stdout, /^steered: .* resumed in attempt 2 /m);
+  await eventually(held.exited, 'the finish watcher did not exit', 20_000);
+  assert.deepEqual(held.notices(), [], 'the interrupted attempt sends no notice');
+  assert.match(readJson(path.join(attemptDir(nested, 'kid', 1), 'parent-notice.json')).skipped, /^interrupted to deliver a message/);
+  await ready(f, nested, 'kid', 2);
+  f.release({ outDir: attemptDir(nested, 'kid', 2) });
+  await eventually(() => (held.notices().length ? held.notices() : null), 'the parent got no finish notice', 20_000);
+  assert.deepEqual(held.notices().map((m) => m.about.attempt), [2]);
+  f.release(lead);
+  await f.finished(parent, 'lead');
 });
 
 test('message text is data: a message that reads like a template marker resumes the session and reaches it as written', async (t) => {

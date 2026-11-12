@@ -122,8 +122,10 @@ attempt it replaces: model and effort, timeout, sandbox, network, permission rul
 passed after `--`. Only the session and the prompt change. It is recorded as a new attempt with the
 reason `interrupt`; the stopped attempt shows as `interrupted`, and it is neither a counted failure
 nor a rework round. The task stays `running` for `wait`, the parallel limit and the plan, also in the
-moment between the two relays. The stopped attempt sends its parent no finish notice; the resumed
-one reports to the same parent at the same depth. The resumed prompt says the session was
+moment between the two relays. The stopped attempt sends its parent no finish notice when the
+resume succeeds; the resumed one reports to the same parent at the same depth. If the interrupt
+helper dies without saving a replacement attempt, the stopped attempt sends its finish notice
+after all. The resumed prompt says the session was
 interrupted to deliver a message, and that its background commands were stopped with it, so the
 agent can start again what it still needs. The messages follow as they were written: no text of a
 message is ever read as part of the brief.
@@ -132,8 +134,10 @@ Before it stops anything, the interrupt checks the resume with every check `star
 fails (the task's folder is gone, say), it says why and the session runs on. Just before it stops
 the session it looks at the agent's commands once more. If a publishing command has started
 meanwhile, the session runs on and the message waits. If another shell command has started, that
-command is stopped instead. A command the agent starts in the instant between that look and the stop
-can still be ended with the session: nothing outside the agent can hold it back from starting one.
+command is stopped instead, unless it belongs to a sub-agent while the parent is idle: then it is
+background work and the parent session is resumed. A command the agent starts in the instant
+between that look and the stop can still be ended with the session: nothing outside the agent can
+hold it back from starting one.
 
 Every way of resuming a task (`start`, a retry, a rework, an interrupt) first claims the attempt it
 replaces, so two of them never both start the next attempt. When two senders interrupt at once, one

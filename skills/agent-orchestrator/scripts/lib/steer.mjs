@@ -607,12 +607,12 @@ export async function runInterrupt(runDir, id, n, generation) {
   }
   if (ended()) return fail("the task was stopped or closed before its session was stopped", { stopped: false });
   // The stopped attempt sends no finish notice: its session goes on in the next attempt. Taken
-  // before the relay stops, so its finish watcher finds the notice taken.
+  // before the relay stops, so its finish watcher finds the notice taken. The claim names this helper
+  // and its resume claim, so that the watcher waits for the helper to end, and sends the notice after
+  // all when it ended before it started the next attempt (finish-notice.mjs, stranded).
   const notice = path.join(dir, NOTICE_FILE);
-  try {
-    fs.writeFileSync(notice, `${JSON.stringify({ attempt: n, claimedAt: new Date().toISOString(), skipped: "interrupted to deliver a message: the next attempt resumes the same session" })}\n`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
+  const interrupt = { generation, pid: process.pid, started: claim.record.owner?.started ?? null };
+  if (!createExclusive(notice, { attempt: n, claimedAt: new Date().toISOString(), skipped: "interrupted to deliver a message: the next attempt resumes the same session", interrupt })) {
     return fail("the attempt ended before it could be interrupted", { stopped: false });
   }
   // A resume that fails after the relay stopped: the attempt has ended, so its parent is told after all.
