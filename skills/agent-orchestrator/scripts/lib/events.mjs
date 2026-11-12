@@ -54,7 +54,7 @@ export function newSummary() {
 // or the latest Codex command that has not completed.
 export function shellNow(agent, s) {
   if (agent === "codex") return Object.values(s?.openCommands || {}).at(-1) ?? null;
-  const tool = Object.values(s?.openTools || {}).filter((t) => t.name === "Bash" && !t.background && t.command).at(-1);
+  const tool = Object.values(s?.openTools || {}).filter((t) => t.name === "Bash" && !t.background && t.command && !t.ended).at(-1);
   return tool ? tool.command : null;
 }
 

@@ -268,6 +268,12 @@ function pauseAt(f, name, { script, sub = '', file, text = '', after = false }) 
   const preload = new URL('./fixtures/pause-at-write.cjs', import.meta.url).pathname;
   return { marker, env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_PAUSE_SCRIPT: script, TEST_PAUSE_SUB: sub, TEST_PAUSE_FILE: file, TEST_PAUSE_TEXT: text, TEST_PAUSE_AFTER: after ? '1' : '', TEST_PAUSE_MARKER: marker } };
 }
+// The same for several processes in one test: `rules` maps a name to a pauseAt() rule.
+function pauseEach(f, rules) {
+  const preload = new URL('./fixtures/pause-at-write.cjs', import.meta.url).pathname;
+  const list = Object.entries(rules).map(([name, r]) => ({ sub: '', text: '', after: false, ...r, marker: path.join(f.root, name) }));
+  return { markers: Object.fromEntries(list.map((r, i) => [Object.keys(rules)[i], r.marker])), env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_PAUSE_RULES: JSON.stringify(list) } };
+}
 const paused = (marker) => eventually(() => fs.existsSync(marker) && fs.readFileSync(marker, 'utf8'), 'the process did not reach the write', 20_000);
 const go = (marker) => fs.writeFileSync(`${marker}.release`, '');
 
@@ -625,4 +631,88 @@ test('a parked task\'s watcher delivers a message that reads like a template mar
   assert.ok(brief.includes(`## The messages, quoted\n\n- Message from your orchestrator`) && brief.includes(`\n    > ${text}\n`));
   assert.ok(fs.readFileSync(path.join(attemptDir(run, 'sitter', 2), 'park-messages.md'), 'utf8').includes(text));
   await f.command(['stop', run.id, 'sitter']);
+});
+
+// Third review: each test below fails without its fix.
+
+test('a publishing command that a sub-agent still runs holds an interrupt back, also once the session ended its turn', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  // A background sub-agent started a shell command; then the session ended its turn and waits.
+  const childCall = (command) => [
+    { type: 'assistant', message: { id: 'm-task', content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'publish it', run_in_background: true } }] } },
+    { type: 'assistant', parent_tool_use_id: 'toolu_task', message: { id: 'm-child', content: [{ type: 'tool_use', id: 'toolu_child', name: 'Bash', input: { command } }] } },
+    ...idleEvents(),
+  ];
+  const pushing = await f.start(run, 'pushing', { config: { hold: true, extraEvents: childCall('git push origin main') }, flags: ['--read-only'] });
+  await f.ready(pushing);
+  assert.equal((await rowOf(f, run, 'pushing')).idle.background, 'bash tmp/watch.sh');
+  const sent = await f.json(['send', run.id, 'pushing', 'Stop and rebase.', '--steer']);
+  assert.equal(sent.steer.waiting, 'the agent is running `git push origin main`, which is not stopped part-way');
+  assert.ok(alive(pushing.pid), 'the session was not stopped');
+  assert.equal(fs.existsSync(path.join(pushing.outDir, 'resume-1.json')), false);
+  f.release(pushing);
+  await f.finished(run, 'pushing');
+  // Any other command of a background sub-agent is background work: the idle session is resumed.
+  const polling = await f.start(run, 'polling', { config: { hold: true, extraEvents: childCall('sleep 61') }, flags: ['--read-only'] });
+  await f.ready(polling);
+  const resumed = await f.json(['send', run.id, 'polling', 'Wake up.', '--steer'], { env: HOLD });
+  assert.deepEqual([resumed.steer.was, resumed.steer.resumed], ['idle', 2]);
+  await ready(f, run, 'polling', 2);
+  f.release({ outDir: attemptDir(run, 'polling', 2) });
+  await f.finished(run, 'polling');
+});
+
+test('the sender hands its claim to the helper without touching the helper\'s record, whichever of them writes first', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'handed', { config: { hold: true } });
+  await f.ready(first);
+  // Hold the sender just before any write of the claim after it started the helper, and the helper
+  // just after it recorded itself in the claim: the order in which a sender could undo that record.
+  const hold = pauseEach(f, {
+    sender: { script: 'orch\\.mjs$', sub: 'send', file: 'resume-\\d+\\.json$' },
+    helper: { script: 'steer\\.mjs$', sub: 'resume', file: 'resume-\\d+\\.json$', text: '"helper"', after: true },
+  });
+  const claim = path.join(first.outDir, 'resume-1.json'), handoff = path.join(first.outDir, 'resume-1.handoff.json');
+  const sending = f.command(['send', run.id, 'handed', 'Carry on.', '--steer'], { env: { ...HOLD, ...hold.env } });
+  try {
+    const helper = Number(await paused(hold.markers.helper));
+    assert.equal(readJson(claim).helper, helper);
+    go(hold.markers.sender);
+    // The sender's handoff is done once its own file names the helper; a sender that rewrote the
+    // claim instead has dropped what the helper recorded.
+    await eventually(() => fs.existsSync(handoff) || !readJson(claim)?.helper, 'the sender did not hand the claim over');
+    assert.deepEqual([fs.existsSync(handoff) ? readJson(handoff).pid : null, readJson(claim).helper], [helper, helper], 'the helper\'s record stands, and the handoff names it');
+  } finally {
+    go(hold.markers.sender);
+    go(hold.markers.helper);
+  }
+  assert.match((await sending).stdout, /so its session was stopped and resumed in attempt 2 /);
+  await ready(f, run, 'handed', 2);
+  f.release({ outDir: attemptDir(run, 'handed', 2) });
+  await f.finished(run, 'handed');
+});
+
+test('an adopter that ends before it saves the task leaves a claim the next one can still adopt and stop', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'twice', { flags: ['--read-only'] });
+  await f.finished(run, 'twice');
+  const relay = await orphaned(f, run, 'twice', 'orphan-twice');
+  // A stop adopts the relay, and is killed before it saves the task.
+  const hold = pauseAt(f, 'adopter', { script: 'orch\\.mjs$', sub: 'stop', file: 'tasks/twice/task\\.json$' });
+  const stopping = f.command(['stop', run.id, 'twice'], { code: null, env: hold.env });
+  const adopter = Number(await paused(hold.marker));
+  const adoption = readJson(path.join(attemptDir(run, 'twice', 1), 'resume-2.json'));
+  assert.deepEqual([adoption.kind, adoption.relay.pid, adoption.task.attempt, adoption.since], ['adopt', relay, 2, { closedAt: null, stoppedAt: null }]);
+  process.kill(adopter, 'SIGKILL');
+  await stopping;
+  assert.equal(readJson(f.taskFile(run, 'twice')).attempt, 1, 'the task was never saved');
+  assert.ok(alive(relay), 'the relay runs on');
+  // The next stop adopts it from that claim, and stops it.
+  const stopped = await f.command(['stop', run.id, 'twice']);
+  assert.match(stopped.stdout, new RegExp(`^stopped twice \\(pid ${relay}\\)`));
+  await eventually(() => !alive(relay), 'the relay was not stopped');
+  assert.deepEqual([readJson(f.taskFile(run, 'twice')).attempt, readJson(path.join(attemptDir(run, 'twice', 1), 'resume-3.json')).adopted], [2, true]);
 });

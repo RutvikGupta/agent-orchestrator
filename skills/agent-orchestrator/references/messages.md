@@ -152,7 +152,8 @@ A resume is refused, with the reason, and nothing changes, for:
 - a command task: it has no session and no agent;
 - a task whose session id is not known yet, just after it started;
 - a sandboxed Codex task with the network on: the Codex relay cannot resume its session;
-- a task with a publishing command running in the background, which stopping the session would end.
+- a task with a publishing command running in the background, its own or a sub-agent's, which
+  stopping the session would end. A sub-agent's command still counts after the task ended its turn.
 
 `$ORCH steer <run> <task-id>` does the same for messages already queued, and so does "Send now" on
 the dashboard.

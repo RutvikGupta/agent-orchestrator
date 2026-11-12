@@ -462,6 +462,10 @@ export function isParked(run, task) {
 // the plan never see the gap between the two relays.
 const RESUME_RE = /^resume-(\d+)\.json$/;
 export const resumeFile = (dir, generation) => path.join(dir, `resume-${generation}.json`);
+// An interrupt's sender hands its claim to the helper it starts: resume-<k>.handoff.json names the
+// helper ({ pid, started }) as the claim's owner. The sender writes it once and never touches the
+// claim again, and the helper never writes it, so neither overwrites the other's record.
+export const resumeHandoffFile = (dir, generation) => path.join(dir, `resume-${generation}.handoff.json`);
 const RESUME_GRACE_MS = 60000; // a claim whose owner cannot be read counts as live this long
 
 // The current resume claim of an attempt's folder: { generation, record, state }, where state is
@@ -476,8 +480,13 @@ export function resumeClaim(dir) {
   if (!record) state = "live"; // created whole, so only a moment's read race leaves it unreadable
   else if (record.released) state = "released";
   else if (record.attempt) state = "done";
-  else if (record.owner?.pid) state = ownerAlive(record.owner) ? "live" : "abandoned";
-  else state = Date.now() - (Date.parse(record.claimedAt) || 0) < RESUME_GRACE_MS ? "live" : "abandoned";
+  else {
+    // The owner is whoever the claim was handed to, else whoever its record names.
+    const handoff = readJson(resumeHandoffFile(dir, generation));
+    const owner = handoff?.pid ? handoff : record.owner;
+    if (owner?.pid) state = ownerAlive(owner) ? "live" : "abandoned";
+    else state = Date.now() - (Date.parse(record.claimedAt) || 0) < RESUME_GRACE_MS ? "live" : "abandoned";
+  }
   return { generation, record, state };
 }
 

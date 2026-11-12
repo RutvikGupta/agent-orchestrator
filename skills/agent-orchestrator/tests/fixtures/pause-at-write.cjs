@@ -6,9 +6,14 @@
 // after it with TEST_PAUSE_AFTER=1. A file written through a temporary file and a rename (writeJson)
 // is matched by its final name, and counts as written once it is renamed.
 const fs = require('node:fs');
-const { TEST_PAUSE_SCRIPT: script, TEST_PAUSE_SUB: sub, TEST_PAUSE_FILE: file, TEST_PAUSE_TEXT: text, TEST_PAUSE_MARKER: marker } = process.env;
-if (marker && script && file && new RegExp(script).test(process.argv[1] || '') && (!sub || process.argv[2] === sub)) {
-  const after = process.env.TEST_PAUSE_AFTER === '1';
+// TEST_PAUSE_RULES, a JSON list of { script, sub, file, text, after, marker }, holds several
+// processes in one test, each by the first rule that names it.
+const single = { script: process.env.TEST_PAUSE_SCRIPT, sub: process.env.TEST_PAUSE_SUB, file: process.env.TEST_PAUSE_FILE, text: process.env.TEST_PAUSE_TEXT, after: process.env.TEST_PAUSE_AFTER === '1', marker: process.env.TEST_PAUSE_MARKER };
+const rules = process.env.TEST_PAUSE_RULES ? JSON.parse(process.env.TEST_PAUSE_RULES) : [single];
+const rule = rules.find((r) => r.marker && r.script && r.file && new RegExp(r.script).test(process.argv[1] || '') && (!r.sub || process.argv[2] === r.sub));
+if (rule) {
+  const { file, text, marker } = rule;
+  const after = Boolean(rule.after);
   const wanted = new RegExp(file);
   const sleep = new Int32Array(new SharedArrayBuffer(4));
   let done = false, renaming = null;

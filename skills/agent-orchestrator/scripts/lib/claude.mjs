@@ -42,7 +42,8 @@ function applyLocalCommand(s, text) {
 // Only the session's own events count: a sub-agent's (stream-json marks them with
 // parent_tool_use_id, Claude Code's transcripts with isSidechain) neither end nor reopen its turn.
 // `openTools` holds every tool call without a result yet, the session's and its sub-agents', as
-// "#<id>" -> { name, command, background, sub }, oldest first.
+// "#<id>" -> { name, command, background, sub }, oldest first. When the session's turn ends, its
+// own calls are over; a sub-agent's stays, marked `ended`, since a background sub-agent runs on.
 const OPEN_TOOLS = 32; // a call that never gets a result is dropped once this many are open
 export const subagentEvent = (e) => Boolean(e.parent_tool_use_id) || e.isSidechain === true;
 function applyTurn(s, e) {
@@ -62,7 +63,10 @@ function applyTurn(s, e) {
   if (sub) return;
   if (e.type === "result") {
     s.turnEnded = true;
-    s.openTools = {}; // the turn is over: no call of it is still running
+    for (const [id, tool] of Object.entries(s.openTools)) {
+      if (tool.sub) tool.ended = true;
+      else delete s.openTools[id];
+    }
   } else if (e.type === "assistant" || e.type === "user" || e.type === "api-request" || (e.type === "system" && e.subtype === "task_notification")) {
     s.turnEnded = false;
   }

@@ -20,7 +20,7 @@ import { watchForFinish } from "./finish-notice.mjs";
 import { markRead, markSteered, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { parkEnv } from "./park.mjs";
 import { COMMAND_AGENT } from "./policy.mjs";
-import { describe, exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
+import { describe, exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, resumeHandoffFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 
 // Commands that publish or rewrite history are never stopped part-way: the message waits.
@@ -58,7 +58,9 @@ export function pendingCodexCommands(eventsFile) {
 // Every foreground Bash call in the attempt's event stream that has no result yet, oldest first,
 // whichever tool call came after it (parallel calls, a sub-agent's): { id, command, seconds }, with
 // seconds from its latest progress heartbeat, if any. A Bash call that runs in the background gets
-// its result at once. The session's `result` ends its turn, and every call of it.
+// its result at once. The session's `result` ends its turn, and every call of its own. A
+// sub-agent's call stays: a sub-agent in the background runs on after the turn, so its command is
+// kept, marked `ended` (the turn it started in is over).
 export function pendingCommands(eventsFile) {
   const open = new Map();
   for (const line of (readText(eventsFile) || "").split("\n")) {
@@ -69,13 +71,18 @@ export function pendingCommands(eventsFile) {
     } catch {
       continue;
     }
-    if (e.type === "result" && !e.parent_tool_use_id) open.clear();
+    if (e.type === "result" && !e.parent_tool_use_id) {
+      for (const [id, call] of open) {
+        if (call.sub) call.ended = true;
+        else open.delete(id);
+      }
+    }
     if (e.type === "system" && e.subtype === "permission_denied") open.delete(e.tool_use_id); // it never ran
     if (e.type === "tool_progress" && open.has(e.parent_tool_use_id)) open.get(e.parent_tool_use_id).seconds = e.elapsed_time_seconds ?? open.get(e.parent_tool_use_id).seconds;
     const content = e.message?.content;
     if (!Array.isArray(content)) continue;
     for (const c of content) {
-      if (c?.type === "tool_use" && c.name === "Bash" && !c.input?.run_in_background && c.input?.command) open.set(c.id, { id: c.id, command: String(c.input.command), seconds: null });
+      if (c?.type === "tool_use" && c.name === "Bash" && !c.input?.run_in_background && c.input?.command) open.set(c.id, { id: c.id, command: String(c.input.command), seconds: null, ...(e.parent_tool_use_id ? { sub: true } : {}) });
       else if (c?.type === "tool_result") open.delete(c.tool_use_id);
     }
   }
@@ -229,13 +236,16 @@ export function commandTree(relayPid, command, rows = processTable()) {
 //                                             `refused` when an interrupt would do harm.
 // Every shell command of the turn that has no result yet counts, whatever tool call came after it:
 // an interrupt never ends a session while one of them runs. When one is a publishing command, the
-// message waits for it; otherwise each of them is stopped, which returns its call.
+// message waits for it; otherwise each of them is stopped, which returns its call. A sub-agent's
+// command that outlived the turn it started in is background work: a publishing one still holds the
+// interrupt back, and any other ends with the session, as a background command does.
 export function planSteer(task, row = null) {
   const events = path.join(task.outDir || "", "events.jsonl");
-  const pending = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
-  if (!pending.length) return planResume(task, row);
-  const kept = pending.find((p) => PROTECTED.test(p.command));
+  const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
+  const kept = all.find((p) => PROTECTED.test(p.command));
   if (kept) return { wait: `the agent is running \`${shorten(kept.command)}\`, which is not stopped part-way` };
+  const pending = all.filter((p) => !p.ended);
+  if (!pending.length) return planResume(task, row);
   const found = pending.map((p) => ({ p, tree: commandTree(task.pid, p.command) })).filter((x) => x.tree);
   if (!found.length) return { wait: "the agent's command could not be matched to a process" };
   const last = found.at(-1).p;
@@ -396,10 +406,21 @@ export function adoptResume(run, task) {
   const planned = current.record?.task;
   if (current.state !== "abandoned" || !planned?.id || !relayRunning(current.record.relay)) return null;
   const file = resumeFile(dir, current.generation + 1);
-  const record = { kind: "adopt", claimedAt: new Date().toISOString(), owner: { pid: process.pid, started: processStarted(process.pid) }, replaces: task.attempt, takesOver: current.generation, relay: current.record.relay };
+  // The claim carries all that the next adopter needs, should this one end before it saves the task:
+  // the relay, the planned task, and the close and stop the resume first saw.
+  const since = current.record.since || {};
+  const record = {
+    kind: "adopt", claimedAt: new Date().toISOString(), owner: { pid: process.pid, started: processStarted(process.pid) },
+    replaces: task.attempt, takesOver: current.generation, relay: current.record.relay, task: planned, since,
+  };
   if (!createExclusive(file, record)) return null;
   const latest = loadTask(run, task.id);
-  const since = current.record.since || {};
+  // An adopter that ended after it saved the task: the attempt is recorded already, so only the
+  // claim is completed, and nothing saved since is overwritten.
+  if (latest && latest.attempt >= planned.attempt) {
+    writeJson(file, { ...record, attempt: latest.attempt, pid: latest.pid, resumedAt: latest.startedAt, adopted: true });
+    return latest.attempt === planned.attempt ? latest : null;
+  }
   const saved = {
     ...planned, pid: current.record.relay.pid,
     ...(latest?.closedAt && latest.closedAt !== since.closedAt ? { closedAt: latest.closedAt } : {}),
@@ -425,7 +446,8 @@ export function resumeLock(run, task, kind = "start") {
   }
   if (claim.busy) {
     const r = claim.busy.record;
-    return { refused: r?.attempt ? `task ${shownName(task)} was resumed meanwhile, in attempt ${r.attempt}; run \`status\` to see it` : `task ${shownName(task)} is being resumed right now (${r?.kind === "interrupt" ? "an interrupt is delivering a message" : `by \`${r?.kind || "start"}\``}); run \`status\` to see its new attempt` };
+    const who = r?.kind === "interrupt" ? "an interrupt is delivering a message" : r?.kind === "adopt" ? "another command is taking over the relay an earlier resume left" : `by \`${r?.kind || "start"}\``;
+    return { refused: r?.attempt ? `task ${shownName(task)} was resumed meanwhile, in attempt ${r.attempt}; run \`status\` to see it` : `task ${shownName(task)} is being resumed right now (${who}); run \`status\` to see its new attempt` };
   }
   return claimHandle(claim);
 }
@@ -463,7 +485,8 @@ export function stopResume(run, task, mark) {
     if (claim.state !== "live" || Date.now() >= until) {
       const latest = loadTask(run, task.id) || task;
       if (claim.record?.attempt && relayAlive(latest.pid, null, latest.outDir)) return { task: latest };
-      const what = claim.record?.kind === "interrupt" ? "an interrupt was resuming its session" : `\`${claim.record?.kind || "start"}\` was resuming it`;
+      const kind = claim.record?.kind;
+      const what = kind === "interrupt" ? "an interrupt was resuming its session" : kind === "adopt" ? "another command was taking over its relay" : `\`${kind || "start"}\` was resuming it`;
       return { text: `stopped ${shownName(task)} while ${what}${stopped.length ? ` (pid ${stopped.join(", ")})` : ""}; it starts no new attempt${claim.state === "live" ? ", though that resume has not ended yet" : ""}` };
     }
     spawnSync("sleep", ["0.1"]);
@@ -486,11 +509,14 @@ export function launchInterrupt(run, task, claim) {
     child.unref();
     if (!child.pid) throw new Error("the helper did not start");
     // The helper owns the claim from now on: when it ends without a word, the claim is abandoned
-    // and the next sender takes it over, however long this process lives. The helper records the
-    // same owner itself (runInterrupt), in case this process ends first.
-    const owner = { pid: child.pid, started: processStarted(child.pid) };
-    const record = readJson(claim.file);
-    if (record && !record.released && !record.attempt && !record.helper) writeJson(claim.file, { ...record, owner });
+    // and the next sender takes it over, however long this process lives. The handoff goes in a
+    // file of its own, written once (runs.mjs, resumeHandoffFile): from here only the helper writes
+    // the claim's record, so neither process can overwrite what the other wrote.
+    try {
+      createExclusive(resumeHandoffFile(task.outDir, claim.generation), { pid: child.pid, started: processStarted(child.pid), at: new Date().toISOString() });
+    } catch {
+      // Without it the claim's owner is this process until the helper names itself in the record.
+    }
     return child.pid;
   } catch (error) {
     writeJson(claim.file, { ...claim.record, released: true, releasedAt: new Date().toISOString(), error: `the interrupt could not start: ${error.message}` });
