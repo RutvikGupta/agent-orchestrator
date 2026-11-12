@@ -3,7 +3,7 @@ for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextN
 const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":(n/1e6).toFixed(1)+"M";
 const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
-const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="idle"||s==="parked"?"s-idle":"s-bad";
+const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="closed"||s==="idle"||s==="parked"?"s-idle":"s-bad";
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
@@ -23,7 +23,7 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
     if(dy==null)b.animate([{opacity:0},{opacity:1}],{duration:350,easing:"ease-out"});
     else if(Math.abs(dy)>1)b.animate([{transform:"translateY("+dy+"px)"},{transform:"none"}],{duration:550,easing:"cubic-bezier(.2,.8,.2,1)"})}};
 const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run"))for(const a of d.getAnimations())a.startTime=0};
-const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="parked"?"":"d-bad"};
+const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="closed"||s==="parked"?"":"d-bad"};
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A session's activity line, after a short marker while it is stuck on one failing command.
 const nowText=t=>(t.stuck?"stuck: `"+(t.stuck.command.length>30?t.stuck.command.slice(0,29)+"…":t.stuck.command)+"` failed "+t.stuck.failures+"× · ":"")+(t.now||"");

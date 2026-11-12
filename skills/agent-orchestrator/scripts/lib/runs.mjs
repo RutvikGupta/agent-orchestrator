@@ -587,7 +587,7 @@ export function describe(run, task) {
   // read again before calling the task aborted.
   if (!running && !result && task.pid) result = readResult();
   let state;
-  if (!task.pid) state = "prepared";
+  if (!task.pid) state = task.closedAt ? "closed" : "prepared";
   else if (running) state = "running";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
@@ -657,7 +657,7 @@ export function describe(run, task) {
   else if (parked) now = parkedNow(parked);
   else if (result && command) now = commandOutcome(result) || "(no output)";
   else if (result) now = firstLine(result.finalMessage) || current.error || "(empty final message)";
-  else now = state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
+  else now = state === "closed" ? "closed before it started" : state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
 
   const row = {
     id: task.id,
@@ -705,6 +705,8 @@ export function describe(run, task) {
   };
   const reported = { ...row, ...reportFields(run, task, row) };
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
+  // A retired preparation has no attempt to review or classify as failed.
+  if (state === "closed") staged.phase = "closed";
   if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };
   described.attempts = attemptsOf(task, seen, described);

@@ -13,7 +13,7 @@ export function totals(tasks) {
   const t = { running: 0, finished: 0, tokensIn: 0, tokensOut: 0, exact: true };
   for (const task of tasks) {
     if (task.state === "running") t.running += 1;
-    else if (task.state !== "prepared") t.finished += 1;
+    else if (!["prepared", "closed"].includes(task.state)) t.finished += 1;
     t.tokensIn += task.tokensIn;
     t.tokensOut += task.tokensOut;
     if (!task.tokensExact) t.exact = false;
@@ -83,7 +83,7 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
       : `${names.get(r.id) || r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run, names),
     ...whyLines(tasks),
-    ...tasks.map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
+    ...tasks.filter((t) => t.state !== "closed").map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
     ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }
@@ -111,7 +111,7 @@ function orchestratorLabel(run) {
   return ` · launched by ${o.agent}${o.sessionId ? ` session ${o.sessionId.slice(0, 8)}` : ""}`;
 }
 
-const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 31, aborted: 31, prepared: 90, idle: 90 };
+const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 31, aborted: 31, prepared: 90, closed: 90, idle: 90 };
 
 function paint(text, state, tty) {
   const code = COLORS[state] ?? (String(state).endsWith("_unavailable") ? 31 : null);

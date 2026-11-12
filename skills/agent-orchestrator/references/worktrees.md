@@ -54,7 +54,11 @@ its work has landed.
 
 When it happens:
 
-- `close` collects the run's worktrees once every task in the run is closed.
+- `close` collects the run's worktrees once every task in the run is closed. A task prepared
+  with `worktree` but never started then shows as `closed`, with "closed before it started".
+  Until every task is closed, `close` says it keeps that prepared folder because other tasks
+  remain open. The same safety checks apply to prepared folders. A folder already removed by
+  hand counts as removed; its task still closes and its branch stays.
 - `integrate` collects the integrated task's worktree right after the merge.
 - `gc` collects what is left in idle runs (below).
 - `cleanup <run>` collects the run's worktrees now, by the same rules as `close` and `integrate`.

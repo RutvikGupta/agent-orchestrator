@@ -29,7 +29,7 @@ export function gcTasks(run) {
     const result = task.outDir ? readJson(path.join(task.outDir, 'result.json')) : null;
     const evidence = task.outDir ? readJson(path.join(task.outDir, 'evidence.json')) : null;
     const eventTime = latestAttemptActivity(task.outDir);
-    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? 'prepared' : result?.status || 'aborted', result,
+    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? (task.closedAt ? 'closed' : 'prepared') : result?.status || 'aborted', result,
       lastActiveMs: Math.max(eventTime, Date.parse(result?.finishedAt || '') || 0),
       readAt: evidence && evidence.attempt === task.attempt ? evidence.readAt : null }];
   });

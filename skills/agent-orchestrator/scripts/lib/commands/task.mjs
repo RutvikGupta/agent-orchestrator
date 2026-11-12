@@ -201,7 +201,12 @@ export async function cmdClose(args) {
     if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
   const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
-  const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
+  const keptPreparations = tasks.filter((task) => !task.pid && task.worktree);
+  const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : keptPreparations.length ? {
+    run: run.id, removed: [], bytesFreed: 0,
+    kept: keptPreparations.map((task) => ({ task: task.id, path: task.worktree.path, branch: task.worktree.branch,
+      reason: "other tasks in the run are still open" })),
+  } : null;
   if (cleanup) lines.push(collectionText(cleanup));
   emit(args, { run: run.id, closed: ids, cleanup }, lines.join("\n"));
 }
