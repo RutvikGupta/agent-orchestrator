@@ -60,7 +60,7 @@ When it happens:
   remain open. The same safety checks apply to prepared folders. A folder already removed by
   hand counts as removed even while other tasks remain open; its task still closes and its branch stays.
   Restoring a never-started task reopens its preparation, so it shows as `prepared` until started
-  or closed again. `wait` watches started tasks only.
+  or closed again. `wait` does not watch closed preparations.
 - `integrate` collects the integrated task's worktree right after the merge.
 - `gc` collects what is left in idle runs (below).
 - `cleanup <run>` collects the run's worktrees now, by the same rules as `close` and `integrate`.
