@@ -26,10 +26,43 @@ act on. `SKILL.md` step 5 says when to open it.
   `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see threads another Codex
   process runs.
 
+## Messages to a task
+
+The box under a task's details sends it a message (`references/messages.md`).
+
+- **The waiting list.** Above the box, "Waiting for the agent (N)" lists every message the agent has
+  not read yet, oldest first. Each row shows who sent it, when, how long it has waited, and its text.
+  A message just sent from the page shows at once as "sending…", until the board lists it. A long
+  list scrolls inside its own area, so the box stays in view. The list shows only while a message
+  waits.
+- **The delivery line.** Under the heading, one line says when the agent will read the messages, for
+  example "It reads them after its next tool call." It is the line `$ORCH inbox` prints. A message
+  that has waited 30 seconds adds a hint about interrupting.
+- **The row marker.** A row with unread messages shows `✉ N waiting` after its name, and its tooltip
+  lists them with their senders. Every row that takes messages shows it: a nested run's task, a
+  renamed task, a babysitter, and a command task's row.
+- **Idle tasks.** A task that ended its turn and waits on its own background command shows
+  `running · idle`, and its activity says what it waits on. It reads nothing until that command ends.
+  So a message from the box interrupts it at once, even with the Interrupt option off: its session
+  is stopped and resumed with the message. While that resume runs, the row shows
+  `running · resuming`.
+- **Send now and the Interrupt option.** "Send now" in the waiting list, and a send with the
+  Interrupt option on, deliver at once. What they do depends on what the agent is doing:
+  - In a shell command: the command is stopped, so the agent reads the messages. A commit, push or
+    other publishing command is never stopped; the messages wait for it.
+  - Not in a shell command: the session is stopped and resumed in the same session, with the unread
+    messages as its next prompt. This is a new attempt, with the reason `interrupt`.
+  - A babysitter, a parked task, a command task, or a task whose session id is not known yet is not
+    interrupted. The messages wait for its next step.
+- **The status line.** The line under the box says which of these happened: "Stopped `npm test` …
+  so it reads it now", "Interrupted: the agent … so its session is resuming with the message", or
+  "Not interrupted: …" with the reason. When another interrupt is already resuming the session, it
+  says so.
+
 ## The attention lane
 
 It lists what needs someone: questions from running agents, decisions, failures, results awaiting
-review, and silent or stuck tasks (`references/monitor.md`).
+review, and silent, stuck or unreachable tasks (`references/monitor.md`).
 
 - An item for the agent that must act (the orch task that started the task, or the session that
   launched a top-level run) shows muted, "for <agent>", and never counts in the header's "N need
@@ -41,6 +74,10 @@ review, and silent or stuck tasks (`references/monitor.md`).
   15m, at least twice `AGENT_ORCH_PARK_MAX`).
 - A decision handed back in a top-level run goes to its session first.
 - A babysitter never awaits review.
+- An `unreachable` item is a running task that ended its turn and waits on its own background
+  command while a message waits unread. Nothing reaches it until that command ends, so it does not
+  wait to show as silent. The item names the `steer` command that delivers the message now, and so
+  does "Send now". It comes after stuck and before awaiting review (`references/messages.md`, "Idle").
 - A review left waiting longer than `AGENT_ORCH_REVIEW_STALE` (default 24h) leaves the lane;
   `recover` still lists it.
 

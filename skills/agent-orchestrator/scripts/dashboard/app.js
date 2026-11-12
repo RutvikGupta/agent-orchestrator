@@ -155,9 +155,9 @@ function sectionView(run){
         nk?$("span",{class:"caret","data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
-        t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+m.text).join("\n")},"✉ "+t.inbox.unread+" unread"):null,
+        t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+senderOf(m)+": "+m.text).join("\n")},"✉ "+t.inbox.unread+" waiting"):null,
         shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
-      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(t.attempt>1?" · "+t.attempt+" attempts":"")+(startedIn(t,byKey.get(t.parentKey))?" · attempt "+startedIn(t,byKey.get(t.parentKey)):"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
+      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")+(t.attempt>1?" · "+t.attempt+" attempts":"")+(startedIn(t,byKey.get(t.parentKey))?" · attempt "+startedIn(t,byKey.get(t.parentKey)):"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
       $("tr",{class:"nowrow"},$("td",{...indent(32),colspan:"10"},nowText(t))))});
@@ -394,23 +394,27 @@ function reviewView(t){const vs=t.verifications||[],rs=t.reviewRounds||[],acc=t.
 // here), unsure (the failure may still have stored it)}.
 const pending=new Map(),INBOX_WINDOW=20;let pendingSeq=0;
 const serverMessages=t=>t?.inbox?.messages||[];
+// Every unread message (the board does not cap it, unlike `messages`), and who sent a message: the board's
+// name for it, or one made from `from` when the board gives none.
+const unreadList=t=>t?.inbox?.unreadMessages||[];
+const senderOf=m=>m.sender||(m.from==="user"?"you":"orchestrator");
 const hhmm=when=>new Date(when).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
 const imageCount=n=>n>1?n+" images":"1 image";
 // Does the board's list show this entry? By its id once the reply gave one. Before that, by the message
 // it matched while the send was in flight (a read can land between the server storing a message and its
 // reply). A full list whose oldest message is newer than the entry has pushed it out of view: it is stored.
-const landed=(e,list)=>e.id?list.some(m=>m.id===e.id)||(list.length>=INBOX_WINDOW&&Date.parse(list[0].time)>Date.parse(e.stamp)):!!e.claim&&list.some(m=>m.id===e.claim);
-const shownLocal=(key,t)=>{const list=serverMessages(t);return(pending.get(key)||[]).filter(e=>!landed(e,list))};
+const landed=(e,list,unread=[])=>e.id?list.some(m=>m.id===e.id)||unread.some(m=>m.id===e.id)||(list.length>=INBOX_WINDOW&&Date.parse(list[0].time)>Date.parse(e.stamp)):!!e.claim&&(list.some(m=>m.id===e.claim)||unread.some(m=>m.id===e.claim));
+const shownLocal=(key,t)=>{const list=serverMessages(t),unread=unreadList(t);return(pending.get(key)||[]).filter(e=>!landed(e,list,unread))};
 const pendingSig=key=>(pending.get(key)||[]).map(e=>[e.lid,e.status,e.id,e.claim,e.error].join(":")).join();
 // After each read of the board: let a send still in flight claim the message the board already lists for
 // it (the same text and images, from the user, not listed when it was sent and not another entry's),
 // drop each queued entry the board now lists, and forget the tasks that are gone.
 function settle(){for(const[key,list]of pending){const t=taskAt(key);if(!t){pending.delete(key);continue}
-  const msgs=serverMessages(t),taken=new Set(list.map(e=>e.id||e.claim).filter(Boolean));
+  const sent=serverMessages(t),unread=unreadList(t),msgs=[...sent,...unread.filter(u=>!sent.some(m=>m.id===u.id))],taken=new Set(list.map(e=>e.id||e.claim).filter(Boolean));
   for(const e of list){if(e.id||!(e.status!=="failed"||e.unsure)||(e.claim&&msgs.some(m=>m.id===e.claim)))continue;
     const m=msgs.find(m=>m.from==="user"&&!taken.has(m.id)&&!e.known.has(m.id)&&(m.images||0)===e.images&&m.text===e.text.slice(0,2000));
     e.claim=m?m.id:null;if(m)taken.add(m.id)}
-  const rest=list.filter(e=>!(e.id&&landed(e,msgs)));
+  const rest=list.filter(e=>!(e.id&&landed(e,sent,unread)));
   if(rest.length)pending.set(key,rest);else pending.delete(key)}}
 function addPending(key,t,text,images){
   const list=(pending.get(key)||[]).filter(e=>!(e.status==="failed"&&e.text===text&&e.images===images)),
@@ -481,22 +485,26 @@ function showReply(t){const box=document.getElementById("compose-reply"),r=t?.in
   box.replaceChildren($("button",{type:"button",class:"x",title:"Close","aria-label":"Close the reply",onclick:()=>{closedReplies.add(id);
       try{localStorage.setItem("orchClosedReplies",JSON.stringify([...closedReplies].slice(-200)))}catch{}showReply(t)}},"×"),
     $("span",{class:"rh"},(t.name||t.id)+" replied · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text));box.hidden=false}
-// Messages sent but not yet read: they reach the agent after its next step. Those sent from this page
-// that the board does not list yet are here too, "sending" until the server answers. Once a queued one
-// has waited unread for 30 seconds, a line says how to interrupt; `hintDue` is when the one waiting
-// longest reaches that, and the one-second ticker redraws the box then.
+// The messages that wait for the agent, above the message box: every unread message on the board, oldest
+// first, then those sent from this page that the board does not list yet ("sending" until the server
+// answers). A line under the heading says when the agent will read them (the board's `delivery`). Once a
+// queued one has waited unread for 30 seconds, a line says how to interrupt; `hintDue` is when the one
+// waiting longest reaches that, and the one-second ticker redraws the box then.
 const HINT="the agent is mid-step; use steer to interrupt",HINT_MS=30000;let hintDue=null;
-function queueRows(t,key){const rows=serverMessages(t).filter(m=>!m.read).map(m=>({from:m.from,time:m.time,text:m.text,images:m.images,status:"queued",since:Date.parse(m.time)}));
-  for(const e of t&&key?shownLocal(key,t):[])if(e.status!=="failed")rows.push({from:"user",time:e.at,text:e.text,images:e.images,status:e.status,since:e.status==="queued"?e.since:NaN});
+function queueRows(t,key){const rows=unreadList(t).map(m=>({sender:senderOf(m),time:m.time,text:m.text,images:m.images,status:"queued",since:Date.parse(m.time)}));
+  for(const e of t&&key?shownLocal(key,t):[])if(e.status!=="failed")rows.push({sender:"you",time:e.at,text:e.text,images:e.images,status:e.status,since:e.status==="queued"?e.since:NaN});
   return rows}
 function showQueue(t,key){const box=document.getElementById("compose-queue"),rows=queueRows(t,key),queued=rows.filter(r=>r.status==="queued"),
-    oldest=Math.min(...queued.map(r=>r.since).filter(Number.isFinite)),due=Number.isFinite(oldest)?oldest+HINT_MS:null,late=due!=null&&Date.now()>=due;
+    oldest=Math.min(...queued.map(r=>r.since).filter(Number.isFinite)),due=Number.isFinite(oldest)?oldest+HINT_MS:null,late=due!=null&&Date.now()>=due,when=t?.inbox?.delivery?.text;
   hintDue=due!=null&&!late?due:null;
-  box.replaceChildren(...(rows.length?[$("div",{class:"qh"},queued.length?queued.length+" queued: the agent reads "+(queued.length>1?"them":"it")+" after its next step":"sending…",
-      queued.length?$("button",{type:"button",class:"now",title:"Stop the agent's current shell command so it reads these now (never a commit, push or other publishing command)",onclick:()=>sendNow(t)},"Send now"):null),
+  box.replaceChildren(...(rows.length?[$("div",{class:"qh"},"Waiting for the agent ("+rows.length+")",
+      queued.length?$("button",{type:"button",class:"now",title:"Stop the agent's current shell command so it reads these now (never a commit, push or other publishing command). Not in a shell command: its session is stopped and resumed with them.",onclick:()=>sendNow(t)},"Send now"):null),
+    ...(when?[$("p",{class:"muted qd"},when)]:[]),
     ...(late?[$("p",{class:"muted qhint"},HINT)]:[]),
-    ...rows.map(m=>$("div",{class:"q",title:m.text},$("span",{class:"t"},(m.from==="user"?"you":"orchestrator")+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":"")),
-      $("span",{class:"x"},m.text.replace(/\s+/g," ")+(m.images?" ("+imageCount(m.images)+")":""))))]:[]));
+    $("div",{class:"ql"},...rows.map(m=>{const at=new Date(m.time).getTime();
+      return $("div",{class:"q",title:m.text},$("span",{class:"t"},m.sender+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":" · "),
+          ...(m.status==="sending"?[]:[$("span",{class:"waited","data-since":String(at)},"waited "+dur(Date.now()-at))])),
+        $("span",{class:"x"},m.text.replace(/\s+/g," ")+(m.images?" ("+imageCount(m.images)+")":"")))}))]:[]));
   box.hidden=!rows.length}
 const taskAt=key=>{if(!key)return null;const[runId,taskKey]=key.split("/");return state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskKey)||null};
 function compose(){settle(); // every read of the board ends here, so what it lists settles the sends still in flight
@@ -514,11 +522,21 @@ function compose(){settle(); // every read of the board ends here, so what it li
   area.hidden=document.querySelector("#compose .crow").hidden=!!why;document.getElementById("compose-send").disabled=sending||!sendKey();box.hidden=false;
   showReply(t);showQueue(why?null:t,sel);if(why)document.getElementById("compose-files").hidden=true;else showFiles();
   document.documentElement.style.setProperty("--compose-h",box.offsetHeight+"px")}
-// Pushes a task's queued messages through by stopping its current command.
+// What the server did to make the agent read now (the `steer` of a send or Send now answer), as a status class and
+// a phrase: it stopped a shell command, or stopped the session and is resuming it with the messages (also what a
+// message to a task that waits on its own background command gets, with no Interrupt option), or did neither and
+// `lead` starts the reason. `many` is true when more than one message waits. Null when the answer has no steer.
+function steerSays(s,many,lead){
+  if(s?.stopped)return{cls:"ok",text:"Stopped `"+s.stopped+"`"+(s.seconds?" after "+dur(s.seconds*1000):"")+" so it reads "+(many?"them":"it")+" now."};
+  if(s?.resuming&&s.busy)return{cls:"ok",text:s.note||"Another interrupt is already resuming its session."};
+  if(s?.resuming)return{cls:"ok",text:"Interrupted: the agent "+(s.doing||"was not in a shell command")+", so its session is resuming with "+(many?"the messages":"the message")+"."};
+  if(s?.waiting)return{cls:"warn",text:lead+s.waiting+"."};
+  return null}
+// Pushes a task's queued messages through: stops its current shell command, or stops and resumes its session.
 async function sendNow(t){const status=document.getElementById("compose-status");status.className="";status.textContent="Interrupting…";
   try{const r=await fetch("api/steer",{method:"POST",headers:{"content-type":"application/json","x-orch-token":sendKey()||""},body:JSON.stringify({run:t.run,task:t.id})});
     const v=await r.json().catch(()=>({}));
-    if(r.ok){status.className=v.steer?.stopped?"ok":"warn";status.textContent=v.steer?.stopped?"Stopped `"+v.steer.stopped+"`"+(v.steer.seconds?" after "+dur(v.steer.seconds*1000):"")+" so it reads "+(v.queued>1?"them":"it")+" now.":"Not interrupted: "+v.steer?.waiting+"."}
+    if(r.ok){const say=steerSays(v.steer,v.queued>1,"Not interrupted: ")||{cls:"warn",text:"Not interrupted."};status.className=say.cls;status.textContent=say.text}
     else{status.className="bad";status.textContent=(v.key==="rejected"?NO_KEY:v.error||"HTTP "+r.status)}}
   catch{status.className="bad";status.textContent="The dashboard is not reachable"}
   finally{lastState="";refresh().then(detail)}}
@@ -536,8 +554,9 @@ async function sendMessage(e){e.preventDefault();const key=composeKey,t=taskAt(k
     if(r.ok){queuedAs(entry,v);settle();if(composeKey===key&&area.value===typed)area.value="";if(composeKey===key&&files===attached){files=[];showFiles()}
       const draft=drafts.get(key);if(draft&&draft.text===typed&&draft.files===attached)drafts.delete(key);
       const at="Sent at "+new Date(v.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+". ";
-      status.className=v.reaches===false?"warn":"ok";
-      status.textContent=at+(v.steer?.stopped?"Stopped `"+v.steer.stopped+"`"+(v.steer.seconds?" after "+dur(v.steer.seconds*1000):"")+" so it reads it now.":v.steer?.waiting?"It reads it after its current step: "+v.steer.waiting+".":v.delivery?v.delivery[0].toUpperCase()+v.delivery.slice(1)+".":"");
+      const say=steerSays(v.steer,false,"It reads it after its current step: ");
+      status.className=say?say.cls:v.reaches===false?"warn":"ok";
+      status.textContent=at+(say?say.text:v.delivery?v.delivery[0].toUpperCase()+v.delivery.slice(1)+".":"");
       status.title=at+(v.delivery||"")}
     else{if(v.key==="rejected")try{localStorage.removeItem("orchSendKey")}catch{}
       const why=v.key==="rejected"?NO_KEY:v.error||"HTTP "+r.status;failedAs(entry,why);
@@ -576,7 +595,7 @@ new ResizeObserver(()=>{const box=document.getElementById("compose");document.do
   sp.addEventListener("dblclick",()=>{localStorage.removeItem("orchDetailWidth");set(0)})})();
 // Waiting timers tick together once a second from their absolute start, between redraws too.
 function dur(ms){const t=Math.max(0,Math.floor(ms/1000)),d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60),x=t%60,p=n=>String(n).padStart(2,"0");if(d>=365)return Math.floor(d/365)+"y "+Math.floor(d%365/30)+"mo";if(d>=30)return Math.floor(d/30)+"mo "+d%30+"d";if(d)return d+"d "+h+"h";return h?h+"h "+p(m)+"m":m?m+"m "+p(x)+"s":x+"s"}
-function tick(){const now=Date.now();for(const el of document.querySelectorAll(".tick[data-since]"))el.textContent=dur(now-Number(el.dataset.since));
+function tick(){const now=Date.now();for(const el of document.querySelectorAll(".tick[data-since],.waited[data-since]"))el.textContent=(el.classList.contains("waited")?"waited ":"")+dur(now-Number(el.dataset.since));
   if(hintDue!=null&&now>=hintDue)compose()}
 setTimeout(()=>{tick();setInterval(tick,1000)},1000-Date.now()%1000);
 // A new dashboard server reloads the page. Keep the chosen row, the panel and the typed drafts in

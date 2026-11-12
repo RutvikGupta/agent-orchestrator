@@ -259,7 +259,7 @@ test('Enter puts the message in the thread at once, marked sending, before the s
   const done = page.enter();
   // Nothing has been awaited yet: the thread and the queue already show it, and the box still holds it.
   assert.deepEqual(page.thread(), [['you', 'sending…', 'Use the v2 API']]);
-  assert.equal(page.queue().head, 'sending…');
+  assert.equal(page.queue().head, 'Waiting for the agent (1)');
   assert.match(page.queue().rows[0], /sending….*Use the v2 API$/);
   assert.equal(page.el('compose-text').value, '  Use the v2 API  ');
   assert.equal(page.el('compose-send').disabled, true);
@@ -277,7 +277,7 @@ test('Enter puts the message in the thread at once, marked sending, before the s
   await done;
   assert.deepEqual(page.thread(), [['you', 'queued', 'Use the v2 API']]);
   assert.deepEqual(page.entries('alpha'), [{ status: 'queued', id: reply.id, text: 'Use the v2 API', error: null }]);
-  assert.match(page.queue().head, /^1 queued: the agent reads it after its next step/);
+  assert.match(page.queue().head, /^Waiting for the agent \(1\)/);
   assert.equal(page.el('compose-text').value, '');
   assert.match(page.text('compose-status'), /^Sent at /);
   // The board catches up: the server's copy takes the entry's place, with no second line.

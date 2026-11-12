@@ -19,9 +19,12 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
 #compose .crow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}#compose .crow #compose-send{margin-left:auto}#compose [hidden],#compose .crow[hidden]{display:none}#compose .grow{flex:1}
 #compose-status{font-size:12px;line-height:1.4;color:var(--muted);overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden}#compose-status:empty{display:none}#compose-status.ok{color:var(--ok)}#compose-status.bad{color:var(--bad)}#compose-status.warn{color:var(--run)}
 #compose button{border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;padding:4px 14px;font:inherit;cursor:pointer}#compose button:hover{background:var(--sel)}#compose button:disabled{opacity:.5;cursor:default}
-#compose-queue{display:flex;flex-direction:column;gap:3px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:6px 8px;max-height:20vh;overflow:auto}
-#compose-queue .qh{color:var(--muted);display:flex;align-items:center;gap:8px}#compose-queue .now{margin-left:auto;padding:1px 8px;font-size:12px}#compose-queue .q{display:flex;gap:8px;min-width:0}#compose-queue .q .t{color:var(--muted);flex:none}
-#compose-queue .q .x{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The messages waiting for the agent, above the message box: a heading with "Send now", the delivery line, then the
+   rows, which scroll inside their own area so the box below stays in view. */
+#compose-queue{display:flex;flex-direction:column;gap:3px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:6px 8px}
+#compose-queue .qh{color:var(--fg);font-weight:600;display:flex;align-items:center;gap:8px}#compose-queue .now{margin-left:auto;padding:1px 8px;font-size:12px;font-weight:400}
+#compose-queue .ql{display:flex;flex-direction:column;gap:3px;min-height:0;max-height:18vh;overflow:auto}#compose-queue .q{display:flex;gap:8px;min-width:0}#compose-queue .q .t{color:var(--muted);flex:none}
+#compose-queue .q .x{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
 #compose-files{display:flex;flex-wrap:wrap;gap:6px}#compose-files .f{position:relative;width:64px;height:64px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--card)}
 #compose-files img{width:100%;height:100%;object-fit:cover}#compose-files .f button{position:absolute;top:2px;right:2px;width:18px;height:18px;padding:0;border-radius:50%;font-size:12px;line-height:1}
 #compose.drop textarea{outline:2px dashed var(--ask)}
@@ -87,7 +90,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);margi
 .attn .tag{flex:none;width:112px;font-weight:600}.attn b{flex:none;font-weight:600}
 .attn .where{flex:0 1 auto;max-width:32%;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
 .attn .why{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.a-needs-decision .tag{color:var(--ask)}.a-failed .tag{color:var(--bad)}.a-stuck .tag{color:var(--run)}.a-awaiting-review .tag{color:var(--review)}.a-silent .tag{color:var(--run)}
+.a-needs-decision .tag{color:var(--ask)}.a-failed .tag{color:var(--bad)}.a-stuck .tag{color:var(--run)}.a-unreachable .tag{color:var(--run)}.a-awaiting-review .tag{color:var(--review)}.a-silent .tag{color:var(--run)}
 .warn{color:var(--run);margin-left:6px;cursor:help}
 /* A row's messages that its agent has not read yet (orch.mjs send). */
 .mail{color:var(--ask);margin-left:6px;font-size:11.5px;cursor:help}
