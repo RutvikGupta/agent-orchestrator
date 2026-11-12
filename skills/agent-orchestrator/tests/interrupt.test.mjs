@@ -716,3 +716,34 @@ test('an adopter that ends before it saves the task leaves a claim the next one 
   await eventually(() => !alive(relay), 'the relay was not stopped');
   assert.deepEqual([readJson(f.taskFile(run, 'twice')).attempt, readJson(path.join(attemptDir(run, 'twice', 1), 'resume-3.json')).adopted], [2, true]);
 });
+
+for (const publishing of [false, true]) {
+  test(`a child shell started after the parent turn ends ${publishing ? 'still protects publishing' : 'resumes the idle parent with its message'}`, async (t) => {
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const command = publishing ? 'sleep 61; git push origin topic' : 'sleep 61; echo done';
+    const child = { type: 'assistant', parent_tool_use_id: 'toolu_task', message: { id: 'm-child-late', content: [{ type: 'tool_use', id: 'toolu_child_late', name: 'Bash', input: { command } }] } };
+    const first = await f.start(run, 'late-child', { config: { hold: true, shell: ['/bin/bash', '-c', command], extraEvents: [...idleEvents(), child] } });
+    await f.ready(first);
+    const shell = Number(fs.readFileSync(path.join(first.outDir, 'shell.pid'), 'utf8'));
+    assert.ok(alive(shell));
+    assert.ok((await rowOf(f, run, 'late-child')).idle);
+    const sent = await f.json(['send', run.id, 'late-child', 'Handle this now.', '--steer'], { env: HOLD });
+    assert.equal(sent.steer.stopped, undefined, 'stopping a child shell does not deliver to its idle parent');
+    if (publishing) {
+      assert.match(sent.steer.waiting, /not stopped part-way/);
+      assert.ok(alive(first.pid) && alive(shell));
+      assert.equal(readJson(f.taskFile(run, 'late-child')).attempt, 1);
+      assert.equal((await f.json(['inbox', run.id, 'late-child'])).messages.length, 1);
+      await f.command(['stop', run.id, 'late-child']);
+    } else {
+      assert.deepEqual([sent.steer.was, sent.steer.resumed], ['idle', 2]);
+      await ready(f, run, 'late-child', 2);
+      assert.ok(!alive(first.pid));
+      assert.match(fs.readFileSync(path.join(attemptDir(run, 'late-child', 2), 'orch-brief.md'), 'utf8'), /Handle this now\./);
+      assert.deepEqual((await f.json(['inbox', run.id, 'late-child'])).messages, []);
+      f.release({ outDir: attemptDir(run, 'late-child', 2) });
+      await f.finished(run, 'late-child');
+    }
+  });
+}

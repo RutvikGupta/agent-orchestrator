@@ -237,13 +237,14 @@ export function commandTree(relayPid, command, rows = processTable()) {
 // Every shell command of the turn that has no result yet counts, whatever tool call came after it:
 // an interrupt never ends a session while one of them runs. When one is a publishing command, the
 // message waits for it; otherwise each of them is stopped, which returns its call. A sub-agent's
-// command that outlived the turn it started in is background work: a publishing one still holds the
+// command that runs while the parent is idle is background work: a publishing one still holds the
 // interrupt back, and any other ends with the session, as a background command does.
 export function planSteer(task, row = null) {
   const events = path.join(task.outDir || "", "events.jsonl");
   const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
   const kept = all.find((p) => PROTECTED.test(p.command));
   if (kept) return { wait: `the agent is running \`${shorten(kept.command)}\`, which is not stopped part-way` };
+  if (row?.idle) return planResume(task, row);
   const pending = all.filter((p) => !p.ended);
   if (!pending.length) return planResume(task, row);
   const found = pending.map((p) => ({ p, tree: commandTree(task.pid, p.command) })).filter((x) => x.tree);
