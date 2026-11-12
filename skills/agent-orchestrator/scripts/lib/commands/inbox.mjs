@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
-import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
@@ -120,6 +120,14 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const g = plan?.stop ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
   const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
+  // A typed message may answer the task's questions: record that on them now (recordAnswers). A
+  // notice (`kind`) never answers. A failed write loses nothing, since answerOf finds the answer
+  // from the messages, so it never fails the send.
+  if (!kind) {
+    try {
+      recordAnswers(dir);
+    } catch {}
+  }
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
     : messageReach(task);
@@ -241,6 +249,8 @@ export async function cmdNap(args, resumed = null) {
 // The agent runs this itself, from its own working directory, to read what its orchestrator sent.
 export function cmdInbox(args) {
   const run = loadRun(args._[0]);
+  // Someone looking for what a task asked often tries the run alone: point them at `questions`.
+  if (!args._[1]) die(`missing TASK id: inbox shows one task's messages (inbox ${run.id} TASK). To list the run's open questions in full, run: node ${CLI_PATH} questions ${run.id}`, 2);
   const id = validTask(args._[1]);
   if (!loadTask(run, id)) die(`no task ${id} in run ${run.id}`);
   const dir = taskDir(run, id);

@@ -8,7 +8,9 @@
 // them as context after a tool call, through the orch-inbox hook; a Codex agent, and Claude as a
 // fallback, runs `orch.mjs inbox --ack`. The hook imports this module, so it loads only config.mjs.
 // questions.jsonl holds the questions the task asked with `ask`, one
-// {id, time, attempt, question, options, recommend, to, answerFrom, message} per line.
+// {id, time, attempt, question, options, recommend, to, answerFrom, message} per line. Once a
+// question is answered, its line gains {answeredAt, answerMessage}: when, and the id of the inbox
+// message that answered it (recordAnswers). A line without them is a question nobody has answered.
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -116,24 +118,97 @@ export function readQuestions(dir) {
   return readLines(path.join(dir, QUESTIONS_FILE)).filter((q) => typeof q?.id === "string" && typeof q.question === "string");
 }
 
+// Each question's line ends in this many spaces, which JSON ignores: room for the answer's two
+// fields, so recordAnswers can write them over the line in place. Rewriting the whole file instead
+// could drop a question that `ask` appends at the same moment. The fields take 67 bytes with an
+// 8-character message id.
+const ANSWER_ROOM = 80;
+
 export function appendQuestion(dir, entry) {
   const question = { id: randomUUID().slice(0, 8), time: new Date().toISOString(), ...entry };
-  fs.appendFileSync(path.join(dir, QUESTIONS_FILE), `${JSON.stringify(question)}\n`);
+  fs.appendFileSync(path.join(dir, QUESTIONS_FILE), `${JSON.stringify(question)}${" ".repeat(ANSWER_ROOM)}\n`);
   return question;
 }
 
+// Whether message `m`, sent to the asking task, answers question `q`. The answer is a message that
+// the question's own side typed, sent after the question and in the same attempt:
+// - for a question to the user (`answerFrom` "user"), a message from the dashboard's box;
+// - for one to the launching main session ("orchestrator", addressee.mjs), a message sent with
+//   `send`; or a message from the user that lists it in `answers`, because the user was shown it
+//   when that session was gone (deliverMessage);
+// - for one to the parent task ("agent:<run>/<task>"), a message sent with `send`, which is how
+//   that agent answers.
+// A notice the orchestrator writes itself (a message with a `kind`: a finish notice, a child's
+// question or note, an attention or owner notice) never answers. A question recorded before
+// `answerFrom` existed is answered by any later message that is not such a notice.
+export function answersQuestion(q, m) {
+  if (!(Date.parse(m?.time) > Date.parse(q?.time)) || m.kind) return false;
+  if (Number.isInteger(m.attempt) && Number.isInteger(q.attempt) && m.attempt !== q.attempt) return false;
+  if (q.answerFrom === "user") return m.from === "user";
+  if (q.answerFrom === "orchestrator") return !m.from || (m.from === "user" && Array.isArray(m.answers) && m.answers.includes(q.id));
+  if (String(q.to || "").startsWith("agent:")) return !m.from;
+  return true;
+}
+
+// How question `q` was answered, { at, message }, or null while nobody has. The fields on its line
+// say so once recordAnswers wrote them; a line without them (one written before they existed, or
+// whose write failed) is answered by the first message in `messages` that answers it.
+export function answerOf(q, messages) {
+  if (typeof q.answeredAt === "string") return { at: q.answeredAt, message: typeof q.answerMessage === "string" ? q.answerMessage : null };
+  const m = messages.find((m) => answersQuestion(q, m));
+  return m ? { at: m.time, message: m.id } : null;
+}
+
+// Write the answer on each question of the task folder `dir` that a message in its inbox answers
+// and whose line does not say so yet. deliverMessage calls it after each message it appends, so
+// the answer is recorded as it is sent. Each line is overwritten in place, at the same length, in
+// the room appendQuestion left; a line without that room (written before it existed) is left as it
+// is, and answerOf finds its answer from the messages. Two senders at once write the same bytes:
+// each records the first answering message in the inbox. Returns the ids of the questions it marked.
+export function recordAnswers(dir) {
+  const file = path.join(dir, QUESTIONS_FILE);
+  let data;
+  try {
+    data = fs.readFileSync(file);
+  } catch {
+    return [];
+  }
+  const messages = readInbox(dir);
+  const marked = [];
+  let fd = null;
+  try {
+    for (let start = 0; start < data.length;) {
+      let end = data.indexOf(0x0a, start);
+      if (end < 0) end = data.length;
+      const line = data.subarray(start, end);
+      const offset = start;
+      start = end + 1;
+      let q;
+      try {
+        q = JSON.parse(line.toString("utf8"));
+      } catch {
+        continue;
+      }
+      if (typeof q?.id !== "string" || typeof q.question !== "string" || "answeredAt" in q) continue;
+      const answer = messages.find((m) => answersQuestion(q, m));
+      if (!answer) continue;
+      const json = Buffer.from(JSON.stringify({ ...q, answeredAt: answer.time, answerMessage: answer.id }));
+      if (json.length > line.length) continue;
+      fd ??= fs.openSync(file, "r+");
+      fs.writeSync(fd, Buffer.concat([json, Buffer.alloc(line.length - json.length, 0x20)]), 0, line.length, offset);
+      marked.push(q.id);
+    }
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+  return marked;
+}
+
 // The questions of `attempt` that went to the user, or to the launching main session of a top-level
-// run ("orchestrator", addressee.mjs), and are still open. Each is answered only from its own side:
-// a question with `answerFrom` "user" by a later message from the user (the dashboard's box), one
-// with "orchestrator" by a later message from the orchestrator (`send`). A message from the user
-// also answers the questions it lists in `answers`: those the user was shown when it was sent,
-// because their session was gone (deliverMessage). A question recorded before `answerFrom` existed
-// is answered by any later message. A sent answer closes it at once; the agent reads it at its next
-// tool call.
+// run ("orchestrator", addressee.mjs), and are still open: nobody has answered them (answerOf). A
+// sent answer closes a question at once; the agent reads it at its next tool call.
 export function openQuestions(questions, messages, attempt) {
-  const answers = (q, m) => Date.parse(m.time) > Date.parse(q.time)
-    && (!q.answerFrom || (q.answerFrom === "user" ? m.from === "user" : !m.from) || (m.from === "user" && Array.isArray(m.answers) && m.answers.includes(q.id)));
-  return questions.filter((q) => (q.to === "user" || q.to === "orchestrator") && q.attempt === attempt && !messages.some((m) => answers(q, m)));
+  return questions.filter((q) => (q.to === "user" || q.to === "orchestrator") && q.attempt === attempt && !answerOf(q, messages));
 }
 
 // What the agent is told about a message from the user: it comes before the work in hand.

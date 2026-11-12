@@ -44,7 +44,8 @@ untouched.
 - **Exit 5:** a task newly needs **attention**: a decision, a question, a failure, a dead or silent
   task, or a transient error with no retries left.
   - A question for you wakes every `wait` until you answer it with `send`, even one asked before
-    that `wait` started.
+    that `wait` started. `wait` shows a line of it and the command that prints it whole, with its
+    options and recommendation: `$ORCH questions <run> <task-id>` (`references/messages.md`).
   - A finished task that has waited `AGENT_ORCH_REVIEW_REMIND` (default 10m) with no `accept`,
     `verdict` or `close` also wakes it, once per interval per task, and `wait` prints the commands.
   - Other attention that was there when `wait` started is listed, but does not wake it.
