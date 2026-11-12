@@ -149,15 +149,17 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --detach runs it in the background until no task is running and
                                   no tab has shown it for --idle-exit (default 30m); --stop ends it.
                                   Without --detach it runs until Ctrl-C
-  wait RUN [TASK...] [--all] [--timeout DUR]
+  wait RUN [TASK...] [--all] [--timeout DUR] [--notes]
                                   Block until any running task finishes (exit 0), the timeout
                                   passes (exit 3), or a task newly needs attention (exit 5):
                                   decision, question, failure, dead or silent; also exit 5 when a
                                   finished task has waited AGENT_ORCH_REVIEW_REMIND (default 10m)
                                   without accept, verdict or close, once per interval per task.
-                                  Exit 6 = a new unread message for this agent, or, in the session
-                                  that launched the run, a note a task sent with tell (printed);
-                                  read it, then run the same command again.
+                                  Exit 6 = a new unread message for this agent; read it, then run
+                                  the same command again. In the session that launched the run, a
+                                  note a task sent with tell needs no answer and does not end wait:
+                                  wait prints every held note with its next exit, whatever ends it.
+                                  --notes ends wait at the first new note instead (exit 6).
                                   Existing attention is listed
                                   but does not wake wait. --all waits until every task finishes
                                   (--any is the default and accepted). DUR like 90s, 10m, 2h; 0
@@ -272,7 +274,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   (the parent runs send); wait for it with nap
   tell (TEXT | --file FILE)       A delegated agent sends whoever started it a one-way note, such as
                                   a status update: into the parent task's inbox, or, in a top-level
-                                  run, to the launching session's next wait on the run (exit 6).
+                                  run, to the launching session's wait on the run, which prints it
+                                  with its next exit (and ends at it with exit 6 only with --notes).
                                   Never shown to the user; use ask for a decision
   lesson (RUN | --repo DIR) [TEXT] [--evidence TEXT] [--list]
                                   Record a verified lesson for the repository, which every later
@@ -370,7 +373,7 @@ const specs = {
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
-  wait: { value: ["timeout"], bool: ["any", "all"] },
+  wait: { value: ["timeout"], bool: ["any", "all", "notes"] },
   result: {},
   log: { value: ["lines"] },
   stop: { bool: ["adopt"] },
