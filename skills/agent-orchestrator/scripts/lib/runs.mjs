@@ -579,13 +579,37 @@ function attemptsOf(task, seen, row) {
   return list.reverse();
 }
 
-export function describe(run, task) {
+function taskStatus(task) {
   const readResult = () => (task.outDir ? readJson(path.join(task.outDir, "result.json")) : null);
   let result = readResult();
   const running = relayAlive(task.pid, task.startedAt, task.outDir);
   // The relay writes result.json and exits; if it did both between the read above and the check,
   // read again before calling the task aborted.
   if (!running && !result && task.pid) result = readResult();
+  return { result, running };
+}
+
+function eventTime(task) {
+  try {
+    return fs.statSync(path.join(task.outDir, "events.jsonl")).mtimeMs;
+  } catch {
+    return task.startedAt ? Date.parse(task.startedAt) : null;
+  }
+}
+
+function activityTime(task, result, running, lastEventMs) {
+  return running ? lastEventMs || Date.now() : (result?.finishedAt && Date.parse(result.finishedAt)) || lastEventMs || (task.startedAt && Date.parse(task.startedAt)) || 0;
+}
+
+// Recovery's date filter needs timestamps, not event summaries or review history. Share the
+// same process/result race check and timestamp precedence as the full task description.
+export function taskLastActivity(task) {
+  const { result, running } = taskStatus(task);
+  return activityTime(task, result, running, eventTime(task));
+}
+
+export function describe(run, task) {
+  const { result, running } = taskStatus(task);
   let state;
   if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
   else if (running) state = "running";
@@ -633,19 +657,14 @@ export function describe(run, task) {
     current = s;
     seen.push({ dir, agent, summary: s, tokens: t });
   }
-  let lastEventMs = null;
-  try {
-    lastEventMs = fs.statSync(path.join(task.outDir, "events.jsonl")).mtimeMs;
-  } catch {
-    lastEventMs = started;
-  }
+  const lastEventMs = eventTime(task);
   // A command task (command-relay.mjs) shows its latest output line as its activity, and counts
   // lines of output as its steps.
   const command = attemptAgent(task, task.attempt) === COMMAND_AGENT;
   const progress = command && task.outDir ? commandProgress(path.join(task.outDir, "events.jsonl")) : null;
   const quietMs = running && lastEventMs ? Date.now() - lastEventMs : null;
   // When the session last did anything: its latest event while running, else when it finished.
-  const lastActiveMs = running ? lastEventMs || Date.now() : (result?.finishedAt && Date.parse(result.finishedAt)) || lastEventMs || started || 0;
+  const lastActiveMs = activityTime(task, result, running, lastEventMs);
   // A task that stopped because its agent ran out of usage: the one case where limits matter.
   const finishedText = [current.error, result?.error, result?.finalMessage, result?.stderrTail].filter(Boolean).join("\n");
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
@@ -730,15 +749,18 @@ function verificationFacts(run, id) {
 // Errors that mean the agent's usage window is used up, as Claude Code and Codex word them.
 const USAGE_LIMIT_RE = /usage limit|limit reached|hit your (?:usage )?limit|rate_limit_reached|(?:5-hour|five[_ -]hour|weekly|seven[_ -]day) limit/i;
 
-export function listTasks(run) {
+export function listTaskRecords(run) {
   const dir = path.join(run.dir, "tasks");
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
     .map((id) => loadTask(run, id))
     .filter(Boolean)
-    .sort((a, b) => String(a.startedAt || a.createdAt).localeCompare(String(b.startedAt || b.createdAt)))
-    .map((task) => describe(run, task));
+    .sort((a, b) => String(a.startedAt || a.createdAt).localeCompare(String(b.startedAt || b.createdAt)));
+}
+
+export function listTasks(run) {
+  return listTaskRecords(run).map((task) => describe(run, task));
 }
 
 // "claude" or "codex" when a command line runs that host (its program, or the script a `node`

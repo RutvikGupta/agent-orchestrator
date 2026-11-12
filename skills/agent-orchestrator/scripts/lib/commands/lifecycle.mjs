@@ -4,7 +4,7 @@ import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
 // after the orchestrator restarts.
 
 import { reclaimTask } from "../reclaim.mjs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { computeEvidence, evidenceWarning } from "../report.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +13,7 @@ import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
 import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
-import { describe, detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
+import { describe, detectOrchestrator, listRuns, listTaskRecords, listTasks, loadRun, loadTask, saveTask, taskLastActivity, validTask } from "../runs.mjs";
 import { die, emit, git, parseDuration, writeJson } from "../util.mjs";
 import { retryTask } from "../retry.mjs";
 import { reviveParked } from "../park.mjs";
@@ -691,18 +691,48 @@ function launchedBy(me) {
   return me.sessionId ? (o) => o.agent === me.agent && o.sessionId === me.sessionId : null;
 }
 
-function lastActivity(run, rows) {
+function recentlyActive(run) {
+  const since = Date.now() - DAY_MS;
   let mtime = 0;
   try {
     mtime = fs.statSync(planPath(run.dir)).mtimeMs;
   } catch {}
-  return Math.max(Date.parse(run.createdAt) || 0, mtime, ...rows.map((r) => r.lastActiveMs || 0));
+  return Math.max(Date.parse(run.createdAt) || 0, mtime) >= since || listTaskRecords(run).some((task) => taskLastActivity(task) >= since);
 }
 
-export function cmdRecover(args) {
+// Independent worktrees can take seconds each to scan. Bound the children and keep the results
+// local to this recovery, so later commands always inspect the current checkout contents.
+async function recoveryWorktrees(runs, rowsOf) {
+  const dirs = new Set();
+  for (const run of runs) {
+    for (const row of rowsOf(run)) {
+      const wt = loadTask(run, row.id)?.worktree?.path;
+      if (row.state !== "running" && wt && fs.existsSync(wt)) dirs.add(wt);
+    }
+  }
+  const pending = [...dirs];
+  const dirty = new Map();
+  const worker = async () => {
+    while (pending.length) {
+      const dir = pending.shift();
+      const changes = await new Promise((resolve) => {
+        const child = spawn("git", ["-C", dir, "status", "--porcelain"], { stdio: ["ignore", "pipe", "ignore"] });
+        let stdout = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+        child.on("error", () => resolve([]));
+        child.on("close", (code) => resolve(code === 0 ? stdout.split("\n").filter((l) => l.trim() && !CACHE_PATH.test(l.slice(3))) : []));
+      });
+      dirty.set(dir, changes);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
+  return dirty;
+}
+
+export async function cmdRecover(args) {
   const cache = new Map();
   const rowsOf = (run) => cache.get(run.dir) || cache.set(run.dir, listTasks(run)).get(run.dir);
-  const recent = () => listRuns().filter((run) => lastActivity(run, rowsOf(run)) >= Date.now() - DAY_MS);
+  const recent = () => listRuns().filter(recentlyActive);
   let runs;
   let scope;
   if (args._[0]) {
@@ -722,17 +752,18 @@ export function cmdRecover(args) {
       scope = "this session cannot be identified (no session id), so this covers every run active in the last 24 hours";
     }
   }
+  const dirty = await recoveryWorktrees(runs, rowsOf);
   const reports = runs.map((run) => {
     const own = ownershipOf(run);
     if (own.mine) touchOwner(run); // recovering is using the run
-    return recoverRun(run, rowsOf(run), own);
+    return recoverRun(run, rowsOf(run), own, dirty);
   });
   const text = reports.length ? reports.map((r) => r.text).join("\n\n") : "no runs";
   emit(args, { scope, runs: reports.map((r) => r.data) }, scope ? `${scope}\n\n${text}` : text);
 }
 
 // One run's tasks grouped by what they wait for, with the next command for each group. Reads only.
-function recoverRun(run, rows, own) {
+function recoverRun(run, rows, own, dirty) {
   const plan = readPlan(run.dir);
   const records = new Map(rows.map((r) => [r.id, loadTask(run, r.id)]));
   const progress = plan ? planProgress(plan, phaseMap(run, rows, plan), run.dir) : { ready: [], unbriefed: [], blocked: [], manual: [] };
@@ -824,8 +855,8 @@ function recoverRun(run, rows, own) {
   for (const r of rows) {
     const wt = records.get(r.id)?.worktree?.path;
     if (r.state === "running" || !wt || !fs.existsSync(wt)) continue;
-    const dirty = uncommitted(wt);
-    if (dirty.length) warnings.push(`${label(r)}: ${plural(dirty.length, "uncommitted change")} in its worktree ${wt} (git -C ${wt} status)`);
+    const changes = dirty.get(wt) || [];
+    if (changes.length) warnings.push(`${label(r)}: ${plural(changes.length, "uncommitted change")} in its worktree ${wt} (git -C ${wt} status)`);
   }
   for (const r of rows.filter((r) => r.state === "aborted" && !r.result)) {
     warnings.push(`${label(r)}: its process is gone without a result (${CLI} log ${run.id} ${r.id})`);
