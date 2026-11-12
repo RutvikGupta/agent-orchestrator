@@ -17,19 +17,36 @@ export function ghJson(cwd, argv) {
   }
 }
 
+// The state of a head commit's checks, from the pull request's status rollup. The rollup lists
+// every run of a check on that commit, so a check that ran twice appears twice: a run that was
+// cancelled when a newer one replaced it, then the newer one. Only the latest run of each check
+// counts, as on GitHub's own page; an older cancelled or failed run is not a failed check.
+export function checkSummary(rollup) {
+  const latest = new Map();
+  for (const c of rollup || []) {
+    const name = c.name || c.context || "check";
+    const key = `${c.__typename || ""}\0${c.workflowName || ""}\0${name}`;
+    const at = c.startedAt || c.completedAt || "";
+    const seen = latest.get(key);
+    if (!seen || at >= seen.at) latest.set(key, { at, name, c });
+  }
+  const checks = { total: 0, passed: 0, pending: 0, failed: [] };
+  for (const { name, c } of latest.values()) {
+    const done = c.__typename === "StatusContext" ? !["PENDING", "EXPECTED"].includes(c.state) : c.status === "COMPLETED";
+    checks.total += 1;
+    if (!done) checks.pending += 1;
+    else if (CHECK_FAILED.has(c.conclusion) || CHECK_FAILED.has(c.state)) checks.failed.push(name);
+    else checks.passed += 1;
+  }
+  return checks;
+}
+
 export function prSnapshot(cwd, ref) {
   const fields = "number,url,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,headRefName,baseRefName,statusCheckRollup,comments,reviews";
   const pr = ghJson(cwd, ["pr", "view", ref, "--json", fields]);
   if (pr.error) return { ref, error: pr.error };
   const p = pr.value;
-  const checks = { total: 0, passed: 0, pending: 0, failed: [] };
-  for (const c of p.statusCheckRollup || []) {
-    const done = c.__typename === "StatusContext" ? !["PENDING", "EXPECTED"].includes(c.state) : c.status === "COMPLETED";
-    checks.total += 1;
-    if (!done) checks.pending += 1;
-    else if (CHECK_FAILED.has(c.conclusion) || CHECK_FAILED.has(c.state)) checks.failed.push(c.name || c.context || "check");
-    else checks.passed += 1;
-  }
+  const checks = checkSummary(p.statusCheckRollup);
   const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(p.url || "");
   let unresolvedThreads = null;
   if (m) {

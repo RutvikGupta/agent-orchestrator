@@ -88,3 +88,23 @@ for (const [name, changes, message] of [
     assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
   });
 }
+
+test('only the latest run of a check counts: a cancelled run that a newer one replaced is not a failure', async () => {
+  const { checkSummary } = await import('../scripts/lib/github.mjs');
+  const run = (name, conclusion, startedAt, extra = {}) => ({ __typename: 'CheckRun', name, workflowName: 'Rules', status: conclusion ? 'COMPLETED' : 'IN_PROGRESS', conclusion: conclusion || '', startedAt, ...extra });
+  // What GitHub's rollup holds when a workflow is started twice on one commit.
+  const replaced = [run('Review rules', 'CANCELLED', '2026-01-01T10:00:32Z'), run('Review rules', 'SUCCESS', '2026-01-01T10:00:41Z'), run('unit', 'SUCCESS', '2026-01-01T10:00:00Z')];
+  assert.deepEqual(checkSummary(replaced), { total: 2, passed: 2, pending: 0, failed: [] });
+  assert.deepEqual(checkSummary([...replaced].reverse()), { total: 2, passed: 2, pending: 0, failed: [] }, 'the order in the rollup does not matter');
+
+  // The latest run decides in every direction, and a rerun still in progress is pending.
+  assert.deepEqual(checkSummary([run('unit', 'SUCCESS', '2026-01-01T10:00:00Z'), run('unit', 'FAILURE', '2026-01-01T10:05:00Z')]).failed, ['unit']);
+  assert.deepEqual(checkSummary([run('unit', 'FAILURE', '2026-01-01T10:00:00Z'), run('unit', '', '2026-01-01T10:05:00Z')]), { total: 1, passed: 0, pending: 1, failed: [] });
+  // A check that was only cancelled, and one of the same name in another workflow, still count.
+  assert.deepEqual(checkSummary([run('unit', 'CANCELLED', '2026-01-01T10:00:00Z')]).failed, ['unit']);
+  assert.deepEqual(checkSummary([run('lint', 'SUCCESS', '2026-01-01T10:09:00Z'), run('lint', 'FAILURE', '2026-01-01T10:00:00Z', { workflowName: 'Other' })]), { total: 2, passed: 1, pending: 0, failed: ['lint'] });
+  // Commit statuses have a context and a state, and no workflow.
+  const status = (context, state, startedAt) => ({ __typename: 'StatusContext', context, state, startedAt });
+  assert.deepEqual(checkSummary([status('ci/build', 'FAILURE', '2026-01-01T10:00:00Z'), status('ci/build', 'SUCCESS', '2026-01-01T10:10:00Z'), status('ci/deploy', 'PENDING', '2026-01-01T10:00:00Z')]), { total: 2, passed: 1, pending: 1, failed: [] });
+  assert.deepEqual(checkSummary(undefined), { total: 0, passed: 0, pending: 0, failed: [] });
+});

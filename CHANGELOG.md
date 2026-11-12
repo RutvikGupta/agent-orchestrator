@@ -29,6 +29,9 @@
 - `wait` keeps waiting when a task sends a `tell` note, which needs no answer, and prints every
   held note with its next exit. Each note ended `wait` with exit 6, so a task that sent several
   woke its orchestrator for a turn each time. `wait --notes` keeps the old behavior.
+- `pr-watch` counts only the latest run of each check on the head commit. A run that was
+  cancelled when a newer run of the same check replaced it was counted as a failed check, so a
+  babysitter saw red CI on a pull request whose checks had all passed.
 
 ## 2.1.0 (2026-11-11)
 
