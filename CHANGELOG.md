@@ -23,6 +23,9 @@
 - A task prepared with `worktree`, never started and then closed shows as `closed` ("closed before
   it started") in `status`, `wait` and the dashboard, where it stayed `prepared`. `close` says
   what it did with the worktree, and preparing the task again reopens it.
+- `recover --all` is about three times faster on a state folder with hundreds of runs. It
+  described every task of every run before it left out the runs with nothing to resume, and
+  checked worktrees one at a time; it now filters first and checks four worktrees at once.
 
 ## 2.1.0 (2026-11-11)
 
