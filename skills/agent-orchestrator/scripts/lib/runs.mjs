@@ -7,7 +7,7 @@ import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { asksDecision, decisionsIn } from "./briefs.mjs";
 import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
-import { attemptReasonOf, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
+import { attemptReasonOf, isClosedPreparation, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
@@ -587,7 +587,7 @@ export function describe(run, task) {
   // read again before calling the task aborted.
   if (!running && !result && task.pid) result = readResult();
   let state;
-  if (!task.pid) state = "prepared";
+  if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
   else if (running) state = "running";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
@@ -657,7 +657,7 @@ export function describe(run, task) {
   else if (parked) now = parkedNow(parked);
   else if (result && command) now = commandOutcome(result) || "(no output)";
   else if (result) now = firstLine(result.finalMessage) || current.error || "(empty final message)";
-  else now = state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
+  else now = state === "closed" ? "closed before it started" : state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
 
   const row = {
     id: task.id,

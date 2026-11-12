@@ -147,7 +147,7 @@ export function cmdVerdict(args) {
   const reviewer = args.reviewer ?? "coordinator";
   const { run, id, task, row } = finishedTask(args, "review it", 1);
   const g = guard(run, `record a verdict on task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
-  if (row.state === "prepared") die(`task ${id} has not started, so there is nothing to review`);
+  if (!task.pid) die(`task ${id} has not started, so there is nothing to review`);
   if (reviewer !== "coordinator" && (!TASK_ID.test(reviewer) || !loadTask(run, reviewer))) {
     die(`--reviewer must be "coordinator" or a task id of run ${run.id}, not "${reviewer}"`, 2);
   }

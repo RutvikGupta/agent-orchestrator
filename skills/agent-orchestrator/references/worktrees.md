@@ -54,7 +54,15 @@ its work has landed.
 
 When it happens:
 
-- `close` collects the run's worktrees once every task in the run is closed.
+- `close` collects the run's worktrees once every task in the run is closed. A task prepared
+  with `worktree` but never started then shows as `closed`, with "closed before it started".
+  Until every task is closed, `close` says it keeps that prepared folder because other tasks
+  remain open. The same safety checks apply to prepared folders. A folder already removed by
+  hand counts as removed even while other tasks remain open; its task still closes and its branch stays.
+  Preparing a closed, never-started task again reopens it, even with a new branch or after the
+  kept branch was deleted. It shows as `prepared` until started or closed again.
+  Plain `wait <run>` leaves closed preparations out. Naming one with `wait <run> <task>` reports
+  "closed before it started" and exits 0.
 - `integrate` collects the integrated task's worktree right after the merge.
 - `gc` collects what is left in idle runs (below).
 - `cleanup <run>` collects the run's worktrees now, by the same rules as `close` and `integrate`.

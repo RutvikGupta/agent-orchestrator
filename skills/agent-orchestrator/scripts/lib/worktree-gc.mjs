@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { CACHE_PATH, CLI_PATH } from './config.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
-import { acceptedNow } from './lifecycle.mjs';
+import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
 import { guard, recordChange } from './ownership.mjs';
 import { isParked, loadTask, relayAlive, saveTask } from './runs.mjs';
 import { readJson } from './util.mjs';
@@ -29,7 +29,7 @@ export function gcTasks(run) {
     const result = task.outDir ? readJson(path.join(task.outDir, 'result.json')) : null;
     const evidence = task.outDir ? readJson(path.join(task.outDir, 'evidence.json')) : null;
     const eventTime = latestAttemptActivity(task.outDir);
-    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? 'prepared' : result?.status || 'aborted', result,
+    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? (isClosedPreparation(task) ? 'closed' : 'prepared') : result?.status || 'aborted', result,
       lastActiveMs: Math.max(eventTime, Date.parse(result?.finishedAt || '') || 0),
       readAt: evidence && evidence.attempt === task.attempt ? evidence.readAt : null }];
   });
@@ -70,12 +70,13 @@ export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
   if (registered.error) return registered.error;
   const exists = fs.existsSync(wt);
   if (exists) {
-    if (task.worktree.restoredAt) {
-      const restoredAt = Date.parse(task.worktree.restoredAt);
-      // Idle-run GC also counts a result that was only read after the restore.
-      const closedAfterRestore = (allowReadClosed || task.closedExplicitlyAttempt === (task.attempt || 0)) && Date.parse(task.closedAt) >= restoredAt;
-      const integratedAfterRestore = acceptedNow(task) && Date.parse(task.acceptedAt) >= restoredAt && Date.parse(task.integratedAt) >= restoredAt;
-      if (!closedAfterRestore && !integratedAfterRestore) return 'restored worktree awaits a new explicit close or acceptance and integration';
+    const preparedAt = task.worktree.createdAt || task.worktree.restoredAt;
+    if (preparedAt) {
+      const preparedMs = Date.parse(preparedAt);
+      // Idle-run GC also counts a result that was read after the folder was recreated.
+      const closedAfterPreparation = (allowReadClosed || task.closedExplicitlyAttempt === (task.attempt || 0)) && Date.parse(task.closedAt) >= preparedMs;
+      const integratedAfterPreparation = acceptedNow(task) && Date.parse(task.acceptedAt) >= preparedMs && Date.parse(task.integratedAt) >= preparedMs;
+      if (!closedAfterPreparation && !integratedAfterPreparation) return `${task.worktree.restoredAt ? 'restored' : 'prepared'} worktree awaits a new explicit close or acceptance and integration`;
     }
     // Idle-run GC can collect read results; other callers keep them available for review.
     const closed = task.closedAt && (allowReadClosed || task.readOnly || task.closedExplicitlyAttempt === (task.attempt || 0));

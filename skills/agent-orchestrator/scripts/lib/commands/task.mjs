@@ -5,7 +5,7 @@ import { reclaimTask } from "../reclaim.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { compact, formatElapsed, shortText } from "../format.mjs";
-import { verificationsOf } from "../lifecycle.mjs";
+import { isClosedPreparation, verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
 import { endPark } from "../park.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
@@ -196,13 +196,26 @@ export async function cmdClose(args) {
   for (const task of tasks) {
     // Reading a result or restoring its folder needs a fresh explicit close.
     const explicitlyClosed = task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) &&
-      (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt));
+      (task.pid ? (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt)) : isClosedPreparation(task));
     lines.push(`${shownName(task)}: ${closeTask(run, task, explicitlyClosed ? {} : { closedBy: g.actor })}`);
     // The owner hears of a task that was open; one it had closed already changed nothing.
     if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
-  const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
-  const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
+  const allClosed = listTasks(run).every((r) => {
+    const task = loadTask(run, r.id);
+    return task?.pid ? Boolean(task.closedAt) : Boolean(task && isClosedPreparation(task));
+  });
+  const preparations = tasks.filter((task) => !task.pid && task.worktree);
+  let cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
+  if (!allClosed && preparations.length) {
+    // Missing folders can be recorded now; existing folders wait until the run closes.
+    const missing = preparations.filter((task) => !fs.existsSync(task.worktree.path));
+    cleanup = await collectWorktrees(run, { tasks: missing.map((task) => task.id), actor: g.actor });
+    cleanup.kept.push(...preparations.filter((task) => fs.existsSync(task.worktree.path)).map((task) => ({
+      task: task.id, path: task.worktree.path, branch: task.worktree.branch,
+      reason: "other tasks in the run are still open",
+    })));
+  }
   if (cleanup) lines.push(collectionText(cleanup));
   emit(args, { run: run.id, closed: ids, cleanup }, lines.join("\n"));
 }

@@ -92,7 +92,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const parked = !relayAlive(task.pid, task.startedAt, task.outDir) && isParked(run, task);
   if (!relayAlive(task.pid, task.startedAt, task.outDir) && !parked) {
     const row = describe(run, task);
-    if (row.state === "prepared") throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
+    if (!task.pid) throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
     throw new SendError(
       `task ${id} is not running (${row.state}); resume it with a delta brief instead: node ${CLI_PATH} start ${run.id} ${id} --agent ${task.agent} --brief <delta>${row.session ? ` -- --session ${row.session}` : ""}`,
       409,

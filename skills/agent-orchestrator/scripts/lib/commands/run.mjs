@@ -71,7 +71,16 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
   git(run.repo, retainedHead ? ["worktree", "add", "-q", wt, branch] : ["worktree", "add", "-q", "-b", branch, wt, from]);
-  const task = { ...(existing || { id, createdAt: new Date().toISOString() }), cd: wt, worktree: { path: wt, branch, from, ...(retainedHead ? { restored: true, restoredAt: new Date().toISOString(), restoredCommit: retainedHead } : {}) } };
+  const createdAt = new Date().toISOString();
+  const task = {
+    ...(existing || { id, createdAt }), cd: wt,
+    worktree: {
+      path: wt, branch, from,
+      // A fresh branch also reopens a closed preparation; it has no restoredAt.
+      ...(!existing?.pid && existing?.closedAt ? { createdAt } : {}),
+      ...(retainedHead ? { restored: true, restoredAt: createdAt, restoredCommit: retainedHead } : {}),
+    },
+  };
   saveTask(run, task);
   if (prep) {
     const controller = new AbortController();
