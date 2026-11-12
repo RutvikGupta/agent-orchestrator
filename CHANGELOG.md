@@ -7,6 +7,9 @@
 - A command Claude Code runs itself, such as `/model` or `/effort`, no longer makes an idle
   session's row show `running`. Its record read as a new prompt, so the row stayed `running` for
   up to 30 minutes.
+- `result` and `accept` find a check that an agent ran as a command task of its own run
+  (`start --agent command -- CMD`), with that task's exit code. They read only the agent's own
+  log, which has the `start` call and not the command, so such a check read `NOT FOUND in the log`.
 
 ## 2.1.0 (2026-11-11)
 

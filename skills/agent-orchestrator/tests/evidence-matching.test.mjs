@@ -216,3 +216,24 @@ test('option values are consumed only for the program that accepts them', async 
   assert.equal(match('gh api endpoint', "gh api --jq '.[].id' endpoint").ran, true);
   assert.equal(match('node --test tests/a.mjs', 'node --test --test-reporter spec tests/a.mjs').ran, true);
 });
+
+test('a check an agent ran as a command task of its own run is found, with that task\'s exit code', async (t) => {
+  const f = await fixture(t), run = await f.newRun('parent');
+  const checks = ["sh -c 'echo nested-ok'", "sh -c 'echo nested-bad; exit 3'", "sh -c 'echo elsewhere'"].map((cmd) => ({ cmd, result: 'pass' }));
+  await f.start(run, 'lead', { agent: 'codex', config: { finalMessage: report(checks) } });
+  await f.finished(run, 'lead');
+  // What the agent does: a run of its own, and each check as a command task in it.
+  const own = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'lead' };
+  const nested = await f.newRun('nested', own), other = await f.newRun('other');
+  const command = (target, id, script, env) => f.command(['start', target.id, id, '--agent', 'command', '--why', 'Runs a check', '--', 'sh', '-c', script], { env });
+  await command(nested, 'ok', 'echo nested-ok', own);
+  await command(nested, 'bad', 'echo nested-bad; exit 3', own);
+  await command(other, 'elsewhere', 'echo elsewhere'); // another session's run backs nothing here
+  for (const [target, id] of [[nested, 'ok'], [nested, 'bad'], [other, 'elsewhere']]) await f.finished(target, id);
+
+  const out = await f.command(['result', run.id, 'lead']);
+  const row = (await f.json(['status', run.id])).tasks.find((r) => r.id === 'lead');
+  assert.deepEqual(row.report.checks.map((c) => [c.evidence.ran, c.evidence.exitCode ?? null]), [[true, 0], [true, 3], [false, null]]);
+  assert.match(out.stdout, /nested-bad.*last run exited 3/);
+  assert.match(out.stdout, /WARNING: check "sh -c 'echo elsewhere'" is reported pass, but no matching run is in the log/);
+});

@@ -7,6 +7,7 @@ import { CACHE_PATH, CLI_PATH } from "./config.mjs";
 import { commandRuns, stuckOf, summarizeEvents } from "./events.mjs";
 import { formatElapsed } from "./format.mjs";
 import { attemptReasonOf } from "./lifecycle.mjs";
+import { commandText } from "./runs.mjs";
 import { readJson, tailText, writeJson } from "./util.mjs";
 
 const QUIET_MS = 15 * 60 * 1000;
@@ -312,21 +313,58 @@ function savedEvidence(file) {
 export function computeEvidence() {
   evidenceAllowed = true;
 }
+// The commands an agent ran as command tasks of its own runs (`start --agent command -- CMD`), in
+// the order they finished. Its event log has only the `start` call, which returns at once: the
+// command's exit code is in the command task's result. A command run in another directory is
+// written as `cd DIR && CMD`, so the rules for a directory outside the task apply to it too.
+function commandTaskRuns(task, sinceMs, cwd) {
+  const runDir = path.dirname(path.dirname(path.dirname(task.outDir)));
+  const root = path.dirname(runDir), runs = [];
+  const entries = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } };
+  for (const name of entries(root)) {
+    const owner = readJson(path.join(root, name, "run.json"))?.orchestrator;
+    if (owner?.parentRun !== path.basename(runDir) || owner?.parentTask !== task.id) continue;
+    for (const id of entries(path.join(root, name, "tasks"))) {
+      for (const attempt of entries(path.join(root, name, "tasks", id)).filter((entry) => /^attempt-\d+$/.test(entry))) {
+        const result = readJson(path.join(root, name, "tasks", id, attempt, "result.json"));
+        const atMs = Date.parse(result?.finishedAt);
+        if (!Array.isArray(result?.command) || !result.command.length || Number.isNaN(atMs) || Date.parse(result.startedAt) < sinceMs) continue;
+        const line = commandText(result.command);
+        const elsewhere = result.workdir && cwd && canonicalDirectory(result.workdir) !== canonicalDirectory(cwd);
+        runs.push({ cmd: elsewhere ? `cd ${commandText([result.workdir])} && ${line}` : line, atMs, exitCode: result.exitCode ?? null, done: true });
+      }
+    }
+  }
+  return runs.sort((a, b) => a.atMs - b.atMs);
+}
+
+const EVIDENCE_VERSION = 6;
 function checkEvidence(task, row, report) {
   if (!report || report.invalid || !row.outDir || !task.outDir || ["running", "prepared"].includes(row.state)) return null;
   const dir = path.dirname(task.outDir);
-  const logs = reportAttempts(task).map((n) => ({ agent: task.attemptAgents?.[n] || task.agent, file: path.join(dir, `attempt-${n}`, "events.jsonl") }));
+  const attempts = reportAttempts(task);
+  const logs = attempts.map((n) => ({ agent: task.attemptAgents?.[n] || task.agent, file: path.join(dir, `attempt-${n}`, "events.jsonl") }));
   if (!logs.some((log) => fs.existsSync(log.file))) return null;
   const file = path.join(task.outDir, "evidence.json");
   const saved = savedEvidence(file);
-  if (saved?.version === 5 && saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length) return saved;
-  if (!evidenceAllowed) return null;
-  const runs = logs.flatMap((log) => commandRuns(log.agent, log.file)).map((run) => ({ ...run, key: normalizeCommand(run.cmd, row.cd) }));
+  const fits = saved?.attempt === row.attempt && Array.isArray(saved.checks) && saved.checks.length === report.checks.length;
+  if (fits && saved.version === EVIDENCE_VERSION) return saved;
+  // Views that never compute evidence keep showing what the previous matcher saved, until
+  // `result` or `accept` works it out again.
+  if (!evidenceAllowed) return fits && saved.version === EVIDENCE_VERSION - 1 ? saved : null;
+  const logged = logs.flatMap((log) => commandRuns(log.agent, log.file));
+  const sinceMs = Date.parse(readJson(path.join(dir, `attempt-${attempts[0]}`, "result.json"))?.startedAt) || 0;
+  for (const extra of commandTaskRuns(task, sinceMs, row.cd)) {
+    // The last matching run decides a check, so a command task goes where it finished.
+    const later = logged.findIndex((run) => run.atMs != null && run.atMs > extra.atMs);
+    logged.splice(later < 0 ? logged.length : later, 0, extra);
+  }
+  const runs = logged.map((run) => ({ ...run, key: normalizeCommand(run.cmd, row.cd) }));
   const checks = report.checks.map((check) => matchCheckEvidence(check, runs, row.cd));
   const checkout = saved?.attempt === row.attempt
     ? { readAt: saved.readAt, commit: saved.commit, dirty: saved.dirty }
     : { readAt: new Date().toISOString(), ...treeState(row.cd) };
-  const evidence = { version: 5, attempt: row.attempt, ...checkout, checks };
+  const evidence = { version: EVIDENCE_VERSION, attempt: row.attempt, ...checkout, checks };
   try {
     writeJson(file, evidence);
   } catch {
