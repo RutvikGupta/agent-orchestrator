@@ -194,7 +194,9 @@ function boardIdle(run, tasks, ownsMain, idleMs) {
 }
 
 // Rows the board folds away by default inside a section that stays: not running, not needing
-// attention, not the main session, and quiet for AGENT_ORCH_ROW_IDLE (1h). A row stays while any
+// attention, not the main session, and either finished with nothing left to do for anyone (its
+// result was read, accepted or closed), which folds at once, or quiet for AGENT_ORCH_ROW_IDLE (1h),
+// for a row that is not finished: prepared, parked, idle or stopped. A row stays while any
 // row under it stays, so a folded row takes its whole subtree with it and the tree keeps its shape.
 // An agent that a task's shell started (`taskAgent`) stays while its task stays, so a task that is
 // shown never loses the agents it started; it folds with its task, unless it runs.
@@ -205,7 +207,9 @@ function markOlder(rows, idleMs, now) {
   for (const t of [...rows].reverse()) {
     const live = t.main || t.state === "running" || t.attention || kept.has(t.key);
     if (t.taskAgent && !live) continue; // decided below, once its task is
-    const quiet = !t.main && t.state !== "running" && !t.attention && now - (t.activeMs ?? t.lastActiveMs ?? 0) >= idleMs;
+    // A host's own sub-agent has no result to read or close, so only a completed one counts as done.
+    const done = t.closed === true && (!(t.native || t.external) || t.state === "completed");
+    const quiet = !t.main && t.state !== "running" && !t.attention && (done || now - (t.activeMs ?? t.lastActiveMs ?? 0) >= idleMs);
     const fold = quiet && !kept.has(t.key);
     older.set(t, fold);
     if (!fold && t.parentKey) kept.add(t.parentKey);

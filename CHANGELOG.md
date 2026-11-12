@@ -32,6 +32,9 @@
 - `pr-watch` counts only the latest run of each check on the head commit. A run that was
   cancelled when a newer run of the same check replaced it was counted as a failed check, so a
   babysitter saw red CI on a pull request whose checks had all passed.
+- The dashboard folds a finished row behind "show N older" at once when nothing is left to do
+  with it (its result was read, accepted or closed). It waited `AGENT_ORCH_ROW_IDLE`, which now
+  applies only to a row that is not finished: prepared, parked, idle or stopped.
 
 ## 2.1.0 (2026-11-11)
 
