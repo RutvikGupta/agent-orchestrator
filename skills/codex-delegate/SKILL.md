@@ -170,6 +170,13 @@ If you have the plugin installed, its companion CLI is an optional alternative d
 bundled `relay.mjs` is the default because it adds no install of its own beyond the `codex` binary
 (Node and `git`, which the relay also needs, are prerequisites for every skill here).
 
+## Reporting a bug in this skill
+
+When you find a bug in this skill or its relay, or a change that would clearly save real work,
+report it to the session that maintains the skills, and do not edit the skill yourself. The
+agent-orchestrator skill's `references/troubleshooting.md`, "Report a bug in this skill", says who
+that is and what to send.
+
 ## References
 
 - [references/writing-the-brief.md](references/writing-the-brief.md) — how to write a brief Codex can

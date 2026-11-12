@@ -81,6 +81,8 @@ An agent is usable only when `agents` shows `READY` as `yes` (`references/agents
   "Waiting from Codex": every command runs outside the sandbox, and you wait in 9-minute calls.
 - **Skill changes.** When a command prints that the skill changed, read again what it names, then
   run `$ORCH skill --loaded` (`references/monitor.md`, "Skill changes").
+- **Skill bugs.** Report a bug in this skill to the session that maintains it, and do not edit the
+  skill yourself (`references/troubleshooting.md`, "Report a bug in this skill").
 - **Recover first.** After a restart, a context compaction, or any doubt about what runs, run
   `$ORCH recover [<run>] [--all]` and act on it before you dispatch anything.
 - **Tests, builds and containers:** read `references/memory.md` before you run or brief one.
@@ -267,9 +269,8 @@ babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>
 - **Sandbox and publishing.** By the user's choice, tasks run outside the sandbox, with the user's
   network, files, tools and logins, and a write task may commit, push without force, open pull
   requests, and write to GitHub. Force pushes, admin merges, secrets, and creating or deleting
-  repositories stay denied (`references/agents.md` has each mode). Pass `--no-publish` only when the
-  user asks to review a task's work before it lands, and `--sandbox` for untrusted input, such as an
-  outside contributor's branch.
+  repositories stay denied (`references/agents.md`). Pass `--no-publish` only when the user asks to
+  review work before it lands, and `--sandbox` for untrusted input (an outsider's branch).
 - Without the user's explicit approval for that run, never pass `--dangerously-skip-permissions` or
   remove the deny rules on commits, pushes and `gh` writes.
 - Never put secrets, tokens or credentials in a brief, or ask an implementer to print or move them:
@@ -296,4 +297,4 @@ babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>
 | `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers |
 | `references/ownership.md` | Before you act on a run you did not launch, after an exit 4, or when you changed another session's task |
 | `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, or a long sequential queue |
-| `references/troubleshooting.md` | When a command, task or gate fails in a way the step you are on does not cover |
+| `references/troubleshooting.md` | When a command, task or gate fails in a way the step you are on does not cover, and when you find a bug in this skill |

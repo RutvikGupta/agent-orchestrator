@@ -1,6 +1,7 @@
 # Troubleshooting
 
-Read this when a command, task or gate fails in a way the step you are on does not cover.
+Read this when a command, task or gate fails in a way the step you are on does not cover, and when
+you find a bug in the skill itself ("Report a bug in this skill", below).
 
 | Symptom | Action |
 | --- | --- |
@@ -24,3 +25,27 @@ Read this when a command, task or gate fails in a way the step you are on does n
 | `accept` refuses with `a passing check matched a failed run` | Rerun the gate with `verify`, then fix the work or record why with `--unverified` (`references/review.md`, "Accept") |
 | The board shows `⚠ ... exceeds the <tier> ceiling` | See `references/dashboard.md`, "Model ceiling warnings" |
 | Every command prints `orch: the skill changed since this session loaded it` | See `references/monitor.md`, "Skill changes" |
+
+## Report a bug in this skill
+
+Report it when you find a bug in the orchestrator or the delegate skills (`orch.mjs`, a relay, a
+hook, the dashboard, or these instructions), or a change that would clearly save real work. Do not
+report one-off friction, your own mistake, or something the skill already documents, unless you
+propose changing it.
+
+- **Who gets it.** The session that maintains the skill: the one that works on the skill's own
+  repository, the folder that `<skill-dir>` links to (`$ORCH skill` prints the skill folder). The
+  dashboard lists that repository's runs with the session that launched them, and in Claude Code
+  `ListAgents` lists the sessions you can message. If you cannot tell which session it is, or it is
+  not running, give the report to the user instead.
+- **What to send.** One message per issue (`SendMessage` in Claude Code): what you ran, what
+  happened, what you expected, and the run ids or paths that show it. Say whether it is a bug or a
+  suggestion.
+- **A delegated agent** cannot message another session. It sends the report to whoever started it,
+  with `$ORCH tell`, or lists it under `unresolved` in its final report. An orchestrator that
+  receives one passes it on as above.
+- **Do not edit the skill yourself.** It is installed live, so an edit reaches every session at
+  once. Work around the bug, keep going, and do not send the same issue twice.
+
+The maintaining session reproduces a report before it changes anything, and replies to the sender
+with what it changed, or why it changed nothing.

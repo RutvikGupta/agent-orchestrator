@@ -175,6 +175,13 @@ is already the orchestrator and native coordination is the goal. This skill is c
 provides a cross-orchestrator contract — self-contained brief → dispatch → artifacts → review → land
 — and keeps the commit with the orchestrator.
 
+## Reporting a bug in this skill
+
+When you find a bug in this skill or its relay, or a change that would clearly save real work,
+report it to the session that maintains the skills, and do not edit the skill yourself. The
+agent-orchestrator skill's `references/troubleshooting.md`, "Report a bug in this skill", says who
+that is and what to send.
+
 ## References
 
 - [references/writing-the-brief.md](references/writing-the-brief.md) — context, `CLAUDE.md` versus

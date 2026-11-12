@@ -10,6 +10,9 @@
 - `result` and `accept` find a check that an agent ran as a command task of its own run
   (`start --agent command -- CMD`), with that task's exit code. They read only the agent's own
   log, which has the `start` call and not the command, so such a check read `NOT FOUND in the log`.
+- The three skills ask an agent that finds a bug in them to report it to the session that maintains
+  the skill, and not to edit the skill (`references/troubleshooting.md`, "Report a bug in this
+  skill"). A delegated agent sends it to whoever started it.
 
 ## 2.1.0 (2026-11-11)
 
