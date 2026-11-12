@@ -227,8 +227,12 @@ export async function cmdWait(args, resumed = null) {
   const mine = own.mine;
   const may = mayAct(own);
   // A wait that no orch task runs is the launching session's (or a terminal's): it records that it
-  // is live (addressee.mjs) and prints the notes that the run's tasks sent with `tell`.
+  // is live (addressee.mjs) and prints the notes that the run's tasks sent with `tell`. A note needs
+  // no answer, so by default it does not end the wait: the wait holds every unread note and prints
+  // them all, oldest first, with its next exit of any other kind, the timeout included. With
+  // --notes, for a session that wants each note at once, the first new note ends the wait (exit 6).
   const main = !callerTask() && may;
+  const wakeOnNotes = Boolean(args.notes);
   const ids = args._.slice(1);
   const timeout = args.timeout === undefined ? 9 * 60000 : parseDuration(args.timeout);
   const deadline = resumed ? (resumed.deadline ?? Infinity) : timeout === 0 ? Infinity : Date.now() + timeout;
@@ -291,12 +295,14 @@ export async function cmdWait(args, resumed = null) {
     // wakes it (exit 0) and names the task. The notice stays unread for the hook or `inbox`.
     const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id && tasks.some((t) => t.id === m.about.task));
     const notes = main ? unreadNotes(run) : [];
+    // Only with --notes does a note end the wait by itself; otherwise it rides along with the next exit.
+    const noteWake = wakeOnNotes && notes.length > 0;
     const due = may ? reviewsDue(run, tasks) : [];
     // An open question for the session wakes its wait every time, until it is answered with
     // `send`, even one asked before this wait began.
     const asked = main ? tasks.filter((t) => t.state === "running" && t.sessionQuestion) : [];
     const wakes = newAttention || due.length > 0 || asked.length > 0;
-    if (wakes || done || message || notes.length || Date.now() >= deadline) {
+    if (wakes || done || message || noteWake || Date.now() >= deadline) {
       // A named task (`rename`) shows its name in place of its id; commands take either.
       const label = (id) => shownName(tasks.find((t) => t.id === id)) || id;
       const asking = tasks.filter((t) => t.state === "needs-decision").map(shownName);
@@ -315,7 +321,7 @@ export async function cmdWait(args, resumed = null) {
       const reminded = `\n(review overdue: ${due.map(shownName).join(", ")})${done ? unreadText : ""}`;
       // A line per asking task, cut short; `questions` prints each question whole, with its options.
       const open = asked.map((t) => `\n${shownName(t)} asked you, ${agoText(Date.now() - Date.parse(t.sessionQuestion.time))} ago, and keeps working: "${shortText(t.sessionQuestion.text, 300)}"${t.sessionQuestion.open > 1 ? ` (+${t.sessionQuestion.open - 1} more)` : ""}. Answer it now with \`node ${CLI_PATH} send ${run.id} ${shownName(t)} "<answer>"\`: wait exits 5 until you do.\n  Read ${t.sessionQuestion.open > 1 ? "them" : "it"} in full, with the options and the recommendation: \`node ${CLI_PATH} questions ${run.id} ${shownName(t)}\``).join("");
-      const tail = newAttention ? "\n(a task needs attention)" : due.length ? reminded : asked.length ? `\n(${asked.map(shownName).join(", ")} ${asked.length > 1 ? "wait" : "waits"} for your answer)${done ? unreadText : ""}` : done ? unreadText : message || notes.length ? "" : "\n(still running: wait timed out)";
+      const tail = newAttention ? "\n(a task needs attention)" : due.length ? reminded : asked.length ? `\n(${asked.map(shownName).join(", ")} ${asked.length > 1 ? "wait" : "waits"} for your answer)${done ? unreadText : ""}` : done ? unreadText : message || noteWake ? "" : "\n(still running: wait timed out)";
       const noted = notes.length ? `\n${notes.map(noteText).join("\n")}\n(${notes.length > 1 ? "notes" : "a note"} from your tasks, sent with \`tell\`: no answer needed)` : "";
       emit(args, {
         run: run.id, finished: done, tasks, attention: needing, ...(message ? { message } : {}),
@@ -338,10 +344,11 @@ export async function cmdWait(args, resumed = null) {
       } catch (error) {
         process.stderr.write(`orch: could not record the reminders or notes as shown (${error.message}); they will show again\n`);
       }
-      process.exit(wakes ? 5 : done ? 0 : message || notes.length ? 6 : 3);
+      process.exit(wakes ? 5 : done ? 0 : message || noteWake ? 6 : 3);
     }
     if (polled) {
-      const files = [...wake.files, ...(main ? [path.join(run.dir, NOTES_FILE)] : [])];
+      // A held note is read again at the next poll; only a wait that a note ends watches the file.
+      const files = [...wake.files, ...(main && wakeOnNotes ? [path.join(run.dir, NOTES_FILE)] : [])];
       const pids = [];
       for (const task of tasks) {
         const dir = path.join(run.dir, "tasks", task.id);

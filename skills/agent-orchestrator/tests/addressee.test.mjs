@@ -231,7 +231,8 @@ test('tell sends a one-way note: to the launching session\'s next wait, or into 
 
   const told = await f.command(['tell', 'PUSHED #12 abc1234: ready for review'], { env: as(run, 'kid') });
   assert.match(told.stdout, new RegExp(`^told your orchestrator, orchestrator session tellsess: its next \`wait\` on run ${run.id} prints it \\(note \\w+\\)\\n$`));
-  const woken = await f.command(['wait', run.id, '--timeout', '1m'], { code: 6 });
+  // A note does not end wait (wait-notes.test.mjs): this one prints when the timeout exits 3.
+  const woken = await f.command(['wait', run.id, '--timeout', '1ms'], { code: 3 });
   assert.match(woken.stdout, new RegExp(`\\nnote from agent ${run.id}/kid \\([^)]+\\): PUSHED #12 abc1234: ready for review\\n\\(a note from your tasks, sent with \`tell\`: no answer needed\\)\\n$`));
   // Printed once, never an attention item, so nothing escalates it.
   const quiet = await f.json(['wait', run.id, '--timeout', '1ms'], { code: 3 });
@@ -240,7 +241,8 @@ test('tell sends a one-way note: to the launching session\'s next wait, or into 
   // A wait that an orch task runs leaves the session's notes alone.
   await f.command(['tell', 'Second note.'], { env: as(run, 'kid') });
   await f.command(['wait', run.id, '--timeout', '1ms'], { code: 3, env: as(run, 'kid') });
-  assert.match((await f.command(['wait', run.id, '--timeout', '1m'], { code: 6 })).stdout, /: Second note\.\n/);
+  // --notes ends wait at the note itself, with exit 6.
+  assert.match((await f.command(['wait', run.id, '--notes', '--timeout', '1m'], { code: 6 })).stdout, /: Second note\.\n/);
 
   // In a nested run, the note goes into the parent task's inbox, marked as needing no answer.
   const { parent, lead, child, env } = await family(f);

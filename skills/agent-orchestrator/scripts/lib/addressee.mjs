@@ -4,8 +4,10 @@
 // - A question that `ask` sends it has `to: "orchestrator"` in the asker's questions.jsonl. It shows
 //   as a `question` attention item for the session and wakes its `wait` (exit 5).
 // - A note that `tell` sends it goes into the run's notes.jsonl, one {id, time, from, about, text}
-//   per line. Its next `wait` prints the note and wakes (exit 6); notes-read.jsonl records each note
-//   a wait has printed, one {id, time} per line.
+//   per line. It needs no answer, so it does not end the session's `wait`: the wait prints every
+//   unread note, oldest first, with its next exit of any other kind (a result, attention, a message
+//   or the timeout). `wait --notes` instead ends at the first new note (exit 6). notes-read.jsonl
+//   records each note a wait has printed, one {id, time} per line, so none prints twice.
 // - Each poll of a `wait` that the session runs (one that no orch task runs) records the time in the
 //   run's main-wait.json, {pid, at}; `ps` shows a wait parked in its shell. A session with no live
 //   `wait` on its run for AGENT_ORCH_AGENT_GRACE (15 minutes, and never less than twice

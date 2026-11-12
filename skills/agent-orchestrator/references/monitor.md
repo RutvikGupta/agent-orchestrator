@@ -49,8 +49,17 @@ untouched.
   - A finished task that has waited `AGENT_ORCH_REVIEW_REMIND` (default 10m) with no `accept`,
     `verdict` or `close` also wakes it, once per interval per task, and `wait` prints the commands.
   - Other attention that was there when `wait` started is listed, but does not wake it.
-- **Exit 6:** this agent got a new unread message during the call, or, in your own session, a task
-  sent you a note with `tell` (printed). Read it, then run the same command again.
+- **Exit 6:** this agent got a new unread message during the call. Read it, then run the same
+  command again.
+- **Notes do not wake it.** In your own session, a note that a task sends with `tell` needs no
+  answer, so `wait` keeps waiting. It holds the note and prints every held note, oldest first, with
+  its next exit, whatever ends it: a result, attention, or the timeout (exit 3).
+  - A note sent while no `wait` ran prints with the next `wait`'s exit. Each note prints once.
+  - `wait --notes` ends at the first new note instead, with exit 6. Use it when you want each note
+    as it comes.
+  - A question (`ask`), a handed-back decision and a message still wake `wait` at once.
+  - `dispatch --follow` does not read notes, and the Stop hook does not count them; the next
+    `wait` prints them.
 - `wait` also names the tasks ready to dispatch or awaiting review.
 
 A result is unread until you run `result` on it, `close` the task, `accept` it, or `resolve` its

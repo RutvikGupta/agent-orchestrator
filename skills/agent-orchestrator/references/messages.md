@@ -76,9 +76,15 @@ deliver the message.
 
 ## Notes
 
-`$ORCH tell "<text>"` sends the parent a one-way note, such as "pushed #123": into its inbox, or
-printed by the session's next `wait` (exit 6). It needs no answer and never reaches the user. Agents
-report status with `tell`, and use `ask` only for decisions.
+`$ORCH tell "<text>"` sends the parent a one-way note, such as "pushed #123". It needs no answer and
+never reaches the user. Agents report status with `tell`, and use `ask` only for decisions.
+
+- When the parent is a task, the note goes into that task's inbox, marked as needing no answer.
+- In a top-level run, the note goes to the launching session's `wait` on the run. It does not end
+  that `wait`: `wait` holds it and prints every held note, oldest first, with its next exit of any
+  kind, the timeout included. A note sent while no `wait` ran prints with the next one's exit.
+  Each note prints once.
+- `wait --notes` ends at the first new note instead, with exit 6.
 
 ## Steering a running agent
 
