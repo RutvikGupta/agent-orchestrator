@@ -47,6 +47,7 @@ function reportText(row) {
       const evidence = evidenceText(check?.evidence);
       lines.push(`  check [${check?.result || "unknown"}]: ${check?.cmd || "(no command)"}${check?.note ? ` — ${check.note}` : ""}${evidence ? ` · ${evidence}` : ""}`);
     }
+    for (const item of report.choices || []) lines.push(`  choice the agent made (needs no answer): ${item}`);
     for (const item of report.unresolved) lines.push(`  unresolved: ${typeof item === "string" ? item : JSON.stringify(item)}`);
     if (report.readAt) lines.push(`  checkout when the result was read: ${report.commit ? `${short(report.commit)}, ${report.dirty ? "dirty" : "clean"}` : "not a git checkout"}`);
     for (const check of report.checks) {

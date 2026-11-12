@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
-import { decisionsIn } from "./briefs.mjs";
+import { asksDecision, decisionsIn } from "./briefs.mjs";
 import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
 import { attemptReasonOf, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
@@ -258,7 +258,7 @@ function reportOutcome(message) {
   if (last === undefined) return { present: false, outcome: null, decisions: false };
   try {
     const value = JSON.parse(last.trim());
-    return { present: true, failedCheck: Array.isArray(value?.checks) && value.checks.some((c) => c?.result === "fail"), outcome: ["done", "partial", "blocked", "parked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.length > 0 };
+    return { present: true, failedCheck: Array.isArray(value?.checks) && value.checks.some((c) => c?.result === "fail"), outcome: ["done", "partial", "blocked", "parked"].includes(value?.outcome) ? value.outcome : null, decisions: Array.isArray(value?.decisions) && value.decisions.some(asksDecision) };
   } catch {
     return { present: true, outcome: null, decisions: false };
   }

@@ -386,3 +386,23 @@ test('report length counts prose before orch-result and hints only above sixty l
   assert.match(decisionNote(false), /## Keep the final message short/);
   assert.match(decisionNote(false), /25 lines before the `orch-result` block/);
 });
+
+test('a choice the agent already made, listed under decisions, does not hold the task open', async (t) => {
+  const made = ['Merged 3+4 into one comment', 'Dropped 9 and 10: the standard accepts the code under test'];
+  const done = fields(block({ outcome: 'done', decisions: made }));
+  assert.equal(done.state, undefined);
+  assert.deepEqual([done.report.decisions, done.report.choices], [[], made]);
+  // A question still does, as text or in the agreed shape, also next to a choice.
+  for (const asked of ['Should 11 be posted too?', { question: 'Post 11?', options: ['yes', 'no'] }]) {
+    const open = fields(block({ outcome: 'done', decisions: [made[0], asked] }));
+    assert.equal(open.state, 'needs-decision');
+    assert.deepEqual([open.report.decisions, open.report.choices], [[asked], [made[0]]]);
+  }
+  const f = await fixture(t), run = await f.newRun('choices');
+  await f.start(run, 'triage', { config: { finalMessage: `Triaged.\n\n${block({ outcome: 'done', changed: [], checks: [], decisions: made, unresolved: [] })}` } });
+  await f.finished(run, 'triage');
+  const row = (await f.json(['status', run.id])).tasks.find((r) => r.id === 'triage');
+  assert.equal(row.state, 'completed');
+  const out = await f.command(['result', run.id, 'triage']);
+  assert.match(out.stdout, /choice the agent made \(needs no answer\): Merged 3\+4 into one comment/);
+});

@@ -86,9 +86,16 @@ End your final message with this fenced JSON block (including when blocked or ha
 - \`changed\`: paths of files you changed, relative to your working directory.
 - \`checks\`: one object per check with its \`cmd\`, \`result\` (\`pass\`, \`fail\`, or \`not-run\`), and a short \`note\` with counts or the reason it did not run; use your actual commands.
   - List the testing-skill or synthetic end-to-end check you ran (name the skill in its \`cmd\`), or one marked \`not-run\` with the reason in its \`note\`.
-- \`decisions\`: questions beyond this brief, each as {"question":"...","options":["..."],"recommendation":"..."}; use [] when none. A non-empty list also requires the \`NEEDS DECISION:\` first line above.
+- \`decisions\`: questions beyond this brief, each as {"question":"...","options":["..."],"recommendation":"..."}; use [] when none. A choice you already made is not one: put it in the message. A non-empty list also requires the \`NEEDS DECISION:\` first line above.
 - \`unresolved\`: remaining problems or unfinished work as strings; use [] when none.
 `;
+}
+
+// Whether an entry of a report's `decisions` hands a question back. Agents also list there the
+// choices they already made ("Merged 3 and 4 into one comment"), as plain text with no question.
+// Such an entry needs no answer, so it must not hold the task open.
+export function asksDecision(entry) {
+  return typeof entry === "string" ? entry.includes("?") : Boolean(entry);
 }
 
 // The questions a finished agent handed back: the lines after a `NEEDS DECISION:` line in its final message.

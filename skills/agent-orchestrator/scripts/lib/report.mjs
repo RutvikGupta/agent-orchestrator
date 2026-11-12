@@ -7,6 +7,7 @@ import { CACHE_PATH, CLI_PATH } from "./config.mjs";
 import { commandRuns, stuckOf, summarizeEvents } from "./events.mjs";
 import { formatElapsed } from "./format.mjs";
 import { attemptReasonOf } from "./lifecycle.mjs";
+import { asksDecision } from "./briefs.mjs";
 import { commandText } from "./runs.mjs";
 import { readJson, tailText, writeJson } from "./util.mjs";
 
@@ -28,10 +29,15 @@ function parseReport(message) {
   try {
     const value = JSON.parse(last.trim());
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("orch-result must contain a JSON object");
+    const lists = Object.fromEntries(["changed", "checks", "decisions", "unresolved"].map((key) => [key, Array.isArray(value[key]) ? value[key] : []]));
+    // Only a question holds the task open; a choice the agent already made is kept apart.
+    const choices = lists.decisions.filter((entry) => !asksDecision(entry));
     return {
       // `parked`: a babysitter that ended its turn to wait for its pull request (park.mjs).
       outcome: ["done", "partial", "blocked", "parked"].includes(value.outcome) ? value.outcome : null,
-      ...Object.fromEntries(["changed", "checks", "decisions", "unresolved"].map((key) => [key, Array.isArray(value[key]) ? value[key] : []])),
+      ...lists,
+      decisions: lists.decisions.filter(asksDecision),
+      ...(choices.length ? { choices } : {}),
     };
   } catch (error) {
     return { invalid: true, error: error.message };

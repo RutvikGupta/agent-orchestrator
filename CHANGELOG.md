@@ -13,6 +13,9 @@
 - The three skills ask an agent that finds a bug in them to report it to the session that maintains
   the skill, and not to edit the skill (`references/troubleshooting.md`, "Report a bug in this
   skill"). A delegated agent sends it to whoever started it.
+- Only a question holds a finished task open as `needs-decision`. An agent that listed a choice
+  it had already made under `decisions` ("Merged 3 and 4") was held open until resolved or
+  resumed; `result` now shows such an entry as a choice that needs no answer.
 
 ## 2.1.0 (2026-11-11)
 
