@@ -426,6 +426,7 @@ export function cmdAccept(args) {
   if (row.state !== "completed") {
     const why = {
       prepared: "it has not started",
+      closed: "it has not started",
       running: "it is still running",
       "needs-decision": "it handed back a decision: answer it and resume the task",
     }[row.state];

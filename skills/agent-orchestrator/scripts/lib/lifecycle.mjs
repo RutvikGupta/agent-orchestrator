@@ -56,9 +56,15 @@ export function attemptReasonOf(task, n = task.attempt || 0) {
   return task.attemptReasons?.[n] || (task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume");
 }
 
+// Restoring a never-started task's folder reopens its preparation until the next close.
+export function isClosedPreparation(task) {
+  return !task.pid && Boolean(task.closedAt) && (!task.worktree?.restoredAt ||
+    Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt));
+}
+
 // The phase of a task in a given state (describe()'s `state`).
 export function phaseOf(task, state) {
-  if (state === "prepared" || state === "running" || state === "needs-decision") return state;
+  if (["prepared", "running", "needs-decision", "closed"].includes(state)) return state;
   if (state !== "completed" || rejectedNow(task)) return "failed";
   if (task.babysit || task.plan?.type === "babysit") return "integrated";
   if (acceptedNow(task) && task.integratedAt) return "integrated";
@@ -115,7 +121,7 @@ function acceptanceOf(task) {
 function recordedPhase(run, id) {
   const task = readJson(path.join(run.dir, "tasks", id, "task.json"));
   if (!task) return undefined;
-  if (!task.pid) return "prepared";
+  if (!task.pid) return isClosedPreparation(task) ? "closed" : "prepared";
   const result = task.outDir ? readJson(path.join(task.outDir, "result.json")) : null;
   if (!result) return "running";
   const state = result.status === "completed" && decisionsIn(result.finalMessage) ? "needs-decision" : result.status;

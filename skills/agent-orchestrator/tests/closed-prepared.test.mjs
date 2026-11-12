@@ -15,9 +15,8 @@ async function closedRow(f, run, id) {
   assert.match(status, /closed before it started/);
   assert.doesNotMatch(status, /worktree ready|attempts: none/);
   assert.match(status, /0 running · 0 finished/);
-  const waited = await f.command(['wait', run.id, '--timeout', '1s']);
-  assert.match(waited.stdout, /closed before it started/);
-  assert.doesNotMatch(waited.stdout, /attempts: none|counted failures/);
+  const waited = await f.command(['wait', run.id, '--timeout', '1s'], { code: 1 });
+  assert.match(waited.stderr, /no started tasks in this run/);
   const board = await f.dashboard();
   const dashboardRow = (await board.json('/api/state')).flatMap((section) => section.tasks).find((row) => row.id === id);
   assert.equal(dashboardRow.state, 'closed');
@@ -37,7 +36,12 @@ test('prepared task stays ready and startable; closing another never-started tas
   const kept = await f.command(['close', run.id, 'retired']);
   assert.match(kept.stdout, /skip retired: other tasks in the run are still open/);
   assert.equal(fs.existsSync(wt.path), true);
-  await f.start(run, 'ready', { env: { AGENT_ORCH_MAX_PARALLEL: '1' } });
+  const writer = await f.start(run, 'ready', { flags: ['--cd', wt.path], config: { hold: true } });
+  await f.ready(writer);
+  const blocked = await f.command(['start', run.id, 'blocked', '--agent', 'claude', '--tier', 'complex',
+    '--why', 'Fixture writer guard', '--brief', f.brief('blocked'), '--cd', wt.path], { code: 1 });
+  assert.match(blocked.stderr, /task ready is already writing/);
+  f.release(writer);
   await f.finished(run, 'ready');
   const closed = await f.command(['close', run.id, 'ready']);
   assert.match(closed.stdout, /removed worktree.*branch kept: retained-branch/);
@@ -76,4 +80,92 @@ test('close keeps uncommitted and unreachable prepared worktrees and explains wh
   for (const wt of [dirty, detached]) assert.equal(fs.existsSync(wt.path), true);
   const rows = (await f.json(['status', run.id])).tasks;
   assert.ok(rows.every((row) => row.state === 'closed' && row.closed));
+});
+
+function plan(f, run, id) {
+  const file = path.join(f.root, 'plan.json');
+  fs.writeFileSync(file, JSON.stringify({ goal: 'Prepared lifecycle fixture', tasks: [{
+    id, goal: 'Build the fixture', type: 'implement', owns: ['src/'], dependsOn: [],
+    agent: 'claude', tier: 'complex', why: 'Fixture assessment', readOnly: false, brief: f.brief(id),
+  }] }));
+  return f.command(['plan', run.id, file]);
+}
+
+async function retired(t) {
+  const f = await fixture(t), run = await f.newRun();
+  await f.json(['worktree', run.id, 'retired', '--no-prep']);
+  await f.command(['close', run.id, 'retired']);
+  return { f, run };
+}
+
+test('restoring a closed preparation reopens its row and makes dispatch start it', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await plan(f, run, 'restored');
+  await f.json(['worktree', run.id, 'restored', '--no-prep']);
+  await f.command(['close', run.id, 'restored']);
+  await f.json(['worktree', run.id, 'restored', '--no-prep']);
+  const row = (await f.json(['status', run.id])).tasks.find((row) => row.id === 'restored');
+  assert.equal(row.state, 'prepared');
+  assert.equal(row.closed, false);
+  assert.equal(row.now, 'worktree ready');
+  assert.match((await f.command(['recover', run.id])).stdout, /restored/);
+  const gc = await f.json(['gc', '--older-than', '0s']);
+  assert.equal(gc.runs[0].kept[0].reason, 'restored worktree awaits a new explicit close or acceptance and integration');
+  const dispatched = await f.json(['dispatch', run.id]);
+  assert.deepEqual(dispatched.started.map((task) => task.id), ['restored']);
+  await f.finished(run, 'restored');
+});
+
+test('verdict refuses a closed preparation without recording an attempt-zero review', async (t) => {
+  const { f, run } = await retired(t);
+  for (const verdict of ['clean', 'reject']) {
+    const result = await f.command(['verdict', run.id, 'retired', verdict], { code: 1 });
+    assert.match(result.stderr, /has not started, so there is nothing to review/);
+  }
+  assert.equal(fs.existsSync(path.join(run.dir, 'tasks', 'retired', 'reviews.jsonl')), false);
+});
+
+test('send tells a closed preparation to use its brief', async (t) => {
+  const { f, run } = await retired(t);
+  const result = await f.command(['send', run.id, 'retired', 'Fixture message'], { code: 2 });
+  assert.match(result.stderr, /has not started; put the message in its brief/);
+  assert.doesNotMatch(result.stderr, /undefined|resume it/);
+});
+
+test('accept explains that a closed preparation has not started', async (t) => {
+  const { f, run } = await retired(t);
+  const result = await f.command(['accept', run.id, 'retired'], { code: 1 });
+  assert.match(result.stderr, /it has not started/);
+  assert.doesNotMatch(result.stderr, /resume it|other agent/);
+});
+
+test('wait for another task does not advertise a closed preparation as ready to dispatch', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await plan(f, run, 'retired');
+  await f.json(['worktree', run.id, 'retired', '--no-prep']);
+  await f.command(['close', run.id, 'retired']);
+  await f.start(run, 'observer', { flags: ['--read-only', '--unplanned'] });
+  await f.finished(run, 'observer');
+  const result = await f.command(['wait', run.id, 'observer', '--timeout', '1s']);
+  assert.doesNotMatch(result.stdout, /ready to dispatch: retired/);
+});
+
+test('close reports a missing prepared folder as removed while another task stays open', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const wt = await f.json(['worktree', run.id, 'missing', '--no-prep']);
+  await f.json(['worktree', run.id, 'open', '--no-prep']);
+  await f.git(['worktree', 'remove', wt.path]);
+  const result = await f.json(['close', run.id, 'missing']);
+  assert.equal(result.cleanup.removed[0]?.missing, true);
+  assert.deepEqual(result.cleanup.kept, []);
+  assert.ok(await f.git(['branch', '--list', wt.branch]));
+  assert.equal((await f.json(['status', run.id])).tasks.find((row) => row.id === 'missing').state, 'closed');
+});
+
+test('wait ignores never-started closed tasks even when named explicitly', async (t) => {
+  const { f, run } = await retired(t);
+  const result = await f.command(['wait', run.id, '--timeout', '1s'], { code: 1 });
+  assert.match(result.stderr, /no started tasks in this run/);
+  const named = await f.command(['wait', run.id, 'retired', '--timeout', '1s'], { code: 1 });
+  assert.match(named.stderr, /no tasks named retired/);
 });

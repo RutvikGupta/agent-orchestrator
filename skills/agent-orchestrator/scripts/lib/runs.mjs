@@ -7,7 +7,7 @@ import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { decisionsIn } from "./briefs.mjs";
 import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
-import { attemptReasonOf, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
+import { attemptReasonOf, isClosedPreparation, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
@@ -587,7 +587,7 @@ export function describe(run, task) {
   // read again before calling the task aborted.
   if (!running && !result && task.pid) result = readResult();
   let state;
-  if (!task.pid) state = task.closedAt ? "closed" : "prepared";
+  if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
   else if (running) state = "running";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
@@ -705,8 +705,6 @@ export function describe(run, task) {
   };
   const reported = { ...row, ...reportFields(run, task, row) };
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
-  // A retired preparation has no attempt to review or classify as failed.
-  if (state === "closed") staged.phase = "closed";
   if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };
   described.attempts = attemptsOf(task, seen, described);

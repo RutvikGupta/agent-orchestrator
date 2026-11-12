@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { CACHE_PATH, CLI_PATH } from './config.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
-import { acceptedNow } from './lifecycle.mjs';
+import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
 import { guard, recordChange } from './ownership.mjs';
 import { isParked, loadTask, relayAlive, saveTask } from './runs.mjs';
 import { readJson } from './util.mjs';
@@ -29,7 +29,7 @@ export function gcTasks(run) {
     const result = task.outDir ? readJson(path.join(task.outDir, 'result.json')) : null;
     const evidence = task.outDir ? readJson(path.join(task.outDir, 'evidence.json')) : null;
     const eventTime = latestAttemptActivity(task.outDir);
-    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? (task.closedAt ? 'closed' : 'prepared') : result?.status || 'aborted', result,
+    return [{ id, attempt: task.attempt || 0, state: running ? 'running' : !task.pid ? (isClosedPreparation(task) ? 'closed' : 'prepared') : result?.status || 'aborted', result,
       lastActiveMs: Math.max(eventTime, Date.parse(result?.finishedAt || '') || 0),
       readAt: evidence && evidence.attempt === task.attempt ? evidence.readAt : null }];
   });

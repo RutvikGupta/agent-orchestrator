@@ -201,12 +201,17 @@ export async function cmdClose(args) {
     if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
   }
   const allClosed = listTasks(run).every((r) => loadTask(run, r.id)?.closedAt);
-  const keptPreparations = tasks.filter((task) => !task.pid && task.worktree);
-  const cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : keptPreparations.length ? {
-    run: run.id, removed: [], bytesFreed: 0,
-    kept: keptPreparations.map((task) => ({ task: task.id, path: task.worktree.path, branch: task.worktree.branch,
-      reason: "other tasks in the run are still open" })),
-  } : null;
+  const preparations = tasks.filter((task) => !task.pid && task.worktree);
+  let cleanup = allClosed ? await collectWorktrees(run, { actor: g.actor }) : null;
+  if (!allClosed && preparations.length) {
+    // Missing folders can be recorded now; existing folders wait until the run closes.
+    const missing = preparations.filter((task) => !fs.existsSync(task.worktree.path));
+    cleanup = await collectWorktrees(run, { tasks: missing.map((task) => task.id), actor: g.actor });
+    cleanup.kept.push(...preparations.filter((task) => fs.existsSync(task.worktree.path)).map((task) => ({
+      task: task.id, path: task.worktree.path, branch: task.worktree.branch,
+      reason: "other tasks in the run are still open",
+    })));
+  }
   if (cleanup) lines.push(collectionText(cleanup));
   emit(args, { run: run.id, closed: ids, cleanup }, lines.join("\n"));
 }
