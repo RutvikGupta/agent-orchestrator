@@ -41,7 +41,21 @@ export function newSummary() {
     actions: [],
     pendingTools: {},
     streaks: {},
+    // Where the session is in its turn (claude.mjs, codex.mjs): whether a Claude relay's last turn
+    // ended, its latest tool call without a result, and a Codex relay's open shell commands.
+    turnEnded: false,
+    openTool: null,
+    openCommands: {},
   };
+}
+
+// The foreground shell command the session is in now, from its summary, or null: a Claude Bash
+// call without a result that does not run in the background, or a Codex command that has not
+// completed (the latest one).
+export function shellNow(agent, s) {
+  if (agent === "codex") return Object.values(s?.openCommands || {}).at(-1) ?? null;
+  const tool = s?.openTool;
+  return tool?.name === "Bash" && !tool.background && tool.command ? tool.command : null;
 }
 
 // Feed each complete line appended to `file` since the last call to `onLine`, reading in chunks
@@ -77,7 +91,7 @@ function readNewLines(entry, file, onLine) {
 // as long as it, and only when saved with this summary version (a summary from older code lacks
 // fields that a resumed parse would then miss).
 const PERSIST_MIN = 1 << 20;
-const SUMMARY_VERSION = 2;
+const SUMMARY_VERSION = 3;
 const summaryDir = () => path.join(STATE_ROOT, "cache", "summaries");
 const summaryPath = (file, kind) => path.join(summaryDir(), `${createHash("sha1").update(`${kind}:${file}`).digest("hex")}.json`);
 const toJson = (key, value) => (value instanceof Set ? { $set: [...value] } : value instanceof Map ? { $map: [...value] } : value);

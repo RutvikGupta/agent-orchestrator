@@ -394,7 +394,9 @@ export async function serveDashboard({ host, port, args }) {
     if (!/^application\/json(;|$)/i.test(req.headers["content-type"] || "")) return refuse(415, { error: "send JSON" });
     return false;
   };
-  // "Send now": push a task's queued messages through by stopping its current command.
+  // "Send now": push a task's queued messages through by stopping its current shell command, or by
+  // interrupting its session when it is not in one (steerQueued). The answer does not wait for the
+  // resume: the board shows the task resuming, then its new attempt.
   const steerNow = (req, res, reply) => {
     if (rejected(req, reply)) return;
     let text = "";
@@ -464,8 +466,10 @@ export async function serveDashboard({ host, port, args }) {
         }
         const dir = path.join(RUNS_DIR, runId);
         if (!fs.existsSync(path.join(dir, "run.json"))) return reply(404, { error: "unknown run" });
-        // The user's message: the user may steer any session's task (ownership.mjs).
-        const { message, delivery, reaches, steer } = deliverMessage({ ...readJson(path.join(dir, "run.json")), dir }, taskId, text, { from: "user", images, steer: body.steer === true, caller: DASHBOARD_CALLER });
+        // The user's message: the user may steer any session's task (ownership.mjs). A task that ended
+        // its turn and waits on a background command of its own would read it only once that ends, so
+        // the message interrupts it even without the Interrupt option (`wakeIdle`).
+        const { message, delivery, reaches, steer } = deliverMessage({ ...readJson(path.join(dir, "run.json")), dir }, taskId, text, { from: "user", images, steer: body.steer === true, wakeIdle: true, caller: DASHBOARD_CALLER });
         changed();
         return reply(200, { id: message.id, time: message.time, attempt: message.attempt, images: message.images || [], delivery, reaches, steer });
       } catch (error) {

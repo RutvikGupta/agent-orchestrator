@@ -49,8 +49,11 @@ const boardRow = ({ result, activeMs, ...t }) => ({
 // /api/state exposes each kind's rank, so stuck takes 2.5 and the ranks before it stay as they were.
 // A running task that asked the user a question with `ask` (its row's `question`, from inbox.mjs)
 // comes first, at 0.5: it waits on an answer while it works, and the item clears once its own
-// addressee sends a message after the question (openQuestions in inbox.mjs).
-const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, "awaiting-review": 3, silent: 4 };
+// addressee sends a message after the question (openQuestions in inbox.mjs). A running task that
+// ended its turn and waits on a background command of its own (`idle`, runs.mjs) with messages
+// unread is `unreachable`, at 2.7: nothing reaches it until that command ends, so it needs someone
+// at once, not only once it has been silent for 15 minutes; `steer` delivers them now.
+const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, unreachable: 2.7, "awaiting-review": 3, silent: 4 };
 const UNFAILED = new Set(["running", "prepared", "completed", "needs-decision", "idle"]);
 
 export function attentionOf(t, closed, now = Date.now()) {
@@ -70,6 +73,11 @@ export function attentionOf(t, closed, now = Date.now()) {
   if (t.limitHit || t.health === "dead" || t.health === "transient-error" || (t.phase ? t.phase === "failed" : !UNFAILED.has(t.state))) {
     const label = t.limitHit ? "usage limit" : t.health === "dead" ? "dead" : t.health === "transient-error" ? "transient error" : UNFAILED.has(t.state) ? "failed" : t.state;
     return item("failed", label, firstLine(t.result?.error, 140) || firstLine(t.result?.finalMessage ?? t.finalMessage, 140) || t.now || "");
+  }
+  if (t.state === "running" && t.idle && t.inbox?.unread > 0) {
+    const n = t.inbox.unread, on = t.idle.background ? `command \`${shortText(t.idle.background, 80)}\`` : "work";
+    const reason = `ended its turn and waits on its own background ${on}, so ${n === 1 ? "a message waits" : `${n} messages wait`} unread until that ends; deliver ${n === 1 ? "it" : "them"} now with \`${t.idle.steer}\``;
+    return { ...item("unreachable", "unreachable", reason), sinceMs: Date.parse(t.inbox.unreadMessages?.[0]?.time) || t.lastActiveMs || 0 };
   }
   if (t.state === "running" && t.stuck) {
     const reason = `\`${shortText(t.stuck.command, 80)}\` failed ${t.stuck.failures} times with no change in between`;

@@ -35,7 +35,30 @@ function applyLocalCommand(s, text) {
   else if (named) s.model = `claude-${named[1].toLowerCase()}-${named[2]}${named[3] ? `-${named[3]}` : ""}`;
 }
 
+// Where the relay's session is in its turn, for steering (steer.mjs) and the idle state (runs.mjs).
+// `claude -p` ends each turn with a `result` event. While a background command the agent started is
+// pending, its process stays alive after that, and the next turn starts with a task notification:
+// `turnEnded` holds from a `result` until an event of a next turn arrives. `openTool` is the latest
+// tool call that has no result yet ({ id, name, command, background }), or null.
+function applyTurn(s, e) {
+  if (e.type === "result") {
+    s.turnEnded = true;
+    s.openTool = null;
+    return;
+  }
+  if (e.type === "assistant" || e.type === "user" || (e.type === "system" && e.subtype === "task_notification")) s.turnEnded = false;
+  const content = Array.isArray(e.message?.content) ? e.message.content : [];
+  if (e.type === "assistant") {
+    for (const b of content) {
+      if (b?.type === "tool_use" && b.id) s.openTool = { id: b.id, name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background) };
+    }
+  } else if (e.type === "user" && s.openTool && content.some((b) => b?.type === "tool_result" && b.tool_use_id === s.openTool.id)) {
+    s.openTool = null;
+  }
+}
+
 export function applyClaudeEvent(s, e, cwd) {
+  applyTurn(s, e);
   if (e.timestamp && (e.type === "assistant" || (e.type === "user" && !e.isCompactSummary && !e.isVisibleInTranscriptOnly))) s.lastAt = e.timestamp;
   // A command Claude Code runs itself (/model, /effort) is recorded as two user lines: the command,
   // then its output. The command line reads as a prompt, so it opens a turn below, as a command

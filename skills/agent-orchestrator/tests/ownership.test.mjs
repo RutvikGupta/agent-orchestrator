@@ -233,7 +233,8 @@ test('a main session manages every descendant run; a delegated agent its own, ne
   assert.ok(alive(sib.pid));
 
   // The delegated agent manages its own run and the runs below it.
-  await f.command(['send', nested.id, 'kid', 'Carry on.', '--steer'], { env: as(parent, 'lead') });
+  // The kid is not in a shell command, so --steer resumes its session; the resumed relay holds too.
+  await f.command(['send', nested.id, 'kid', 'Carry on.', '--steer'], { env: { ...as(parent, 'lead'), FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }) } });
   await f.command(['close', deeper.id, 'leaf'], { env: as(parent, 'lead') });
   // The main session manages its descendants, two levels down too.
   await f.command(['stop', nested.id, 'kid'], { env: A });

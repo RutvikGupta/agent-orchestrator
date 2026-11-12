@@ -7,6 +7,13 @@ import { CODEX_HOME } from "./config.mjs";
 import { relPath, shortText, unwrapShell } from "./format.mjs";
 
 export function applyCodexEvent(s, e, cwd) {
+  // The shell commands that started and have not completed, for steering (steer.mjs): "#<item id>"
+  // -> command. `codex exec` ends its process when its turn ends, so a turn's end clears them.
+  if (e.item?.type === "command_execution" && e.item.id) {
+    s.openCommands ||= {};
+    if (e.type === "item.started") s.openCommands[`#${e.item.id}`] = String(e.item.command ?? "");
+    else if (e.type === "item.completed") delete s.openCommands[`#${e.item.id}`];
+  } else if (e.type === "turn.completed" || e.type === "turn.failed") s.openCommands = {};
   if (e.type === "thread.started") {
     s.sessionId = e.thread_id || s.sessionId;
   } else if (e.type?.startsWith("item.") && e.item) {

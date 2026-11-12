@@ -245,17 +245,22 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reported check with its evidence from the agent's log, the
                                   review rounds and the verifications
   send RUN TASK (MESSAGE | --file FILE) [--steer]
-                                  Send a message to a running agent, which it reads at its next step;
-                                  --steer stops its current shell command so it reads it now (never
-                                  a commit, push, rebase, merge or other publishing command)
-  steer RUN TASK                  Push a task's queued messages through now: stop its current shell
-                                  command (never a publishing one) so it reads them
+                                  Send a message to a running agent, which it reads at its next step
+                                  (an idle agent, waiting on its own background command, only once
+                                  that ends); --steer delivers it now: it stops the agent's shell
+                                  command (never a commit, push, rebase, merge or other publishing
+                                  command), or, when the agent is not in one, stops its session and
+                                  resumes the same session with the message (a new attempt; refused
+                                  for a babysitter, a parked or command task, an unknown session, or
+                                  a sandboxed Codex task with the network on)
+  steer RUN TASK                  Deliver a task's queued messages now, as send --steer does
   heavy [--label TEXT] -- COMMAND [ARG...]
                                   Queue a heavy command until memory is available; exit 6 on a message
   reclaim [--dry-run] [--json]     Stop orphan build daemons and report their resident memory
   nap DUR                         Sleep like \`sleep\`, but return at once (exit 6) when a message
                                   arrives for the agent running it; agents wait with this
-  inbox RUN TASK [--ack] [--all]  A task's unread messages (--all: every one); --ack marks them read
+  inbox RUN TASK [--ack] [--all]  A task's unread messages (--all: every one), with when the agent
+                                  reads them; --ack marks them read
   questions RUN [TASK] [--all]    Every open question that the run's agents (or TASK) asked with ask,
                                   in full: its id, the task and attempt that asked, when, to whom,
                                   the whole text, every option and the recommendation, and how to

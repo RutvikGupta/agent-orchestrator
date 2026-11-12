@@ -50,6 +50,14 @@ and the run keeps one task for it, whose row, attempts and token totals go on ad
 A Codex implementer cannot keep its pull request this way: a babysitter runs on Claude, which cannot
 continue a Codex session. Start a new babysitter for it.
 
+**Make it a babysitter; never tell it by message to babysit.** An implementer that a message tells
+to watch its pull request stays an implementer. It waits on its own timers or background scripts:
+it does not park, no watcher wakes it, and it reads no message until its own wait ends (it is
+`idle`, `references/messages.md`). It also holds a parallel slot the whole time. To hand a running
+implementer its pull request, stop it once it has pushed (`$ORCH stop <run> <task>`), then start its
+next attempt as the babysitter in the same session, as in step 2 above:
+`$ORCH start <run> <task> --agent claude --babysit --pr <n> --brief <file> -- --session <id>`.
+
 ### Names
 
 `$ORCH rename <run> <task> --to <name>` gives a task a name. `status`, `wait`, `result`, `recover`,

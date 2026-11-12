@@ -363,6 +363,7 @@ const ACTIONS = {
   "marked resolved": { leave: "resolved" },
   renamed: { user: "it now shows under its new name, and every command takes that name or its id; nothing to undo" },
   steered: { user: "its command was stopped so the user's message reached it at once; nothing to undo" },
+  interrupted: { user: "its session was stopped and resumed with the user's message, so the message reached it at once; nothing to undo" },
   "gate rerun": { user: "a gate was rerun in its working directory and recorded; nothing to undo" },
 };
 export function noticeText(n) {
