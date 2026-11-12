@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1 (2026-11-12)
+
+- A Claude session's row shows a `/model` or `/effort` change as soon as the command runs. The
+  row took both from the session's latest reply, so it kept the old setting until the next turn.
+
 ## 2.1.0 (2026-11-11)
 
 - `rename RUN TASK --to NAME` gives a task a name. `status`, `wait`, `result`, `recover`, `stop`,

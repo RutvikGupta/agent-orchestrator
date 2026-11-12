@@ -18,8 +18,26 @@ function userText(e) {
   return Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text || "").join("\n") : "";
 }
 
+// /model and /effort run inside Claude Code and send nothing to the model, so no reply carries
+// the new setting until the next turn. Their output line does: "Set model to `Fable 5.2` and
+// saved ..." and "Set effort level to high (saved ...): ...". A model is named for display, so
+// its id is built from the family and version; a name with neither leaves the model as it was.
+const LOCAL_OUTPUT = "<local-command-stdout>";
+function applyLocalCommand(s, text) {
+  const out = text.slice(LOCAL_OUTPUT.length).replace(/\x1b\[[0-9;]*m/g, "");
+  const effort = /^Set effort level to ([a-z]+)\b/.exec(out)?.[1];
+  if (effort) s.effort = effort;
+  const name = /^Set model to `?([^`<\n]+)/.exec(out)?.[1];
+  if (!name) return;
+  const id = /\bclaude-[a-z0-9.-]*[a-z0-9]/.exec(name)?.[0];
+  const named = /\b(fable|mythos|opus|sonnet|haiku)\s+(\d+)(?:\.(\d+))?/i.exec(name);
+  if (id) s.model = id;
+  else if (named) s.model = `claude-${named[1].toLowerCase()}-${named[2]}${named[3] ? `-${named[3]}` : ""}`;
+}
+
 export function applyClaudeEvent(s, e, cwd) {
   if (e.timestamp && (e.type === "assistant" || (e.type === "user" && !e.isCompactSummary && !e.isVisibleInTranscriptOnly))) s.lastAt = e.timestamp;
+  if (e.type === "user" && typeof e.message?.content === "string" && e.message.content.startsWith(LOCAL_OUTPUT)) applyLocalCommand(s, e.message.content);
   if (e.type === "system" && e.subtype === "init") {
     s.sessionId = e.session_id || s.sessionId;
     s.model = e.model || s.model;
