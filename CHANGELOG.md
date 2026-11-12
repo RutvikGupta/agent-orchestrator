@@ -16,6 +16,13 @@
 - Only a question holds a finished task open as `needs-decision`. An agent that listed a choice
   it had already made under `decisions` ("Merged 3 and 4") was held open until resolved or
   resumed; `result` now shows such an entry as a choice that needs no answer.
+- `questions RUN [TASK] [--all]` prints agents' questions in full, with their options and
+  recommendation. `send` and the dashboard's box record each answer as a line in the task's
+  `answers.jsonl`, so `wait`, `inbox` and the Stop hook agree on which questions are open. `wait`
+  names the command when a question ends it, and so does `inbox RUN` without a task.
+- A task prepared with `worktree`, never started and then closed shows as `closed` ("closed before
+  it started") in `status`, `wait` and the dashboard, where it stayed `prepared`. `close` says
+  what it did with the worktree, and preparing the task again reopens it.
 
 ## 2.1.0 (2026-11-11)
 
