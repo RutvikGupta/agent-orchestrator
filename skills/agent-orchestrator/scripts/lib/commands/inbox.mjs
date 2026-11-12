@@ -1,11 +1,12 @@
 // `send` and `inbox`: steer a running agent with a message, and read a task's messages. The
 // orchestrator sends; the agent reads them through the orch-inbox hook (Claude) or `inbox --ack`.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
-import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { planSteer, shorten, stopCommand } from "../steer.mjs";
@@ -80,7 +81,11 @@ function shownToUser(run, task, dir) {
 // Steering is guarded (ownership.mjs): `caller` is who steers, this command's caller by default, or
 // the dashboard (DASHBOARD_CALLER) for the user's clicks. The message records who stopped the
 // command (`steeredBy`), and a steer by anyone but the owner leaves the owner a notice.
-export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null, caller = null } = {}) {
+// `prepare`, when given, runs once every check has passed and just before the message is written,
+// with { id, delivery, reaches }: the message's id and how it would reach the agent. `ask` records
+// its question there, so the question exists before its notice can be read. If it throws, nothing
+// is written and the error propagates.
+export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null, caller = null, prepare = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   text = String(text ?? "").trim();
@@ -119,10 +124,20 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const plan = steer && !parked ? planSteer(task) : null;
   const g = plan?.stop ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
-  const message = appendMessage(dir, task.attempt || 1, sent, { from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
     : messageReach(task);
+  const messageId = randomUUID().slice(0, 8);
+  if (prepare) prepare({ id: messageId, delivery: how, reaches });
+  const message = appendMessage(dir, task.attempt || 1, sent, { id: messageId, from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
+  // A typed message may answer the task's questions: append the answers it gives to answers.jsonl
+  // now (recordAnswers). A notice (`kind`) never answers. A failed write loses nothing, since
+  // answerOf finds the answer from the messages, so it never fails the send.
+  if (!kind) {
+    try {
+      recordAnswers(dir, { message: message.id });
+    } catch {}
+  }
   let steered = null;
   if (plan?.stop) steered = stopCommand(plan).length ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" };
   else if (plan) steered = { waiting: plan.wait };
@@ -241,6 +256,8 @@ export async function cmdNap(args, resumed = null) {
 // The agent runs this itself, from its own working directory, to read what its orchestrator sent.
 export function cmdInbox(args) {
   const run = loadRun(args._[0]);
+  // Someone looking for what a task asked often tries the run alone: point them at `questions`.
+  if (!args._[1]) die(`missing TASK id: inbox shows one task's messages (inbox ${run.id} TASK). To list the run's open questions in full, run: node ${CLI_PATH} questions ${run.id}`, 2);
   const id = validTask(args._[1]);
   if (!loadTask(run, id)) die(`no task ${id} in run ${run.id}`);
   const dir = taskDir(run, id);

@@ -26,6 +26,7 @@ import { cmdDashboard } from "./lib/commands/dashboard.mjs";
 import { cmdAccept, cmdDispatch, cmdIntegrate, cmdPlan, cmdRecover, cmdResolve } from "./lib/commands/lifecycle.mjs";
 import { cmdStatus, cmdWait, cmdWatch } from "./lib/commands/monitor.mjs";
 import { cmdPrWatch } from "./lib/commands/pr-watch.mjs";
+import { cmdQuestions } from "./lib/commands/questions.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdSkill } from "./lib/commands/skill.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
@@ -253,6 +254,12 @@ Usage: node orch.mjs <command> [args] [--json]
   nap DUR                         Sleep like \`sleep\`, but return at once (exit 6) when a message
                                   arrives for the agent running it; agents wait with this
   inbox RUN TASK [--ack] [--all]  A task's unread messages (--all: every one); --ack marks them read
+  questions RUN [TASK] [--all]    Every open question that the run's agents (or TASK) asked with ask,
+                                  in full: its id, the task and attempt that asked, when, to whom,
+                                  the whole text, every option and the recommendation, and how to
+                                  answer it. --all also lists the answered ones, each with when and
+                                  by which message, and those whose attempt ended unanswered. With
+                                  no open question it says so; exit 0 either way
   reply RUN TASK (TEXT | --file FILE) [--to ID]
                                   The agent answers the user's message (default: the latest it read);
                                   the dashboard shows the answer under it and in the agent's log
@@ -337,11 +344,11 @@ Text after "--" is passed to the relay unchanged (for example: -- --session <id>
 --agent command, it is the command.
 
 Ownership: every command that changes a run acts only on runs the calling session launched, or
-their nested runs; reading (status, wait, result, log, recover, inbox, send without --steer, and
-dry runs) is open to anyone. Another session's run is refused (exit 4, nothing changed): ask its
-owner. A run launched from a terminal is the user's. The user at a terminal and the dashboard may
-act on any run, and the owner is told. When every owner of a run has gone and it has been unused
-for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.
+their nested runs; reading (status, wait, result, log, recover, inbox, questions, send without
+--steer, and dry runs) is open to anyone. Another session's run is refused (exit 4, nothing
+changed): ask its owner. A run launched from a terminal is the user's. The user at a terminal and
+the dashboard may act on any run, and the owner is told. When every owner of a run has gone and it
+has been unused for AGENT_ORCH_ADOPT_AFTER (default 30m), --adopt takes it over.
 
 Skill changes: the first orch.mjs command of a Claude Code or Codex session, or of a delegated task
 (--help included), records a fingerprint of SKILL.md, references/ and policy.json. When they differ on
@@ -382,6 +389,7 @@ const specs = {
   reclaim: { bool: ["dry-run"] },
   steer: { bool: ["adopt"] },
   inbox: { bool: ["ack", "all"] },
+  questions: { bool: ["all"] },
   reply: { value: ["to", "file"] },
   ask: { value: ["options", "recommend"], bool: ["user"] },
   tell: { value: ["file"] },
@@ -421,6 +429,7 @@ const handlers = {
   brief: cmdBrief,
   send: cmdSend,
   inbox: cmdInbox,
+  questions: cmdQuestions,
   reply: cmdReply,
   ask: cmdAsk,
   tell: cmdTell,
