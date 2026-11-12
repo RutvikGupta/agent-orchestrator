@@ -43,13 +43,18 @@ $ORCH questions <run> [<task-id>] [--all] [--json]
 
 ### The answer record
 
-Each question is one line of `tasks/<task-id>/questions.jsonl` in the run's folder. When a message
-answers it, that line gains two fields:
+A task's questions and their answers live in two files in its folder, `tasks/<task-id>/` in the
+run's folder. Both are only ever appended to; no line is ever rewritten.
 
-- `answeredAt`: when the answering message was sent (ISO 8601).
-- `answerMessage`: the id of that message in the task's `inbox.jsonl`.
+- `questions.jsonl` holds one line per question, as `ask` wrote it.
+- `answers.jsonl` holds one line per answer: `question` (the question's id), `answeredAt` (when the
+  answering message was sent, ISO 8601) and `answerMessage` (that message's id in the task's
+  `inbox.jsonl`).
 
-A line without them is a question nobody has answered yet.
+A question with no line in `answers.jsonl` has not been answered, unless it was answered before
+answers were recorded (see the end of this section). If two lines name the same question, the
+first counts. `questions`, `wait`, the dashboard, `send` and the Stop hook all
+join the two files by question id, through `readQuestions` in `scripts/lib/inbox.mjs`.
 
 The answer is the first message sent to the asking task after the question, in the same attempt,
 by the question's own side:
@@ -60,9 +65,14 @@ by the question's own side:
 - for one to the parent task, a `send` (the parent answers that way).
 
 A notice the orchestrator writes itself (a finish notice, a child's question or note, an attention
-or owner notice) never answers. `send` and the dashboard's box write the two fields as they deliver
-the message. A line written before these fields existed has no room for them: it stays as it is,
-and the rule above finds its answer from the task's messages.
+or owner notice) never answers. `send` and the dashboard's box append the answer line as they
+deliver the message.
+
+- `ask` writes the question before its notice reaches the parent, so the parent's answer always
+  comes after it. It also records any answer sent while it was writing the question.
+- A question asked before answers were recorded gets its line when it is answered from now on.
+- A question answered before answers were recorded has no line. Its answer is still found from the
+  task's messages by the rule above, and `questions --all` shows it.
 
 ## Notes
 

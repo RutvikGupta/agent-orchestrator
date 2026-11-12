@@ -8,11 +8,13 @@
 // has no inbox note): then it shows in the dashboard's lane for the user. The answer comes back as
 // an ordinary message in the asker's inbox, and the question closes once its addressee's side sends
 // one after it: the user from the dashboard's box, the session with `send` (openQuestions, inbox.mjs).
+// The question is written before its notice reaches the parent, so the parent's answer always comes
+// after it and is recorded on it (recordAnswers).
 
 import { ORCHESTRATOR, mainSession, sessionLabel } from "../addressee.mjs";
 import { CLI_PATH } from "../config.mjs";
 import { callerTask, parentOf, runById } from "../finish-notice.mjs";
-import { appendQuestion } from "../inbox.mjs";
+import { appendQuestion, recordAnswers } from "../inbox.mjs";
 import { loadTask, taskDir } from "../runs.mjs";
 import { die, emit } from "../util.mjs";
 import { SendError, deliverMessage, messageReach } from "./inbox.mjs";
@@ -44,7 +46,13 @@ export function cmdAsk(args) {
   let to = session ? ORCHESTRATOR : "user";
   let sent = null;
   let fallback = null;
-  let entry;
+  let entry = null;
+  const dir = taskDir(run, task.id);
+  // Only its addressee's side answers it: the user from the dashboard, or the session with `send`.
+  const record = (addressee, extra) => {
+    const answerFrom = addressee === "user" ? "user" : addressee === ORCHESTRATOR ? ORCHESTRATOR : null;
+    return appendQuestion(dir, { attempt, question, options, recommend, to: addressee, ...(answerFrom ? { answerFrom } : {}), ...extra });
+  };
   try {
     if (parent) {
       const parentRun = runById(parent.run);
@@ -55,30 +63,32 @@ export function cmdAsk(args) {
       if (!parentRun) fallback = `its run ${parent.run} is gone`;
       else if (reach && !reach.reaches) fallback = unread(reach.delivery);
       else {
+        const target = `agent:${parent.run}/${parent.task}`;
         try {
+          // The question is recorded once the parent can take it, before its notice is written.
           sent = deliverMessage(parentRun, parent.task, questionText(run, task, attempt, question, options, recommend), {
             from: `agent:${run.id}/${task.id}`, kind: "question", about: { run: run.id, task: task.id, attempt },
+            prepare: ({ id, delivery, reaches }) => {
+              if (!reaches) throw new SendError(unread(delivery), 409);
+              entry = record(target, { message: id });
+            },
           });
-          to = `agent:${parent.run}/${parent.task}`;
-          if (!sent.reaches) {
-            fallback = unread(sent.delivery);
-            [to, sent] = ["user", null];
-          }
+          to = target;
         } catch (error) {
           if (!(error instanceof SendError)) throw error;
           fallback = error.message;
         }
       }
     }
-    // Only its addressee's side answers it: the user from the dashboard, or the session with `send`.
-    const answerFrom = to === "user" ? "user" : to === ORCHESTRATOR ? ORCHESTRATOR : null;
-    entry = appendQuestion(taskDir(run, task.id), {
-      attempt, question, options, recommend, to, ...(answerFrom ? { answerFrom } : {}), ...(sent ? { message: sent.message.id } : {}), ...(fallback ? { fallback } : {}),
-    });
+    entry ??= record(to, fallback ? { fallback } : {});
   } catch (error) {
     // A sandboxed agent may be unable to write the state folder.
     die(`could not post the question (${error.message}); finish what does not depend on it, then end with NEEDS DECISION:`, 1);
   }
+  // An answer sent while the question was being written is recorded now; answerOf finds it anyway.
+  try {
+    recordAnswers(dir, { question: entry.id });
+  } catch {}
   const where = sent
     ? `asked your parent, ${parent.run}/${parent.task}, in its inbox`
     : to === ORCHESTRATOR
