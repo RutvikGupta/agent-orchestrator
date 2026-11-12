@@ -8,6 +8,7 @@ import { compact, formatElapsed, shortText } from "../format.mjs";
 import { isClosedPreparation, verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
 import { endPark } from "../park.mjs";
+import { stopResume } from "../steer.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
@@ -159,6 +160,15 @@ export function cmdStop(args) {
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
+  // A resume between the task's two relays, such as an interrupt's (steer.mjs): mark the task
+  // stopped first, so that it starts nothing, and stop what it runs.
+  const resume = stopResume(run, task, () => saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor }));
+  if (resume?.text) {
+    stopped();
+    process.stdout.write(`${resume.text}\n`);
+    return;
+  }
+  if (resume?.task) task = resume.task;
   if (!relayAlive(task.pid, null, task.outDir)) {
     const left = endCommandGroups(run, task);
     if (!left) die(`task ${shownName(task)} is not running`);
@@ -238,6 +248,10 @@ export function closeTask(run, task, extra = {}) {
     else if (parked?.error) note = `closed, though ending its park failed: ${parked.error}`;
     task = loadTask(run, task.id) || task; // a resume may have saved its attempt first: stopped below
   }
+  // A resume between the task's two relays (steer.mjs): mark it closed first, as for a park.
+  const resume = stopResume(run, task, () => saveTask(run, { ...(loadTask(run, task.id) || task), ...extra, closedAt: now }));
+  if (resume?.task) task = resume.task;
+  else if (resume?.text) note = `${resume.text}; closed`;
   if (relayAlive(task.pid, null, task.outDir)) {
     const latest = loadTask(run, task.id) || task;
     const stop = latest.attempt === task.attempt

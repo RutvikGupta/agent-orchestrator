@@ -8,7 +8,8 @@ import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parall
 import { decisionNote, handoffNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote } from "../inbox.mjs";
-import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, keptEnd, reviveParked } from "../park.mjs";
+import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, reviveParked } from "../park.mjs";
+import { resumeLock } from "../steer.mjs";
 import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { escalationFor, failureHint } from "../escalation.mjs";
 import { readPlan, runningConflicts } from "../plan.mjs";
@@ -110,6 +111,37 @@ function refuseStronger(key, tier, ignoreCaller = false) {
   }
 }
 
+// The close and stop that came after `since` (the task as a resume first saw it): what a resume that
+// is starting must keep, and why it must start nothing. Null when none came.
+function endedSince(since, latest) {
+  const ended = {
+    ...(latest?.closedAt && latest.closedAt !== since?.closedAt ? { closedAt: latest.closedAt } : {}),
+    ...(latest?.stoppedAt && latest.stoppedAt !== since?.stoppedAt ? { stoppedAt: latest.stoppedAt } : {}),
+  };
+  return Object.keys(ended).length ? ended : null;
+}
+
+// The relay arguments of an attempt that resumes the attempt whose arguments were `argv`: the same
+// ones, with this attempt's brief and folder, and without the session it resumed (the caller adds
+// the one to resume). Every other option is kept as it was: model, effort, timeout, sandbox,
+// network, permission rules, and what was passed after `--`.
+const VALUE_FLAGS = new Set(["--brief", "--cd", "--lane", "--out-dir", "--timeout", "--model", "--effort", "--max-turns", "--max-budget-usd", "--autocompact", "--session", "--allow-domain", "--deny", "--allow-write", "--subagent-model", "--subagent-effort", "--web-search", "--sandbox", "--keep-env"]);
+function rebaseRelayArgs(argv, brief, outDir) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    const word = argv[i];
+    if (word === "--resume-last" || word.startsWith("--session=")) continue;
+    if (!VALUE_FLAGS.has(word)) {
+      out.push(word);
+      continue;
+    }
+    const value = argv[++i];
+    if (word === "--session") continue;
+    out.push(word, word === "--brief" ? brief : word === "--out-dir" ? outDir : value);
+  }
+  return out;
+}
+
 // Why a task cannot start in `cd`, which is gone. A worktree that cleanup collected after its task
 // was closed or integrated keeps its branch, so the message says how to bring the folder back.
 function missingDirectory(run, id, prev, cd) {
@@ -122,6 +154,13 @@ function missingDirectory(run, id, prev, cd) {
 
 // Start one task from parsed `start` arguments; `dispatch` calls it too. `extra` holds fields to
 // record in the task, such as its plan entry. Returns the saved task and the text `start` prints.
+// A resume of a task that has an attempt claims that attempt first (steer.mjs, resumeLock), so two
+// resumes never both start the next attempt; `args.parkClaim` brings a claim the caller holds (a
+// park watcher's or an interrupt's), whose `since` is the task as it first saw it. Arguments only
+// callers pass: `relayFrom`, the relay arguments of the attempt this one resumes, kept but for the
+// brief, the folder and the session; `briefData`, text the brief carries after the brief file, such
+// as messages, which is never checked for template markers; `check`, which runs every check of a
+// start without starting anything, also while the task's relay still runs (the caller stops it).
 export function startTask(args, extra = {}) {
   if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
     refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
@@ -206,10 +245,13 @@ export function startTask(args, extra = {}) {
     if (error instanceof ModelRefused) refuse(error.message, error.code);
     throw error;
   }
-  const { tier, model, effort } = choice;
+  const { tier } = choice;
+  // A resume that keeps the relay's arguments keeps the model and effort they name.
+  const keep = Array.isArray(args.relayFrom) && args.relayFrom.includes("--brief") && args.relayFrom.includes("--out-dir") && sameAgent;
+  const { model, effort } = keep ? { model: prev.model ?? choice.model, effort: prev.effort ?? null } : choice;
   if (!escalation && extra.attemptReason !== "retry") escalation = failureHint(prev, previousAttempts, key, tier);
   refuseStronger(key, tier, babysit);
-  if (relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  if (!args.check && relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(missingDirectory(run, id, prev, cd));
   // The orchestrator chooses the agent and tier by assessing the task; record why. A follow-up
@@ -258,9 +300,13 @@ export function startTask(args, extra = {}) {
     }
   }
 
+  // Every check has passed: a check run starts nothing.
+  if (args.check) return { task: null, text: `${id} can start` };
+
   // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
   // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
-  const parkClaim = args.parkClaim || claimParked(run, prev, "start");
+  // Any other resume claims the attempt it replaces, for the same reason.
+  const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(prev, extra.attemptReason === "retry" ? "retry" : "start");
   if (parkClaim?.refused) refuse(parkClaim.refused);
 
   const attempt = (prev.attempt || 0) + 1;
@@ -277,6 +323,8 @@ export function startTask(args, extra = {}) {
   try {
     fs.mkdirSync(outDir, { recursive: true });
     fs.copyFileSync(briefSource, brief);
+    // Data the brief carries, such as messages, is passed on as it is: never checked for markers.
+    if (args.briefData) fs.appendFileSync(brief, `\n${String(args.briefData).trim()}\n`);
     if (!args["read-only"] && !offline && !sandbox && childDepth < MAX_NEST_DEPTH) {
       fs.appendFileSync(brief, nestingNote(childDepth));
     }
@@ -297,12 +345,14 @@ export function startTask(args, extra = {}) {
     throw error;
   }
 
-  const relayArgs = ["--brief", brief, "--cd", cd, "--out-dir", outDir];
-  if (args["read-only"]) relayArgs.push("--read-only");
-  if (args.timeout || babysit) relayArgs.push("--timeout", args.timeout || "24h");
-  // A tier without an effort runs at the CLI's default for its model.
-  relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
-  relayArgs.push(...net.args);
+  const relayArgs = keep ? rebaseRelayArgs(args.relayFrom, brief, outDir) : ["--brief", brief, "--cd", cd, "--out-dir", outDir];
+  if (!keep) {
+    if (args["read-only"]) relayArgs.push("--read-only");
+    if (args.timeout || babysit) relayArgs.push("--timeout", args.timeout || "24h");
+    // A tier without an effort runs at the CLI's default for its model.
+    relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
+    relayArgs.push(...net.args);
+  }
   if (automatic?.tier && !args.passthrough.some((arg) => arg === "--session" || arg.startsWith("--session=") || arg === "--resume-last")) {
     const session = previousRow?.session;
     if (session) relayArgs.push("--session", session);
@@ -339,11 +389,11 @@ export function startTask(args, extra = {}) {
     sandboxRequested: sandbox,
     confine,
     noPublish,
-    sandboxed: net.sandboxed,
+    sandboxed: keep ? prev.sandboxed : net.sandboxed,
     pr,
     closedAt: null,
-    stoppedAt: null, // a start by hand opens a closed or stopped task again; a park resume keeps both
-    network: net.network,
+    stoppedAt: null, // a start by hand opens a closed or stopped task again; a stop or close since its claim is kept below
+    network: keep ? prev.network : net.network,
     attempt,
     outDir,
     pid: null, // set once the relay starts
@@ -356,13 +406,15 @@ export function startTask(args, extra = {}) {
     resumedBy: null, // who resumed this attempt by hand (cmdStart passes it), not a park or retry resume
     ...extra,
   };
-  // A close or stop that came while this resume was starting wins: start nothing.
+  // A close or stop that came while this resume was starting (since its claim's holder first saw
+  // the task) wins: start nothing.
+  const since = parkClaim?.since || prev;
   if (parkClaim) {
-    const latest = loadTask(run, id);
-    if (latest?.closedAt || latest?.stoppedAt) {
+    const ended = endedSince(since, loadTask(run, id));
+    if (ended) {
       parkClaim.release();
       fs.rmSync(outDir, { recursive: true, force: true });
-      refuse(`task ${id} was ${latest.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
+      refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
     }
   }
   let child;
@@ -376,7 +428,7 @@ export function startTask(args, extra = {}) {
   // First of all, record the relay: a resume that dies now leaves it for the next claimant to adopt.
   parkClaim?.spawned?.(task);
   // A resume never clears a close or stop that came while it started.
-  if (parkClaim) Object.assign(task, keptEnd(loadTask(run, id)));
+  if (parkClaim) Object.assign(task, endedSince(since, loadTask(run, id)) || {});
   saveTask(run, task);
   parkClaim?.done(task);
   // Started once the record is saved, so the watcher always reads this attempt. A babysitter always
@@ -494,6 +546,9 @@ function startCommand(run, id, args, extra) {
     (sameAgent ? prev.why : null) ||
     refuse("--why is required: one line on why this work runs as a command with no model watching it (see SKILL.md, \"Choose the agent and model\")", 2);
   checkSlots(run, id, args, cd, { writes: false });
+  // Running it again claims the attempt it replaces, as startTask does, so two never both start.
+  const claim = resumeLock(prev, extra.attemptReason === "retry" ? "retry" : "start");
+  if (claim?.refused) refuse(claim.refused);
   const attempt = (prev.attempt || 0) + 1;
   const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
   const attemptReason = extra.attemptReason
@@ -543,9 +598,24 @@ function startCommand(run, id, args, extra) {
     resumedBy: null,
     ...extra,
   };
-  const child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
+  const ended = claim ? endedSince(prev, loadTask(run, id)) : null;
+  if (ended) {
+    claim.release();
+    fs.rmSync(outDir, { recursive: true, force: true });
+    refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while it was starting again, so it started nothing`);
+  }
+  let child;
+  try {
+    child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
+  } catch (error) {
+    claim?.release();
+    throw error;
+  }
   task.pid = child.pid;
+  claim?.spawned(task);
+  if (claim) Object.assign(task, endedSince(prev, loadTask(run, id)) || {});
   saveTask(run, task);
+  claim?.done(task);
   if (startedBy) watchForFinish(run, task);
   const opts = [done !== null ? `done marker ${JSON.stringify(done)}` : null, timeout !== null ? `timeout ${timeout}` : null].filter(Boolean);
   return {

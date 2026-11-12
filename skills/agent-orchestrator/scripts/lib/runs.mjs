@@ -450,39 +450,47 @@ export function isParked(run, task) {
   return result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
 }
 
-// Interrupts (steer.mjs). An interrupt delivers a message to an agent that is not in a shell command
-// by stopping its session and resuming the same session with the message as its next prompt. It
-// claims the interrupted attempt's folder first: interrupt-<k>.json, created whole and exclusively
-// with the next k, naming its owner (PID and start time). The highest k is the current claim:
-// `released` when the resume failed or was refused (with `error`), `attempt` once the resumed
-// attempt is saved. While a claim is live, describe() reports the task as running, so `wait`, the
-// parallel limit and the plan never see the gap between the two relays.
-const INTERRUPT_RE = /^interrupt-(\d+)\.json$/;
-export const interruptFile = (dir, generation) => path.join(dir, `interrupt-${generation}.json`);
-const INTERRUPT_GRACE_MS = 60000; // a claim whose owner cannot be read counts as live this long
+// Resume claims (steer.mjs, resumeLock). Every way a task is resumed (a `start` by hand, a retry, a
+// rework, an interrupt) claims the attempt it replaces first: resume-<k>.json in that attempt's
+// folder, created whole and exclusively with the next k, naming its owner (PID and start time) and
+// its `kind` ("start", "retry" or "interrupt"). So two of them never both start the next attempt. A
+// parked babysitter's resume claims its park instead (park.mjs), and an interrupt never resumes one.
+// The highest k is the current claim: `released` when the resume failed or was refused (with
+// `error`), `attempt` once the resumed attempt is saved. An interrupt stops the running relay first,
+// so while its claim is live, describe() reports the task as running: `wait`, the parallel limit and
+// the plan never see the gap between the two relays.
+const RESUME_RE = /^resume-(\d+)\.json$/;
+export const resumeFile = (dir, generation) => path.join(dir, `resume-${generation}.json`);
+const RESUME_GRACE_MS = 60000; // a claim whose owner cannot be read counts as live this long
 
-// The current interrupt claim of an attempt's folder: { generation, record, state }, where state is
+// The current resume claim of an attempt's folder: { generation, record, state }, where state is
 // `none`, `live` (its owner still runs), `done` (the resumed attempt is saved), `released`, or
-// `abandoned` (its owner is gone without saving anything). Folders that were never interrupted cost
-// one `stat`.
-export function interruptState(dir) {
-  if (!dir || !fs.existsSync(interruptFile(dir, 1))) return { generation: 0, record: null, state: "none" };
-  const generation = highest(dir, INTERRUPT_RE);
-  const record = readJson(interruptFile(dir, generation));
+// `abandoned` (its owner is gone without saving anything). Folders that were never resumed cost one
+// `stat`.
+export function resumeClaim(dir) {
+  if (!dir || !fs.existsSync(resumeFile(dir, 1))) return { generation: 0, record: null, state: "none" };
+  const generation = highest(dir, RESUME_RE);
+  const record = readJson(resumeFile(dir, generation));
   let state;
   if (!record) state = "live"; // created whole, so only a moment's read race leaves it unreadable
   else if (record.released) state = "released";
   else if (record.attempt) state = "done";
   else if (record.owner?.pid) state = ownerAlive(record.owner) ? "live" : "abandoned";
-  else state = Date.now() - (Date.parse(record.claimedAt) || 0) < INTERRUPT_GRACE_MS ? "live" : "abandoned";
+  else state = Date.now() - (Date.parse(record.claimedAt) || 0) < RESUME_GRACE_MS ? "live" : "abandoned";
   return { generation, record, state };
 }
 
-// The interrupt that holds a task whose relay has exited, or null: a live or finished claim on its
-// current attempt's folder means its session is being resumed.
+// Whether an interrupt is resuming the task's session: a live or finished interrupt claim on its
+// current attempt's folder. Other resumes start only once the relay has ended, as before.
+export function interruptHeld(task) {
+  const claim = resumeClaim(task?.outDir);
+  return claim.record?.kind === "interrupt" && ["live", "done"].includes(claim.state) ? claim : null;
+}
+
+// The interrupt that holds a task whose relay has exited, or null.
 function interruptOf(task) {
-  const claim = interruptState(task.outDir);
-  return ["live", "done"].includes(claim.state) ? { at: claim.record?.claimedAt || null, by: claim.record?.by || null, was: claim.record?.was || null } : null;
+  const claim = interruptHeld(task);
+  return claim ? { at: claim.record?.claimedAt || null, by: claim.record?.by || null, was: claim.record?.was || null } : null;
 }
 
 // A Claude relay whose turn ended (claude.mjs, applyTurn) while its process lives on waits on a

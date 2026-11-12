@@ -97,8 +97,8 @@ test('a task that ended its turn and waits on its own background command reads a
   assert.match(steered.steer.doing, /^ended its turn and waited on its own background command `bash tmp\/watch\.sh`$/);
   await ready(f, run, 'idler', 2);
   const brief = fs.readFileSync(path.join(attemptDir(run, 'idler', 2), 'orch-brief.md'), 'utf8');
-  assert.match(brief, /You had ended your turn and were waiting on your own background command `bash tmp\/watch\.sh`, so nothing would have reached you until that ended\./);
-  assert.match(brief, /stopped every command you had started in the background, including `bash tmp\/watch\.sh`/);
+  assert.match(brief, /You had ended your turn and were waiting on your own background command `bash tmp\/watch\.sh`, so nothing would have reached you until that ended\. It was stopped with the session\./);
+  assert.match(brief, /stopped every command you had started in the background/);
   assert.match(brief, /### 1\. Message from your orchestrator[^\n]*\n\nAlso update the changelog\.\n[\s\S]*### 2\. Message from your orchestrator[^\n]*\n\nAnd bump the version\.\n/);
   const after = await rowOf(f, run, 'idler');
   assert.deepEqual([after.state, after.attempt, after.idle, after.inbox.unread], ['running', 2, undefined, 0]);
@@ -151,15 +151,15 @@ test('a second interrupt while one holds the task adds its message and starts no
   const run = await f.newRun();
   const first = await f.start(run, 'busy', { config: { hold: true } });
   await f.ready(first);
-  // Another interrupt holds the attempt: a live claim, as claimInterrupt writes it.
-  const claim = path.join(first.outDir, 'interrupt-1.json');
-  writeJson(claim, { claimedAt: new Date().toISOString(), owner: { pid: process.pid }, interrupted: 1, by: 'another sender' });
+  // Another interrupt holds the attempt: a live claim, as claimResume writes it.
+  const claim = path.join(first.outDir, 'resume-1.json');
+  writeJson(claim, { kind: 'interrupt', claimedAt: new Date().toISOString(), owner: { pid: process.pid }, replaces: 1, by: 'another sender' });
   const sent = await f.json(['send', run.id, 'busy', 'Second thought.', '--steer'], { env: HOLD });
   assert.deepEqual([sent.steer.resuming, sent.steer.busy], [true, true]);
   assert.match(sent.delivery, /^an interrupt is resuming the agent's session/);
   assert.ok(alive(first.pid), 'nothing was stopped');
   assert.equal(readJson(f.taskFile(run, 'busy')).attempt, 1);
-  assert.equal(fs.existsSync(path.join(first.outDir, 'interrupt-2.json')), false);
+  assert.equal(fs.existsSync(path.join(first.outDir, 'resume-2.json')), false);
   // Once that claim is released, the next interrupt resumes the session, with both messages.
   writeJson(claim, { ...readJson(claim), released: true });
   const again = await f.json(['send', run.id, 'busy', 'Third thought.', '--steer'], { env: HOLD });
@@ -185,7 +185,7 @@ test('two interrupts sent at once never run two sessions side by side', async (t
   assert.ok(sent.every((s) => s.steer.resumed || s.steer.busy), JSON.stringify(sent.map((s) => s.steer)));
   assert.ok(resumed.length >= 1 && !alive(first.pid));
   // Every earlier attempt's relay has exited: one session runs.
-  for (let n = 2; n < record.attempt; n++) assert.ok(!alive(readJson(path.join(attemptDir(run, 'busy', n - 1), 'interrupt-1.json')).pid));
+  for (let n = 2; n < record.attempt; n++) assert.ok(!alive(readJson(path.join(attemptDir(run, 'busy', n - 1), 'resume-1.json')).pid));
   await ready(f, run, 'busy', record.attempt);
   f.release({ outDir: attemptDir(run, 'busy', record.attempt) });
   await f.finished(run, 'busy');
@@ -198,7 +198,7 @@ test('while an interrupt resumes the session, the task reads as running, not fin
   const first = await f.start(run, 'gap', { config: { hold: true } });
   await f.ready(first);
   // The moment between the two relays: the claim is live and the stopped relay has written its result.
-  writeJson(path.join(first.outDir, 'interrupt-1.json'), { claimedAt: new Date().toISOString(), owner: { pid: process.pid }, interrupted: 1, was: 'mid-turn' });
+  writeJson(path.join(first.outDir, 'resume-1.json'), { kind: 'interrupt', claimedAt: new Date().toISOString(), owner: { pid: process.pid }, replaces: 1, was: 'mid-turn' });
   process.kill(first.pid, 'SIGTERM');
   await eventually(() => !alive(first.pid) && fs.existsSync(path.join(first.outDir, 'result.json')), 'the relay did not stop');
   const row = await rowOf(f, run, 'gap');
@@ -208,7 +208,7 @@ test('while an interrupt resumes the session, the task reads as running, not fin
   assert.match(sent.delivery, /^an interrupt is resuming the agent's session/);
   await f.command(['wait', run.id, 'gap', '--timeout', '1s'], { code: 3 });
   // Released, the stopped attempt is what it is.
-  writeJson(path.join(first.outDir, 'interrupt-1.json'), { released: true });
+  writeJson(path.join(first.outDir, 'resume-1.json'), { kind: 'interrupt', released: true });
   assert.equal((await rowOf(f, run, 'gap')).state, 'stopped');
 });
 
@@ -227,7 +227,7 @@ test('an interrupt is refused, with the reason and no change, for a command task
   const refused = await f.json(['send', run.id, 'fresh', 'hello', '--steer']);
   assert.deepEqual([refused.steer.refused, refused.steer.waiting], [true, 'its session id is not known yet, so it is not interrupted; it reads the message after its current step']);
   assert.ok(alive(fresh.pid));
-  assert.equal(fs.existsSync(path.join(fresh.outDir, 'interrupt-1.json')), false);
+  assert.equal(fs.existsSync(path.join(fresh.outDir, 'resume-1.json')), false);
   f.release(fresh);
   await f.finished(run, 'fresh');
 
@@ -260,7 +260,7 @@ test('an interrupt is refused for a babysitter, running or parked: its park watc
   const running = await f.json(['send', run.id, 'sitter', 'Rebase first.', '--steer']);
   assert.deepEqual([running.steer.refused, running.steer.waiting], [true, "a babysitter's park watcher delivers its messages, so it is not interrupted; it reads the message after its current step"]);
   assert.ok(alive(sitter.pid));
-  assert.equal(fs.existsSync(path.join(sitter.outDir, 'interrupt-1.json')), false);
+  assert.equal(fs.existsSync(path.join(sitter.outDir, 'resume-1.json')), false);
   f.release(sitter);
 
   const parks = await f.json(['start', run.id, 'parks', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief',
@@ -269,6 +269,177 @@ test('an interrupt is refused for a babysitter, running or parked: its park watc
   const parked = await f.json(['send', run.id, 'parks', 'Rebase first.', '--steer']);
   assert.equal(parked.steer.refused, true);
   assert.match(parked.steer.waiting, /^the task is parked: its watcher resumes it with this message within a few seconds/);
-  assert.equal(fs.existsSync(path.join(parks.outDir, 'interrupt-1.json')), false);
+  assert.equal(fs.existsSync(path.join(parks.outDir, 'resume-1.json')), false);
   await f.command(['stop', run.id, 'parks']);
+});
+
+// Review findings: each test below fails without its fix.
+
+test('a resume keeps every relay option of the attempt it replaces: permission rules and effort too', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = JSON.parse((await f.command(['start', run.id, 'keeper', '--agent', 'claude', '--tier', 'frontier', '--effort', 'medium', '--why', 'Exercises the CLI with a local fake relay',
+    '--brief', f.brief('keeper', { hold: true }), '--json', '--', '--deny', 'Bash(curl *)', '--max-turns', '40'])).stdout);
+  await f.ready(first);
+  const sent = await f.json(['send', run.id, 'keeper', 'Carry on.', '--steer'], { env: HOLD });
+  assert.equal(sent.steer.resumed, 2);
+  await ready(f, run, 'keeper', 2);
+  // The same arguments, but for this attempt's brief and folder, and the session it resumes.
+  const argvOf = (n) => readJson(path.join(attemptDir(run, 'keeper', n), 'invocation.json')).argv.map((word) => word.replace(`attempt-${n}`, 'attempt-N'));
+  assert.deepEqual(argvOf(2), [...argvOf(1), '--session', 'fixture-claude']);
+  assert.ok(argvOf(2).includes('Bash(curl *)'));
+  assert.deepEqual(argvOf(2).slice(argvOf(2).indexOf('--effort'), argvOf(2).indexOf('--effort') + 2), ['--effort', 'medium']);
+  const record = readJson(f.taskFile(run, 'keeper'));
+  assert.deepEqual([record.tier, record.effort, record.model], ['frontier', 'medium', first.model]);
+  f.release({ outDir: attemptDir(run, 'keeper', 2) });
+  await f.finished(run, 'keeper');
+});
+
+// A turn whose first call runs `command` and whose later call reads a file, both still open.
+const twoCalls = (command) => ({ type: 'assistant', message: { content: [
+  { type: 'tool_use', id: 'toolu_shell', name: 'Bash', input: { command } },
+  { type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: '/tmp/notes.md' } },
+] } });
+
+test('an interrupt never ends a session while a publishing command of its turn runs, though a later call is open', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = await f.start(run, 'pusher', { config: { hold: true, extraEvents: [twoCalls('git push origin main')] } });
+  await f.ready(task);
+  const sent = await f.json(['send', run.id, 'pusher', 'Stop and rebase.', '--steer']);
+  assert.equal(sent.steer.waiting, 'the agent is running `git push origin main`, which is not stopped part-way');
+  assert.ok(alive(task.pid), 'the session was not stopped');
+  assert.equal(fs.existsSync(path.join(task.outDir, 'resume-1.json')), false);
+  f.release(task);
+  await f.finished(run, 'pusher');
+});
+
+test('an interrupt stops a shell command of the turn that still runs, though a later call is open, instead of ending the session', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const command = 'sleep 61; echo done';
+  const task = await f.start(run, 'sleeper', { config: { hold: true, shell: ['/bin/bash', '-c', command], extraEvents: [twoCalls(command)] } });
+  await f.ready(task);
+  const pid = Number(await eventually(() => fs.existsSync(path.join(task.outDir, 'shell.pid')) && fs.readFileSync(path.join(task.outDir, 'shell.pid'), 'utf8'), 'the shell did not start'));
+  const sent = await f.json(['send', run.id, 'sleeper', 'Stop polling.', '--steer']);
+  assert.match(sent.steer.stopped, /sleep 61; echo done/);
+  await eventually(() => !alive(pid), 'the shell command is still running');
+  assert.ok(alive(task.pid), 'the session was not stopped');
+  assert.equal(readJson(f.taskFile(run, 'sleeper')).attempt, 1);
+  f.release(task);
+  await f.finished(run, 'sleeper');
+});
+
+test('every resume claims the attempt it replaces: a start never runs beside an interrupt or another start', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'held', { config: { hold: true } });
+  await f.ready(first);
+  // An interrupt between its two relays: its claim is live, and the relay it stopped has exited.
+  const claim = path.join(first.outDir, 'resume-1.json');
+  writeJson(claim, { kind: 'interrupt', claimedAt: new Date().toISOString(), owner: { pid: process.pid }, replaces: 1, was: 'mid-turn' });
+  process.kill(first.pid, 'SIGTERM');
+  await eventually(() => !alive(first.pid) && fs.existsSync(path.join(first.outDir, 'result.json')), 'the relay did not stop');
+  const resume = ['start', run.id, 'held', '--agent', 'claude', '--brief', f.brief('again', {}), '--', '--session', 'fixture-claude'];
+  const refused = await f.command(resume, { code: 1 });
+  assert.match(refused.stderr, /task held is being resumed right now \(an interrupt is delivering a message\)/);
+  assert.equal(fs.existsSync(attemptDir(run, 'held', 2)), false);
+  // Released, a start resumes it, and claims the attempt while it does.
+  writeJson(claim, { ...readJson(claim), released: true });
+  await f.command(resume);
+  const done = readJson(path.join(first.outDir, 'resume-2.json'));
+  assert.deepEqual([done.kind, done.replaces, done.attempt], ['start', 1, 2]);
+  await f.finished(run, 'held');
+  // A start that holds the next attempt keeps any other start out.
+  const held = path.join(attemptDir(run, 'held', 2), 'resume-1.json');
+  writeJson(held, { kind: 'start', claimedAt: new Date().toISOString(), owner: { pid: process.pid }, replaces: 2 });
+  const busy = await f.command(resume, { code: 1 });
+  assert.match(busy.stderr, /task held is being resumed right now \(by `start`\)/);
+  assert.equal(fs.existsSync(attemptDir(run, 'held', 3)), false);
+  writeJson(held, { ...readJson(held), released: true }); // the claim this test holds, given back
+});
+
+test('idle reads only the session\'s own turn: a sub-agent\'s events neither end nor reopen it, and a model request reopens it', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const child = (e) => ({ ...e, parent_tool_use_id: 'toolu_task' });
+  const subagent = { type: 'assistant', message: { id: 'm-task', content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'look around' } }] } };
+  const configs = {
+    // Mid-turn, with a background command running: a sub-agent's final result does not end the turn.
+    working: [...idleEvents().slice(0, 2), subagent,
+      child({ type: 'assistant', message: { id: 'm-c1', stop_reason: 'end_turn', content: [{ type: 'text', text: 'found it' }] } }),
+      child({ type: 'result', subtype: 'success', is_error: false, result: 'found it', session_id: 'sub' })],
+    // Idle: a background sub-agent's events after the turn ended do not reopen it.
+    waiting: [...idleEvents(), child({ type: 'assistant', message: { id: 'm-c2', content: [{ type: 'text', text: 'still looking' }] } })],
+    // Idle, then the session sends a new model request: its turn is open again.
+    reopened: [...idleEvents(), { type: 'api-request' }],
+  };
+  const tasks = {};
+  for (const [id, extraEvents] of Object.entries(configs)) {
+    tasks[id] = await f.start(run, id, { config: { hold: true, extraEvents }, flags: ['--read-only'] });
+    await f.ready(tasks[id]);
+  }
+  const rows = (await f.json(['status', run.id])).tasks;
+  const idleOf = (id) => rows.find((r) => r.id === id).idle?.background ?? null;
+  assert.deepEqual([idleOf('working'), idleOf('waiting'), idleOf('reopened')], [null, 'bash tmp/watch.sh', null]);
+  for (const [id, task] of Object.entries(tasks)) {
+    f.release(task);
+    await f.finished(run, id);
+  }
+});
+
+test('stop cancels an interrupt between its two relays: the task ends stopped and is not resumed', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'gap', { config: { hold: true } });
+  await f.ready(first);
+  const marker = path.join(f.root, 'gap-marker');
+  const preload = new URL('./fixtures/interrupt-gap.cjs', import.meta.url).pathname;
+  const sending = f.command(['send', run.id, 'gap', 'Hello.', '--steer'], { env: { ...HOLD, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_GAP_MARKER: marker } });
+  try {
+    await eventually(() => fs.existsSync(marker), 'the interrupt did not reach the gap between the relays', 20_000);
+    assert.ok(!alive(first.pid), 'the first relay has exited');
+    const stopping = f.command(['stop', run.id, 'gap']);
+    await eventually(() => readJson(f.taskFile(run, 'gap')).stoppedAt, 'stop did not mark the task');
+    fs.writeFileSync(`${marker}.release`, '');
+    assert.match((await stopping).stdout, /^stopped gap while an interrupt was resuming its session; it starts no new attempt\n$/);
+  } finally {
+    fs.writeFileSync(`${marker}.release`, '');
+  }
+  assert.match((await sending).stdout, /^not steered: the agent .*, and resuming its session failed: task gap was stopped/m);
+  const record = readJson(f.taskFile(run, 'gap'));
+  assert.equal(record.attempt, 1);
+  assert.ok(record.stoppedAt);
+  assert.equal(fs.existsSync(attemptDir(run, 'gap', 2)), false);
+  assert.equal((await rowOf(f, run, 'gap')).state, 'stopped');
+});
+
+test('message text is data: a message that reads like a template marker resumes the session and reaches it as written', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const first = await f.start(run, 'templated', { config: { hold: true } });
+  await f.ready(first);
+  const text = 'Replace <fill in: description> in the template.';
+  const sent = await f.json(['send', run.id, 'templated', text, '--steer'], { env: HOLD });
+  assert.equal(sent.steer.resumed, 2);
+  await ready(f, run, 'templated', 2);
+  assert.ok(fs.readFileSync(path.join(attemptDir(run, 'templated', 2), 'orch-brief.md'), 'utf8').includes(`\n\n${text}\n`));
+  f.release({ outDir: attemptDir(run, 'templated', 2) });
+  await f.finished(run, 'templated');
+});
+
+test('an interrupt checks the resume before it stops anything: one that cannot start leaves the session running', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const cd = path.join(f.root, 'gone');
+  fs.mkdirSync(cd);
+  const task = await f.start(run, 'homeless', { config: { hold: true }, flags: ['--cd', cd] });
+  await f.ready(task);
+  fs.rmSync(cd, { recursive: true });
+  const sent = await f.command(['send', run.id, 'homeless', 'hello', '--steer']);
+  assert.match(sent.stdout, /^not steered: its session cannot be resumed \(--cd does not exist: \S+gone\), so it was not stopped; the message stays unread$/m);
+  assert.ok(alive(task.pid), 'the session runs on');
+  assert.equal(readJson(f.taskFile(run, 'homeless')).attempt, 1);
+  f.release(task);
+  await f.finished(run, 'homeless');
 });

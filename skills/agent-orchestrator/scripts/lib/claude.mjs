@@ -38,22 +38,33 @@ function applyLocalCommand(s, text) {
 // Where the relay's session is in its turn, for steering (steer.mjs) and the idle state (runs.mjs).
 // `claude -p` ends each turn with a `result` event. While a background command the agent started is
 // pending, its process stays alive after that, and the next turn starts with a task notification:
-// `turnEnded` holds from a `result` until an event of a next turn arrives. `openTool` is the latest
-// tool call that has no result yet ({ id, name, command, background }), or null.
+// `turnEnded` holds from a `result` until an event of a next turn arrives, or a new model request.
+// Only the session's own events count: a sub-agent's (stream-json marks them with
+// parent_tool_use_id, Claude Code's transcripts with isSidechain) neither end nor reopen its turn.
+// `openTools` holds every tool call without a result yet, the session's and its sub-agents', as
+// "#<id>" -> { name, command, background, sub }, oldest first.
+const OPEN_TOOLS = 32; // a call that never gets a result is dropped once this many are open
+export const subagentEvent = (e) => Boolean(e.parent_tool_use_id) || e.isSidechain === true;
 function applyTurn(s, e) {
-  if (e.type === "result") {
-    s.turnEnded = true;
-    s.openTool = null;
-    return;
-  }
-  if (e.type === "assistant" || e.type === "user" || (e.type === "system" && e.subtype === "task_notification")) s.turnEnded = false;
+  const sub = subagentEvent(e);
   const content = Array.isArray(e.message?.content) ? e.message.content : [];
+  s.openTools ||= {};
   if (e.type === "assistant") {
     for (const b of content) {
-      if (b?.type === "tool_use" && b.id) s.openTool = { id: b.id, name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background) };
+      if (b?.type !== "tool_use" || !b.id) continue;
+      s.openTools[`#${b.id}`] = { name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background), sub };
+      const ids = Object.keys(s.openTools);
+      if (ids.length > OPEN_TOOLS) delete s.openTools[ids[0]];
     }
-  } else if (e.type === "user" && s.openTool && content.some((b) => b?.type === "tool_result" && b.tool_use_id === s.openTool.id)) {
-    s.openTool = null;
+  } else if (e.type === "user") {
+    for (const b of content) if (b?.type === "tool_result" && b.tool_use_id) delete s.openTools[`#${b.tool_use_id}`];
+  }
+  if (sub) return;
+  if (e.type === "result") {
+    s.turnEnded = true;
+    s.openTools = {}; // the turn is over: no call of it is still running
+  } else if (e.type === "assistant" || e.type === "user" || e.type === "api-request" || (e.type === "system" && e.subtype === "task_notification")) {
+    s.turnEnded = false;
   }
 }
 
@@ -222,6 +233,10 @@ export function claudeActionEvent(e, t) {
 const CLAUDE_SKIPPED = new Set(["api-request-blob", "api-request-shape", "file-history-snapshot", "file-history-delta", "mode", "permission-mode", "atis-latch", "last-prompt", "ai-title", "cost-state", "queue-operation", "pr-link"]);
 export function claudeLineShortcut(s, line) {
   const type = /^\{"type":"([^"]+)"/.exec(line)?.[1];
-  if (type === "api-request") s.busy = true; // the session sent a model request: a turn is open
+  if (type === "api-request") {
+    s.busy = true; // the session sent a model request: a turn is open
+    // A sub-agent's request leaves the session's own turn as it was (applyTurn).
+    if (!/"isSidechain":true|"parent_tool_use_id":"/.test(line)) s.turnEnded = false;
+  }
   return type === "api-request" || CLAUDE_SKIPPED.has(type);
 }

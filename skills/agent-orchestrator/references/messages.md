@@ -109,28 +109,41 @@ $ORCH send <run> <task-id> "<message>" [--steer]    # or --file FILE
 once, whatever the agent is doing, and says which of these it did:
 
 - **In a shell command:** it stops that command, so the tool call returns and the message reaches
-  the agent. The agent reruns the command if it still needs it. A commit, push, rebase, merge or
-  other publishing command is never stopped: the message waits for it.
+  the agent. The agent reruns the command if it still needs it. Every shell command of the turn that
+  has not returned counts, also when a later tool call is open, and each is stopped. A commit, push,
+  rebase, merge or other publishing command is never stopped: the message waits for it.
 - **Mid-turn, but not in a shell command** (in a model call, or in another tool such as an edit or a
   sub-agent): it stops the session and resumes it in the same session, with the unread messages as
   its next prompt.
 - **Idle:** the same resume (see below).
 
-A resume keeps the task's agent, tier, mode, worktree and brief. It is recorded as a new attempt
-with the reason `interrupt`; the stopped attempt shows as `interrupted`, and it is neither a counted
-failure nor a rework round. The task stays `running` for `wait`, the parallel limit and the plan,
-also in the moment between the two relays. The stopped attempt sends its parent no finish notice;
-the resumed one reports to the same parent at the same depth. The resumed prompt says the session
-was interrupted to deliver a message, and that its background commands were stopped with it, so the
-agent can start again what it still needs. When two senders interrupt at once, one resumes the
-session and the other only adds its message, which that resume or the hook delivers.
+A resume keeps the task's agent, tier, mode, worktree and brief, and every relay option of the
+attempt it replaces: model and effort, timeout, sandbox, network, permission rules, and what was
+passed after `--`. Only the session and the prompt change. It is recorded as a new attempt with the
+reason `interrupt`; the stopped attempt shows as `interrupted`, and it is neither a counted failure
+nor a rework round. The task stays `running` for `wait`, the parallel limit and the plan, also in the
+moment between the two relays. The stopped attempt sends its parent no finish notice; the resumed
+one reports to the same parent at the same depth. The resumed prompt says the session was
+interrupted to deliver a message, and that its background commands were stopped with it, so the
+agent can start again what it still needs. The messages follow as they were written: no text of a
+message is ever read as part of the brief.
+
+Before it stops anything, the interrupt checks the resume with every check `start` makes. When one
+fails (the task's folder is gone, say), it says why and the session runs on.
+
+Every way of resuming a task (`start`, a retry, a rework, an interrupt) first claims the attempt it
+replaces, so two of them never both start the next attempt. When two senders interrupt at once, one
+resumes the session and the other only adds its message, which that resume or the hook delivers.
+A `start` while an interrupt resumes the task is refused. `stop` and `close` end an interrupt that is
+between its two relays: the task ends stopped or closed, and is not resumed.
 
 A resume is refused, with the reason, and nothing changes, for:
 
 - a babysitter, running or parked: its park watcher delivers messages;
 - a command task: it has no session and no agent;
 - a task whose session id is not known yet, just after it started;
-- a sandboxed Codex task with the network on: the Codex relay cannot resume its session.
+- a sandboxed Codex task with the network on: the Codex relay cannot resume its session;
+- a task with a publishing command running in the background, which stopping the session would end.
 
 `$ORCH steer <run> <task-id>` does the same for messages already queued, and so does "Send now" on
 the dashboard.

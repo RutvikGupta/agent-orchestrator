@@ -51,9 +51,12 @@ The box under a task's details sends it a message (`references/messages.md`).
   - In a shell command: the command is stopped, so the agent reads the messages. A commit, push or
     other publishing command is never stopped; the messages wait for it.
   - Not in a shell command: the session is stopped and resumed in the same session, with the unread
-    messages as its next prompt. This is a new attempt, with the reason `interrupt`.
-  - A babysitter, a parked task, a command task, or a task whose session id is not known yet is not
-    interrupted. The messages wait for its next step.
+    messages as its next prompt. This is a new attempt, with the reason `interrupt`, and every relay
+    option of the attempt it replaces. The resume is checked first: one that cannot start stops
+    nothing.
+  - A babysitter, a parked task, a command task, a task whose session id is not known yet, and one
+    with a publishing command still running are not interrupted. The messages wait for its next
+    step (`references/messages.md`, "The interrupt").
 - **The status line.** The line under the box says which of these happened: "Stopped `npm test` …
   so it reads it now", "Interrupted: the agent … so its session is resuming with the message", or
   "Not interrupted: …" with the reason. When another interrupt is already resuming the session, it

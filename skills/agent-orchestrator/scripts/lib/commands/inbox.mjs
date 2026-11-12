@@ -8,8 +8,8 @@ import { CLI_PATH } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
 import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
-import { describe, interruptState, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
-import { awaitInterrupt, claimInterrupt, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
+import { describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
+import { awaitInterrupt, claimResume, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration, readJson } from "../util.mjs";
 
 // How a message reaches this attempt of the task: { delivery, reaches }. An attempt started before
@@ -46,12 +46,14 @@ export function messageReach(task, run = null, row = null) {
 // answer's `steer`: { resuming, was, doing, attempt, generation } once the helper started; BUSY when
 // another interrupt is already resuming it; or { waiting } when the helper could not start.
 function interrupt(run, task, plan, g) {
-  const claim = claimInterrupt(task, { by: g ? actorLabel(g.actor) : null, ...plan.resume });
-  return claim.busy ? BUSY : startClaimed(run, task, plan, g, claim);
+  return startClaimed(run, task, plan, g, claimResume(task, "interrupt", { by: g ? actorLabel(g.actor) : null, ...plan.resume }));
 }
 
-// Start the helper for an interrupt this process has claimed.
+// Start the helper for an interrupt that claimResume() answered: BUSY when another resume holds the
+// task, a refusal when an earlier resume left a relay running, else the helper for this claim.
 function startClaimed(run, task, plan, g, claim) {
+  if (claim.busy) return BUSY;
+  if (claim.orphan) return { waiting: `an earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs, so it is not interrupted`, refused: true };
   if (!launchInterrupt(run, task, claim)) return { waiting: readJson(claim.file)?.error || "the interrupt could not start" };
   recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "interrupted" });
   return { resuming: true, was: plan.resume.was, doing: plan.resume.doing, attempt: task.attempt, generation: claim.generation };
@@ -61,21 +63,23 @@ function startClaimed(run, task, plan, g, claim) {
 const BUSY = Object.freeze({ resuming: true, busy: true, note: "another interrupt is already resuming its session, which delivers the unread messages with it, or after its next tool call" });
 
 // For the command line: wait for an interrupt that `steer` started to resume the session, and say
-// how it ended: { resumed: attempt, pid } added, or { failed: error }; unchanged when it is still
-// starting after the wait.
+// how it ended: { resumed: attempt, pid } added, or { failed: error, kept } (`kept` when its session
+// was not stopped: a check refused the resume first); unchanged when it is still starting after the wait.
 function settleInterrupt(run, id, steer) {
   if (!steer?.resuming || steer.busy) return steer;
   const record = awaitInterrupt(path.join(taskDir(run, id), `attempt-${steer.attempt}`), steer.generation);
   const { resuming, ...rest } = steer;
   if (record?.attempt) return { ...rest, resumed: record.attempt, pid: record.pid ?? null };
-  if (record?.released) return { ...rest, failed: record.error || "the resume failed" };
+  if (record?.released) return { ...rest, failed: record.error || "the resume failed", kept: record.stopped !== true };
   return steer;
 }
 
 // The line `send` and `steer` print about an interrupt.
 function interruptLine(steer, what) {
   if (steer.resumed) return `steered: the agent ${steer.doing}, so its session was stopped and resumed in attempt ${steer.resumed} (pid ${steer.pid}) with ${what} as its next prompt`;
-  if (steer.failed) return `not steered: the agent ${steer.doing}, and resuming its session failed: ${steer.failed}; ${what === "this message" ? "the message stays" : "they stay"} unread`;
+  const unread = what === "this message" ? "the message stays" : "they stay";
+  if (steer.failed && steer.kept) return `not steered: its session cannot be resumed (${steer.failed}), so it was not stopped; ${unread} unread`;
+  if (steer.failed) return `not steered: the agent ${steer.doing}, and resuming its session failed: ${steer.failed}; ${unread} unread`;
   if (steer.busy) return `steered: ${steer.note}`;
   return `steered: the agent ${steer.doing}, so its session is being stopped and resumed with ${what} as its next prompt (still starting; see \`status\`)`;
 }
@@ -136,7 +140,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   // a task whose session an interrupt is resuming: the resume, or the hook after it, delivers it.
   const alive = relayAlive(task.pid, task.startedAt, task.outDir);
   const parked = !alive && isParked(run, task);
-  const resuming = !alive && !parked && Boolean(task.pid) && ["live", "done"].includes(interruptState(task.outDir).state);
+  const resuming = !alive && !parked && Boolean(task.pid) && Boolean(interruptHeld(task));
   if (!alive && !parked && !resuming) {
     const row = describe(run, task);
     if (!task.pid) throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
@@ -167,7 +171,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const row = alive ? describe(run, task) : null;
   const plan = alive && (steer || (wakeIdle && row?.idle)) ? planSteer(task, row) : null;
   const g = plan?.stop || plan?.resume ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
-  const claim = plan?.resume ? claimInterrupt(task, { by: actorLabel(g.actor), ...plan.resume }) : null;
+  const claim = plan?.resume ? claimResume(task, "interrupt", { by: actorLabel(g.actor), ...plan.resume }) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
@@ -212,7 +216,7 @@ export function steerQueued(run, id, { caller = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   const alive = relayAlive(task.pid, task.startedAt, task.outDir);
-  const resuming = !alive && Boolean(task.pid) && ["live", "done"].includes(interruptState(task.outDir).state);
+  const resuming = !alive && Boolean(task.pid) && Boolean(interruptHeld(task));
   if (!alive && !resuming) throw new SendError(`task ${id} is not running`, 409);
   const dir = taskDir(run, id);
   const queued = readInbox(dir).filter((m) => !m.read).map((m) => m.id);

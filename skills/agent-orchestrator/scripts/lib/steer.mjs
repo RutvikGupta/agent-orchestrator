@@ -15,76 +15,75 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
-import { summarizeEvents } from "./events.mjs";
+import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
 import { markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { parkEnv } from "./park.mjs";
 import { COMMAND_AGENT } from "./policy.mjs";
-import { interruptFile, interruptState, loadTask, processStarted, relayAlive, taskDir, waitForExit } from "./runs.mjs";
+import { exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 
 // Commands that publish or rewrite history are never stopped part-way: the message waits.
 const PROTECTED = /\b(git\s+(commit|push|rebase|merge|cherry-pick|am|tag|reset|checkout|switch|stash)|gt\s+(submit|sync|restack|modify|create|move|fold|split|squash)|gh\s+(pr\s+(create|merge|edit|ready|close|comment|review)|api\s+(-X|--method))|npm\s+publish|terraform\s+apply|alembic\s+upgrade)\b/;
 const SHELL = /^\/bin\/(ba|z)?sh -l?c /;
 
-// The command a Codex agent is running: a command_execution item that started and has not completed.
-export function pendingCodexCommand(eventsFile) {
-  let text;
+const readText = (file) => {
   try {
-    text = fs.readFileSync(eventsFile, "utf8");
+    return fs.readFileSync(file, "utf8");
   } catch {
     return null;
   }
+};
+
+// Every command a Codex agent is running, oldest first: each command_execution item that started
+// and has not completed, as { id, command, seconds: null }. A turn's end closes them all.
+export function pendingCodexCommands(eventsFile) {
   const open = new Map();
-  for (const line of text.split("\n")) {
-    if (!line.includes("command_execution")) continue;
+  for (const line of (readText(eventsFile) || "").split("\n")) {
+    if (!line.includes("command_execution") && !line.includes('"turn.')) continue;
     let e;
     try {
       e = JSON.parse(line);
     } catch {
       continue;
     }
+    if (e.type === "turn.completed" || e.type === "turn.failed") open.clear();
     if (e.item?.type !== "command_execution") continue;
     if (e.type === "item.started") open.set(e.item.id, e.item.command);
     else if (e.type === "item.completed") open.delete(e.item.id);
   }
-  const [id, command] = [...open].at(-1) || [];
-  return command ? { id, command: String(command), seconds: null } : null;
+  return [...open].filter(([, command]) => command).map(([id, command]) => ({ id, command: String(command), seconds: null }));
 }
 
-// The last Bash call in the attempt's event stream that has no result yet, if it runs in the
-// foreground: { id, command, seconds } (seconds from its latest progress heartbeat, if any).
-export function pendingCommand(eventsFile) {
-  let text;
-  try {
-    text = fs.readFileSync(eventsFile, "utf8");
-  } catch {
-    return null;
-  }
-  let pending = null;
-  const done = new Set();
-  let seconds = null;
-  for (const line of text.split("\n")) {
-    if (!line.includes('"tool_use"') && !line.includes('"tool_result"') && !line.includes('"tool_progress"')) continue;
+// Every foreground Bash call in the attempt's event stream that has no result yet, oldest first,
+// whichever tool call came after it (parallel calls, a sub-agent's): { id, command, seconds }, with
+// seconds from its latest progress heartbeat, if any. A Bash call that runs in the background gets
+// its result at once. The session's `result` ends its turn, and every call of it.
+export function pendingCommands(eventsFile) {
+  const open = new Map();
+  for (const line of (readText(eventsFile) || "").split("\n")) {
+    if (!line.includes('"tool_use"') && !line.includes('"tool_result"') && !line.includes('"tool_progress"') && !line.includes("permission_denied") && !line.startsWith('{"type":"result"')) continue;
     let e;
     try {
       e = JSON.parse(line);
     } catch {
       continue;
     }
-    if (e.type === "tool_progress" && pending && e.parent_tool_use_id === pending.id) seconds = e.elapsed_time_seconds ?? seconds;
+    if (e.type === "result" && !e.parent_tool_use_id) open.clear();
+    if (e.type === "system" && e.subtype === "permission_denied") open.delete(e.tool_use_id); // it never ran
+    if (e.type === "tool_progress" && open.has(e.parent_tool_use_id)) open.get(e.parent_tool_use_id).seconds = e.elapsed_time_seconds ?? open.get(e.parent_tool_use_id).seconds;
     const content = e.message?.content;
     if (!Array.isArray(content)) continue;
     for (const c of content) {
-      if (c?.type === "tool_use") {
-        pending = c;
-        seconds = null;
-      } else if (c?.type === "tool_result") done.add(c.tool_use_id);
+      if (c?.type === "tool_use" && c.name === "Bash" && !c.input?.run_in_background && c.input?.command) open.set(c.id, { id: c.id, command: String(c.input.command), seconds: null });
+      else if (c?.type === "tool_result") open.delete(c.tool_use_id);
     }
   }
-  if (!pending || done.has(pending.id) || pending.name !== "Bash" || pending.input?.run_in_background) return null;
-  const command = String(pending.input?.command || "");
-  return command ? { id: pending.id, command, seconds } : null;
+  return [...open.values()];
 }
+
+// The latest of them, or null.
+export const pendingCodexCommand = (eventsFile) => pendingCodexCommands(eventsFile).at(-1) || null;
+export const pendingCommand = (eventsFile) => pendingCommands(eventsFile).at(-1) || null;
 
 // Every process with its parent and command.
 function processTable() {
@@ -223,18 +222,23 @@ export function commandTree(relayPid, command, rows = processTable()) {
 
 // What steering a running task would do now. `row` is its describe() row, for its idle state and
 // session. One of:
-//   { stop: { command, pids, seconds } }      stop its foreground shell command (stopCommand);
-//   { resume: { was, doing, session, background } }  interrupt its session (startInterrupt);
+//   { stop: { command, pids, seconds } }      stop its foreground shell commands (stopCommand);
+//   { resume: { was, doing, session, background } }  interrupt its session (interrupt helper);
 //   { wait: reason, refused? }                do nothing now: the message waits for the agent;
 //                                             `refused` when an interrupt would do harm.
+// Every shell command of the turn that has no result yet counts, whatever tool call came after it:
+// an interrupt never ends a session while one of them runs. When one is a publishing command, the
+// message waits for it; otherwise each of them is stopped, which returns its call.
 export function planSteer(task, row = null) {
   const events = path.join(task.outDir || "", "events.jsonl");
-  const pending = task.agent === "codex" ? pendingCodexCommand(events) : pendingCommand(events);
-  if (!pending) return planResume(task, row);
-  if (PROTECTED.test(pending.command)) return { wait: `the agent is running \`${shorten(pending.command)}\`, which is not stopped part-way` };
-  const tree = commandTree(task.pid, pending.command);
-  if (!tree) return { wait: "the agent's command could not be matched to a process" };
-  return { stop: { command: pending.command, pids: tree.pids, seconds: pending.seconds } };
+  const pending = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
+  if (!pending.length) return planResume(task, row);
+  const kept = pending.find((p) => PROTECTED.test(p.command));
+  if (kept) return { wait: `the agent is running \`${shorten(kept.command)}\`, which is not stopped part-way` };
+  const found = pending.map((p) => ({ p, tree: commandTree(task.pid, p.command) })).filter((x) => x.tree);
+  if (!found.length) return { wait: "the agent's command could not be matched to a process" };
+  const last = found.at(-1).p;
+  return { stop: { command: last.command, pids: [...new Set(found.flatMap((x) => x.tree.pids))], seconds: last.seconds } };
 }
 
 // Whether a task that is not in a shell command can be interrupted: { resume } or a refusal. `was`
@@ -250,11 +254,15 @@ export function planResume(task, row = null) {
   // and could not resume.
   const argv = Array.isArray(task.argv) ? task.argv : [];
   if (task.agent === "codex" && argv.includes("--network-access") && !argv.includes("--sandbox") && !argv.includes("--read-only")) return refused("its Codex relay cannot resume a sandboxed session with the network on");
-  const summary = summarizeEvents(task.agent, path.join(task.outDir || "", "events.jsonl"), task.cd);
+  const events = path.join(task.outDir || "", "events.jsonl");
+  const summary = summarizeEvents(task.agent, events, task.cd);
   const session = row?.session || summary.sessionId || null;
   if (!session) return refused("its session id is not known yet");
+  // Stopping the session also stops what it runs in the background: never a publishing command.
+  const kept = task.agent === "claude" ? commandRuns("claude", events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
+  if (kept) return { wait: `the agent's background command \`${shorten(kept.cmd)}\` is not stopped part-way, so it is not interrupted; it reads the message after its current step`, refused: true };
   if (row?.idle) return { resume: { was: "idle", doing: `ended its turn and waited on its own background ${row.idle.background ? `command \`${shorten(row.idle.background)}\`` : "work"}`, session, background: row.idle.background || null } };
-  const tool = task.agent === "claude" ? summary.openTool?.name : null;
+  const tool = task.agent === "claude" ? openToolNow(summary)?.name : null;
   return { resume: { was: "mid-turn", doing: tool ? `was in a ${tool} tool call, not in a shell command` : "was not in a shell command (in a model call, or between steps)", session, background: null } };
 }
 
@@ -279,19 +287,23 @@ export function shorten(command, width = 80) {
 
 // Interrupts. An interrupt stops a task's session and resumes the same session, as `start ... --
 // --session ID` does, with the unread messages as its next prompt. It keeps the task's agent, tier,
-// mode, worktree and brief; the new attempt's reason is `interrupt`, which is neither a counted
-// failure nor a rework round (runs.mjs, attemptsOf; report.mjs, reportAttempts). Stopping the session
-// also stops the background commands the agent started, and the resumed prompt says so.
+// mode, worktree and brief, and every relay option of the attempt it replaces; the new attempt's
+// reason is `interrupt`, which is neither a counted failure nor a rework round (runs.mjs,
+// attemptsOf; report.mjs, reportAttempts). Stopping the session also stops the background commands
+// the agent started, and the resumed prompt says so.
 //
-// The sender (`send --steer`, `steer`, the dashboard) claims the interrupted attempt's folder first
-// (claimInterrupt; runs.mjs, interruptState), so two senders never start two sessions: the one that
-// loses only adds its message, which the winner's resume, or the hook after its next tool call,
-// delivers. The winner starts a detached helper, this file's `resume`, in the environment the task
-// was started from (park.mjs, parkEnv), so the resumed attempt reports to the same parent at the
-// same depth whoever interrupted it. The helper takes the attempt's finish notice first (none goes
-// out: the session goes on), stops the relay, writes the brief, and resumes the session through
-// startTask with the claim, which refuses when a `stop` or `close` came meanwhile. A resume that fails
-// releases the claim with its error and sends the stopped attempt's finish notice after all.
+// Every resume of a task claims the attempt it replaces first (runs.mjs, resumeClaim): a `start` by
+// hand, a retry or a rework through startTask (resumeLock), and an interrupt here. So two of them
+// never both start the next attempt: an interrupt that loses only adds its message, which the
+// winner's resume, or the hook after its next tool call, delivers. The interrupt's sender (`send
+// --steer`, `steer`, the dashboard) claims, then starts a detached helper, this file's `resume`, in
+// the environment the task was started from (park.mjs, parkEnv), so the resumed attempt reports to
+// the same parent at the same depth whoever interrupted it. The helper checks the resume first, with
+// every check `start` makes, and stops nothing when one fails. Then it takes the attempt's finish
+// notice (none goes out: the session goes on), stops the relay, and resumes the session through
+// startTask with the claim. A `stop` or `close` meanwhile wins (stopResume): the helper and startTask
+// start nothing once they see it. A resume that fails after the relay stopped releases the claim with
+// its error and sends the stopped attempt's finish notice after all.
 
 const SCRIPT = fileURLToPath(import.meta.url);
 export const INTERRUPT_BRIEF = "interrupt-resume.md";
@@ -310,25 +322,114 @@ function createExclusive(file, value) {
   } catch (error) {
     if (error.code === "EEXIST") return false;
     throw error;
-  }
-  finally {
+  } finally {
     fs.rmSync(tmp, { force: true });
   }
 }
 
-// Claim the task's current attempt for an interrupt: { generation, file, record } when this process
-// won it, or { busy: true } when another interrupt holds it. `fields` are recorded in the claim.
-export function claimInterrupt(task, fields = {}) {
+// Whether the relay a claim recorded ({ pid, started }) still runs: its PID, with the same start time.
+function relayRunning(relay) {
+  if (!relay?.pid || !exists(relay.pid)) return false;
+  return !relay.started || processStarted(relay.pid) === relay.started;
+}
+
+// Stop a relay by its PID, with its process group.
+function stopRelay(pid) {
+  try {
+    process.kill(-pid, "SIGTERM"); // detached: the relay leads its own process group
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+}
+
+// Claim the attempt `task` is in for a resume of kind `kind` ("start", "retry" or "interrupt"):
+// { generation, file, record } when this process won it; { busy } (the current claim) when a resume
+// holds it or has saved the next attempt; { orphan: pid } when a resume died after starting a relay
+// that still runs. The record names this process as its owner, the attempt it replaces, and the
+// task's close and stop as it saw them (`since`), and holds `fields`.
+export function claimResume(task, kind, fields = {}) {
   const dir = task.outDir;
   for (let tries = 0; tries < 5; tries++) {
-    const current = interruptState(dir);
-    if (current.state === "live" || current.state === "done") return { busy: true };
+    const current = resumeClaim(dir);
+    if (current.state === "live" || current.state === "done") return { busy: current };
+    if (current.state === "abandoned" && relayRunning(current.record?.relay)) return { orphan: current.record.relay.pid };
     const generation = current.generation + 1;
-    const record = { claimedAt: new Date().toISOString(), owner: { pid: process.pid, started: processStarted(process.pid) }, interrupted: task.attempt, ...fields };
-    const file = interruptFile(dir, generation);
+    const record = {
+      kind, claimedAt: new Date().toISOString(), owner: { pid: process.pid, started: processStarted(process.pid) },
+      replaces: task.attempt, since: { closedAt: task.closedAt || null, stoppedAt: task.stoppedAt || null }, ...fields,
+    };
+    const file = resumeFile(dir, generation);
     if (createExclusive(file, record)) return { generation, file, record };
   }
-  return { busy: true };
+  return { busy: resumeClaim(dir) };
+}
+
+// What startTask uses a claim through (as a park claim): `since`; spawned(task), which records the
+// relay as soon as it starts; release(error), which gives the claim back; done(task), which records
+// the saved attempt.
+function claimHandle(claim) {
+  let record = claim.record;
+  const save = (fields) => writeJson(claim.file, (record = { ...(readJson(claim.file) || record), ...fields }));
+  return {
+    since: record.since,
+    save,
+    get record() { return record; },
+    spawned: (planned) => save({ relay: { pid: planned.pid, started: processStarted(planned.pid) } }),
+    release: (error = null) => save({ released: true, releasedAt: new Date().toISOString(), ...(error ? { error } : {}) }),
+    done: (saved) => save({ attempt: saved.attempt, pid: saved.pid, resumedAt: saved.startedAt }),
+  };
+}
+
+// For startTask: claim the attempt `task` is in before a resume writes anything. Null when the task
+// has no attempt folder; { refused } when another resume holds it; else the claim's handle.
+export function resumeLock(task, kind = "start") {
+  if (!task?.attempt || !task.outDir || !fs.existsSync(task.outDir)) return null;
+  const claim = claimResume(task, kind);
+  if (claim.orphan) return { refused: `task ${shownName(task)}'s earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs; stop that process before you resume the task` };
+  if (claim.busy) {
+    const r = claim.busy.record;
+    return { refused: r?.attempt ? `task ${shownName(task)} was resumed meanwhile, in attempt ${r.attempt}; run \`status\` to see it` : `task ${shownName(task)} is being resumed right now (${r?.kind === "interrupt" ? "an interrupt is delivering a message" : `by \`${r?.kind || "start"}\``}); run \`status\` to see its new attempt` };
+  }
+  return claimHandle(claim);
+}
+
+// For `stop` and `close`: a resume that holds the task between its two relays. `mark` records the
+// stop or close on the task first, so that a resume that has not started its relay starts nothing
+// (startTask finds the mark) and one that has keeps it. Then this stops the relay the task still
+// runs, if any, and the one the resume started, and waits up to 20 seconds for the resume to end.
+// Null when no resume holds the task: the caller goes on as before. { task } when the resume saved
+// an attempt whose relay runs, which the caller then stops; { text } when nothing runs any more.
+export function stopResume(run, task, mark) {
+  const held = resumeClaim(task.outDir);
+  if (held.state === "done") {
+    const latest = loadTask(run, task.id);
+    return latest && latest.attempt !== task.attempt && relayAlive(latest.pid, null, latest.outDir) ? { task: latest } : null;
+  }
+  if (held.state !== "live") return null;
+  mark();
+  const stopped = [];
+  if (relayAlive(task.pid, null, task.outDir)) {
+    stopRelay(task.pid);
+    stopped.push(task.pid);
+  }
+  const until = Date.now() + EXIT_MS;
+  for (;;) {
+    const claim = resumeClaim(task.outDir);
+    const relay = claim.record?.relay;
+    if (relay?.pid && !stopped.includes(relay.pid) && relayRunning(relay)) {
+      stopRelay(relay.pid);
+      stopped.push(relay.pid);
+    }
+    if (claim.state !== "live" || Date.now() >= until) {
+      const latest = loadTask(run, task.id) || task;
+      if (claim.record?.attempt && relayAlive(latest.pid, null, latest.outDir)) return { task: latest };
+      const what = claim.record?.kind === "interrupt" ? "an interrupt was resuming its session" : `\`${claim.record?.kind || "start"}\` was resuming it`;
+      return { text: `stopped ${shownName(task)} while ${what}${stopped.length ? ` (pid ${stopped.join(", ")})` : ""}; it starts no new attempt${claim.state === "live" ? ", though that resume has not ended yet" : ""}` };
+    }
+    spawnSync("sleep", ["0.1"]);
+  }
 }
 
 // Start the helper that resumes the claimed task, detached, logging to the attempt's interrupt.log.
@@ -355,39 +456,43 @@ export function launchInterrupt(run, task, claim) {
   }
 }
 
-// Wait up to `ms` for the interrupt claimed at `generation` in attempt folder `dir` to end: the claim
+// Wait up to `ms` for the resume claimed at `generation` in attempt folder `dir` to end: the claim
 // record once the resumed attempt is saved or the claim was released, else null.
 export function awaitInterrupt(dir, generation, ms = 45000) {
   const until = Date.now() + ms;
   for (;;) {
-    const record = readJson(interruptFile(dir, generation));
+    const record = readJson(resumeFile(dir, generation));
     if (record?.attempt || record?.released) return record;
-    if (interruptState(dir).state === "abandoned" || Date.now() >= until) return null;
+    if (resumeClaim(dir).state === "abandoned" || Date.now() >= until) return null;
     spawnSync("sleep", ["0.1"]);
   }
 }
 
-// The brief that resumes an interrupted session: why it was stopped, what that stopped, and every
-// message, in full.
-export function interruptBrief(run, task, claim, messages) {
-  const was = claim.was === "idle"
-    ? `You had ended your turn and were waiting on your own background ${claim.background ? `command \`${shorten(claim.background, 200)}\`` : "work"}, so nothing would have reached you until that ended.`
-    : "You were not in a shell command (you were in a model call or another tool), so nothing would have reached you before your next tool call.";
-  const lines = [
-    "## You were interrupted to deliver a message",
-    "",
-    `Your session was stopped and resumed so that ${messages.length === 1 ? "the message below reaches" : "the messages below reach"} you now. ${was}`,
-    "",
-    `- Stopping the session also stopped every command you had started in the background${claim.background ? `, including \`${shorten(claim.background, 200)}\`` : ""}. Start again what you still need, in the background, and wait for it with \`node ${CLI_PATH} nap <duration>\`, \`wait\` or \`pr-watch\`, which return as soon as a message arrives.`,
-    "- A tool call that was running when the session stopped was cut off: check what it did before you repeat it.",
-    "- Your task and your brief are unchanged. Handle the message first, then carry on where you left off, and finish as your brief says, with its final report.",
-  ];
+// The brief that resumes an interrupted session: why it was stopped and what that stopped. It holds
+// no data: what the session was doing, and the messages, follow as data (interruptData).
+export const interruptBrief = () => [
+  "## You were interrupted to deliver a message",
+  "",
+  "Your session was stopped and resumed so that the messages sent to you, below, reach you now.",
+  "",
+  `- Stopping the session also stopped every command you had started in the background. Start again what you still need, in the background, and wait for it with \`node ${CLI_PATH} nap <duration>\`, \`wait\` or \`pr-watch\`, which return as soon as a message arrives.`,
+  "- A tool call that was running when the session stopped was cut off: check what it did before you repeat it.",
+  "- Your task and your brief are unchanged. Handle the messages first, then carry on where you left off, and finish as your brief says, with its final report.",
+  "",
+].join("\n");
+
+// What the session was doing when it was stopped, and every message, in full. Passed to startTask as
+// data, so no text of a message is ever taken for part of the brief.
+export function interruptData(run, task, claim, messages) {
+  const lines = [claim.was === "idle"
+    ? `You had ended your turn and were waiting on your own background ${claim.background ? `command \`${shorten(claim.background, 200)}\`` : "work"}, so nothing would have reached you until that ended. It was stopped with the session.`
+    : "You were not in a shell command (you were in a model call or another tool), so nothing would have reached you before your next tool call."];
   if (!messages.length) lines.push("", `No message is unread any more; check with \`node ${CLI_PATH} inbox ${run.id} ${task.id} --ack\`.`);
   messages.forEach((m, i) => {
     lines.push("", `### ${messages.length > 1 ? `${i + 1}. ` : ""}${senderLabel(m)} (${m.time}), message ${m.id}`, "", m.text.trim());
     if (m.from === "user") lines.push("", replyHint(run.id, task.id));
   });
-  return `${lines.join("\n")}\n`;
+  return lines.join("\n");
 }
 
 // The helper: resume the task whose attempt `n` the claim `generation` holds. Run in the task's own
@@ -396,15 +501,37 @@ export async function runInterrupt(runDir, id, n, generation) {
   const run = { ...readJson(path.join(runDir, "run.json")), dir: runDir };
   const task = loadTask(run, id);
   const dir = path.join(taskDir(run, id), `attempt-${n}`);
-  const file = interruptFile(dir, generation);
-  let record = readJson(file);
-  if (!task || task.attempt !== n || !record || record.released || record.attempt || interruptState(dir).generation !== generation) return null;
+  const file = resumeFile(dir, generation);
+  const first = readJson(file);
+  if (!task || task.attempt !== n || first?.kind !== "interrupt" || first.released || first.attempt || resumeClaim(dir).generation !== generation) return null;
   // From here this process owns the claim: the sender may exit.
-  record = { ...record, owner: { pid: process.pid, started: processStarted(process.pid) }, helper: process.pid };
-  writeJson(file, record);
-  const save = (fields) => writeJson(file, (record = { ...(readJson(file) || record), ...fields }));
-  const fail = (error) => (save({ released: true, releasedAt: new Date().toISOString(), error }), record);
+  const claim = claimHandle({ file, record: { ...first, owner: { pid: process.pid, started: processStarted(process.pid) }, helper: process.pid } });
+  claim.save({});
+  const fail = (error, fields = {}) => (claim.save({ released: true, releasedAt: new Date().toISOString(), error, ...fields }), claim.record);
+  // A stop or close that came since the claim (stopResume) wins.
+  const ended = () => {
+    const latest = loadTask(run, id);
+    return !latest || latest.attempt !== n || (latest.stoppedAt || null) !== (first.since?.stoppedAt ?? null) || (latest.closedAt || null) !== (first.since?.closedAt ?? null);
+  };
   const { NOTICE_FILE, sendFinishNotice } = await import("./finish-notice.mjs");
+  const { StartRefused, startTask } = await import("./commands/start.mjs");
+  const brief = path.join(dir, INTERRUPT_BRIEF);
+  const args = (check, briefData = null) => ({
+    _: [run.dir, id], agent: task.agent, brief, briefData, passthrough: ["--session", first.session],
+    // The relay's options, kept; --force: the task holds its slot in the parallel limit already;
+    // --no-escalate: an interrupt keeps the tier.
+    relayFrom: Array.isArray(task.argv) ? task.argv : [], force: true, "no-escalate": true,
+    ...(task.readOnly ? { "read-only": true } : {}), parkClaim: claim, check,
+  });
+  // Every check a start makes, before anything stops: a resume that cannot start stops nothing.
+  try {
+    fs.writeFileSync(brief, interruptBrief());
+    startTask(args(true), { attemptReason: "interrupt" });
+  } catch (error) {
+    if (!(error instanceof StartRefused)) throw error;
+    return fail(error.message, { stopped: false });
+  }
+  if (ended()) return fail("the task was stopped or closed before its session was stopped", { stopped: false });
   // The stopped attempt sends no finish notice: its session goes on in the next attempt. Taken
   // before the relay stops, so its finish watcher finds the notice taken.
   const notice = path.join(dir, NOTICE_FILE);
@@ -412,7 +539,7 @@ export async function runInterrupt(runDir, id, n, generation) {
     fs.writeFileSync(notice, `${JSON.stringify({ attempt: n, claimedAt: new Date().toISOString(), skipped: "interrupted to deliver a message: the next attempt resumes the same session" })}\n`, { flag: "wx" });
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
-    return fail("the attempt ended before it could be interrupted");
+    return fail("the attempt ended before it could be interrupted", { stopped: false });
   }
   // A resume that fails after the relay stopped: the attempt has ended, so its parent is told after all.
   const giveNotice = () => {
@@ -421,53 +548,34 @@ export async function runInterrupt(runDir, id, n, generation) {
   };
   // An attempt that finished on its own meanwhile is not resumed: its result stands.
   if (!relayAlive(task.pid, null, task.outDir)) {
-    fail("the attempt finished before it could be interrupted");
+    fail("the attempt finished before it could be interrupted", { stopped: false });
     giveNotice();
-    return record;
+    return claim.record;
   }
-  try {
-    process.kill(-task.pid, "SIGTERM"); // detached: the relay leads its own process group
-  } catch {
-    try {
-      process.kill(task.pid, "SIGTERM");
-    } catch {}
-  }
+  stopRelay(task.pid);
+  claim.save({ stopped: true });
   if (!waitForExit(task.pid, EXIT_MS, task.outDir)) {
     fs.rmSync(notice, { force: true });
     return fail(`its relay (pid ${task.pid}) did not exit within ${EXIT_MS / 1000} seconds of SIGTERM`);
   }
   const inbox = taskDir(run, id);
   const messages = readInbox(inbox).filter((m) => !m.read);
-  const brief = path.join(dir, INTERRUPT_BRIEF);
-  const { StartRefused, startTask } = await import("./commands/start.mjs");
-  const timeoutAt = Array.isArray(task.argv) ? task.argv.indexOf("--timeout") : -1;
   let started;
   try {
-    fs.writeFileSync(brief, interruptBrief(run, task, record, messages));
-    // startTask takes the claim as a park resume's: it refuses when a stop or close came meanwhile,
-    // and records the relay as soon as it starts. --force: the task holds its slot in the parallel
-    // limit already. --no-escalate: an interrupt keeps the tier.
-    ({ task: started } = startTask({
-      _: [run.dir, id], agent: task.agent, brief, passthrough: ["--session", record.session],
-      force: true, "no-escalate": true,
-      ...(task.readOnly ? { "read-only": true } : {}),
-      ...(timeoutAt >= 0 && task.argv[timeoutAt + 1] ? { timeout: task.argv[timeoutAt + 1] } : {}),
-      parkClaim: {
-        spawned: (planned) => save({ relay: { pid: planned.pid, started: processStarted(planned.pid) } }),
-        release: () => {},
-        done: (saved) => save({ attempt: saved.attempt, pid: saved.pid, resumedAt: saved.startedAt }),
-      },
-    }, { attemptReason: "interrupt" }));
+    if (ended()) throw new StartRefused(`task ${id} was stopped or closed while this resume was starting, so it started nothing`);
+    // startTask takes the claim as a park resume's: it refuses when a stop or close came since the
+    // claim, and records the relay as soon as it starts.
+    ({ task: started } = startTask(args(false, interruptData(run, task, first, messages)), { attemptReason: "interrupt" }));
   } catch (error) {
     fail(error instanceof StartRefused ? error.message : `the resume failed: ${error.message}`);
     giveNotice();
     if (!(error instanceof StartRefused)) throw error;
-    return record;
+    return claim.record;
   }
   // Only the messages the brief holds were delivered.
   markRead(inbox, messages.map((m) => m.id), { attempt: started.attempt });
-  save({ delivered: messages.map((m) => m.id) });
-  return record;
+  claim.save({ delivered: messages.map((m) => m.id) });
+  return claim.record;
 }
 
 const real = (file) => {
