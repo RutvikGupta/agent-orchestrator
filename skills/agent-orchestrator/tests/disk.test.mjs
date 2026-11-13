@@ -150,3 +150,28 @@ test('the collection that worktree creation runs on a full disk stops at AGENT_O
   const bad = await f.command(['worktree', target.id, 'third', '--no-prep'], { code: 2, env: { ...full, AGENT_ORCH_COLLECT_TIMEOUT: 'soon' } });
   assert.match(bad.stderr, /bad duration "soon"/);
 });
+
+test('the collection deadline also bounds a worktree in hand: a teardown is cut at the time left, and nothing is removed after the deadline', async (t) => {
+  const f = await fixture(t);
+  const ended = await endedRun(f, 'ended');
+  // A teardown that would run for most of a minute.
+  const finished = path.join(f.root, 'teardown-finished');
+  const file = f.taskFile(ended.run, 'old'), record = readJson(file), old = new Date(record.closedAt);
+  writeJson(file, { ...record, worktree: { ...record.worktree, prep: { teardown: [`sleep 40; touch ${finished}`] } } });
+  fs.utimesSync(file, old, old);
+  const target = await f.newRun('target');
+  // The command helper stops a command after 15 seconds, so one that waited for the teardown fails here.
+  const refused = await f.command(['worktree', target.id, 'first', '--no-prep'], { code: 1, env: { AGENT_ORCH_DISK_FREE_BYTES: '9GB', AGENT_ORCH_COLLECT_TIMEOUT: '3s' } });
+  assert.match(refused.stderr, /orch: auto gc stopped at its limit of 3s \(AGENT_ORCH_COLLECT_TIMEOUT\)/);
+  assert.match(refused.stderr, /Automatic collection removed 0 worktrees first/);
+  try {
+    assert.equal(fs.existsSync(finished), false, 'the teardown ran past the deadline');
+    assert.equal(fs.existsSync(ended.wt.path), true, 'a worktree was removed after the deadline');
+    assert.ok(readJson(file).worktree, 'the task lost its worktree record');
+    await assertNotCreated(f, target, 'first');
+  } finally {
+    // The fixture's cleanup closes the run, which would wait for this teardown.
+    const now = readJson(file);
+    if (now.worktree) writeJson(file, { ...now, worktree: { ...now.worktree, prep: { teardown: [] } } });
+  }
+});

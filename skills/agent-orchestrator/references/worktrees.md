@@ -67,9 +67,13 @@ Every worktree is created after one check of the free space on the volume that w
   space, the minimum, and the commands that free space: `gc --dry-run`, `gc`,
   `close RUN TASK...`, and `git worktree remove` for a worktree made by hand. `dispatch` reports it
   as that task's refusal.
-- That collection stops after `AGENT_ORCH_COLLECT_TIMEOUT` (default `60s`). It finishes the
-  worktree in hand, leaves the runs it has not reached, and says how many. The disk is then judged
-  on what was freed. `gc` and the dashboard's own pass have no such limit.
+- That collection stops after `AGENT_ORCH_COLLECT_TIMEOUT` (default `60s`). Each slow step of the
+  worktree in hand (a `teardown` command, a `git` check, measuring) gets only the time left. A
+  worktree whose step runs out of time is kept, with "not removed: the collection ran out of
+  time", and no removal starts after the limit. A removal already started is allowed to finish.
+  Worktrees and runs not reached are left alone ("not checked: the collection ran out of time"),
+  and the message says how many runs. The disk is then judged on what was freed. `gc` and the
+  dashboard's own pass have no such limit.
 - No option bypasses the check. Only the setting changes it.
 - The disk counts as low below twice the minimum. The dashboard's header then shows the free space
   as a warning, and the automatic collection collects sooner (`references/dashboard.md`).
@@ -119,7 +123,9 @@ with the reason:
   folder moved or swapped for a link meanwhile is kept, with "worktree folder changed while it
   was being collected".
 
-A `git` or `du` check that runs longer than 30 seconds counts as failed, which keeps the worktree.
+A `git` check that runs longer than 30 seconds counts as failed, which keeps the worktree.
+Measuring the folder with `du` is not a safety check: when it fails or takes longer than 30
+seconds, the size is reported as unknown and the worktree is removed all the same.
 
 Before it removes a worktree, it runs the recipe's `teardown` there. A failed `teardown` is
 reported and does not keep the worktree. A `teardown` that leaves tracked changes does.
@@ -148,8 +154,9 @@ $ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
     nested run, every launcher up its chain must have ended.
   - When any of this cannot be read, the run is kept, as if alive: `ps` or `lsof` fails, a
     recorded host root is missing or unreadable, a session file of a live process cannot be read
-    or parsed, a Codex date folder cannot be listed, no process was recorded, or the parent run
-    is gone.
+    or parsed, a Codex date folder cannot be listed, `lsof` ends with an error (its list may be
+    cut short), a rollout's path does not resolve, no process was recorded, or the parent run is
+    gone.
   - A run whose session is alive stays that session's to collect. A run launched from a terminal
     never counts as ended.
 - A run is collected only when no task in it runs or is parked and it has had no activity for 24

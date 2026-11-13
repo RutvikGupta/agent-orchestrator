@@ -719,12 +719,12 @@ test('session evidence that cannot be read in full is not an ended session: a co
   }
 });
 
-test('one lsof serves a whole collection pass, however many Codex sessions it judges', async (t) => {
+test('one lsof listing serves a whole collection pass, however many Codex sessions it judges', async (t) => {
   const f = await fixture(t);
   const day = path.join(f.codex, 'sessions', '2026', '11', '13');
   fs.mkdirSync(day, { recursive: true });
   const runs = [];
-  for (const n of [1, 2, 3]) {
+  for (const n of [1, 2, 3, 4, 5, 6]) {
     fs.writeFileSync(path.join(day, `rollout-2026-11-13T00-00-0${n}-many-${n}.jsonl`), '');
     runs.push(await idleLaunched(f, `many-${n}`, { agent: 'codex', sessionId: `many-${n}`, pid: 99999999 }));
   }
@@ -736,7 +736,35 @@ test('one lsof serves a whole collection pass, however many Codex sessions it ju
   fs.writeFileSync(path.join(bin, 'lsof'), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${real}" "$@"\n`, { mode: 0o755 });
   const report = await f.json(['gc', '--dry-run'], { env: { ...B, PATH: `${bin}:${f.env.PATH}` } });
   for (const r of runs) assert.equal(report.runs.find((x) => x.run === r.run.id).sessionEnded, 'its process (pid 99999999) is gone');
-  // Calls that ask which files are open (not the ones that ask for working directories).
+  // Calls that ask which files are open (not the ones that ask for working directories). The listing
+  // is asked for again only when a process went while it was read, three times at most: never once
+  // per session.
   const probes = fs.readFileSync(log, 'utf8').split('\n').filter((line) => line && !line.includes('-d cwd'));
-  assert.equal(probes.length, 1, probes.join('\n'));
+  assert.ok(probes.length >= 1 && probes.length <= 3, `${probes.length} lsof calls for six sessions:\n${probes.join('\n')}`);
+});
+
+test('Codex evidence that is not known to be complete is not an ended session: an lsof that exits with an error, a rollout whose path does not resolve', async (t) => {
+  const f = await fixture(t);
+  const day = path.join(f.codex, 'sessions', '2026', '11', '13');
+  fs.mkdirSync(day, { recursive: true });
+  // An lsof listing that names every process asked for but ends with an error, as one cut short does.
+  const cut = await idleLaunched(f, 'cut', { agent: 'codex', sessionId: 'cut-short', pid: 99999999 });
+  fs.writeFileSync(path.join(day, 'rollout-2026-11-13T00-00-00-cut-short.jsonl'), '');
+  assert.equal(await gcReason(f, cut.run), 'ended: its process (pid 99999999) is gone');
+  const bin = path.join(f.root, 'partial-lsof');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'lsof'), '#!/bin/sh\nfor a in "$@"; do last="$a"; done\necho "$last" | tr "," "\\n" | sed "s/^/p/"\nexit 1\n', { mode: 0o755 });
+  assert.equal(await gcReason(f, cut.run, { ...B, PATH: `${bin}:${f.env.PATH}` }), 'ownership refused');
+  // A rollout that is a link to nowhere cannot be matched with the files processes hold open.
+  const dangling = await idleLaunched(f, 'dangling', { agent: 'codex', sessionId: 'dangling-rollout', pid: 99999999 });
+  const link = path.join(day, 'rollout-2026-11-13T00-00-01-dangling-rollout.jsonl');
+  fs.symlinkSync(path.join(f.root, 'no-such-rollout'), link);
+  try {
+    assert.equal(await gcReason(f, dangling.run), 'ownership refused');
+    assert.equal((await f.json(['gc'], { env: B })).runs.find((r) => r.run === dangling.run.id).reason, 'ownership refused');
+    assert.equal(fs.existsSync(dangling.wt.path), true);
+  } finally {
+    // The fixture's own cleanup reads the sessions folder, and stops at a link to nowhere.
+    fs.rmSync(link, { force: true });
+  }
 });

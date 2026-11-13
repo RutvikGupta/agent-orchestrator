@@ -9,15 +9,23 @@ import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
 import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, resetHostView, sessionsEnded, sinceLastUse } from './ownership.mjs';
 import { isParked, listRuns, loadTask, relayAlive, saveTask } from './runs.mjs';
 import { die, parseDuration, readJson } from './util.mjs';
-import { teardownWorktree } from './worktree-prep.mjs';
+import { runPrepCommand, teardownWorktree } from './worktree-prep.mjs';
 
 // A check that hangs (a huge or damaged worktree, a stuck filesystem) must not hold up collection, or
-// the worktree creation that waits for it: a git or du call that runs past its limit counts as failed,
-// which keeps the worktree. Removing a folder gets longer, since stopping it halfway helps nobody.
+// the worktree creation that waits for it. A git check that runs past its limit counts as failed,
+// which keeps the worktree. Measuring with du is no safety check: past its limit the size is
+// unknown, and the worktree is still removed. Removing a folder gets longer, and no deadline cuts
+// it, since stopping it halfway helps nobody.
 const CHECK_TIMEOUT_MS = 30_000, REMOVE_TIMEOUT_MS = 5 * 60_000;
-const git = (cwd, args, timeout = CHECK_TIMEOUT_MS) => spawnSync('git', ['-C', cwd, ...args], {
-  encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, timeout,
-});
+// The deadline of the collection pass in hand (collectWorktrees sets it): each check gets at most
+// the time left until then, and none starts after it.
+let passDeadline = Infinity;
+const timeLeft = (limit) => Math.min(limit, passDeadline - Date.now());
+const git = (cwd, args, timeout = null) => {
+  const limit = timeout ?? timeLeft(CHECK_TIMEOUT_MS);
+  if (limit <= 0) return { status: null, stdout: '', stderr: 'the collection ran out of time' };
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, timeout: limit });
+};
 const value = (cwd, args) => { const r = git(cwd, args); return r.status === 0 ? r.stdout.trim() : null; };
 const samePath = (a, b) => {
   try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return false; }
@@ -158,7 +166,9 @@ export function worktreeSafety(run, task, { allowReadClosed = false, insideRun =
 
 // du measures allocated blocks and does not follow preparation symlinks outside the worktree.
 function diskBytes(wt) {
-  const r = spawnSync('du', ['-sk', wt], { encoding: 'utf8', timeout: CHECK_TIMEOUT_MS });
+  const limit = timeLeft(CHECK_TIMEOUT_MS);
+  if (limit <= 0) return null;
+  const r = spawnSync('du', ['-sk', wt], { encoding: 'utf8', timeout: limit });
   const kb = Number.parseInt(r.stdout, 10);
   return r.status === 0 && Number.isFinite(kb) ? kb * 1024 : null;
 }
@@ -169,15 +179,48 @@ function diskBytes(wt) {
 // `ended`: the caller may act on the run because its launching sessions have ended (gc).
 // `insideRun`: keep a worktree outside the run's folder (gc). `auto`: the automatic collection made
 // the change, so it records that, and the run's owner gets a notice even when the caller owns it.
-// `deadline`: a time (ms) after which no further worktree is judged; the rest are kept, unjudged.
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false, insideRun = false, auto = false, deadline = Infinity } = {}) {
+// `deadline`: a time (ms) that bounds the pass. Every slow step of a worktree (its teardown
+// commands, the git checks, measuring) gets at most the time left; a worktree whose step runs out of
+// time is kept, no removal starts after the deadline, and the worktrees not reached are kept,
+// unjudged. `timedOut` is then set in the report.
+export async function collectWorktrees(run, options = {}) {
+  const previous = passDeadline;
+  passDeadline = options.deadline ?? Infinity;
+  try {
+    return await collectWithin(run, options);
+  } finally {
+    passDeadline = previous;
+  }
+}
+
+// A recipe's teardown commands, each with at most the time left until the pass's deadline, as
+// teardownWorktree runs them without one.
+async function boundedTeardown(run, task) {
+  const prep = task.worktree.prep;
+  const { ORCH_PORT: _inherited, ...inherited } = process.env;
+  const env = { ...inherited, ORCH_WORKTREE: task.worktree.path, ORCH_REPO: run.repo, ORCH_RUN: run.id, ORCH_TASK: task.id, ...(prep?.port ? { ORCH_PORT: String(prep.port) } : {}) };
+  const results = [];
+  for (const command of prep?.teardown || []) {
+    const left = passDeadline - Date.now();
+    if (left <= 0) break;
+    results.push(await runPrepCommand(command, task.worktree.path, env, Math.min(600_000, left)));
+  }
+  return results;
+}
+
+async function collectWithin(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false, insideRun = false, auto = false, deadline = Infinity } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
+  const late = () => Date.now() >= deadline;
+  // Out of time: keep the worktree in hand with why, and mark the pass as stopped.
+  const stop = (entry, reason) => { report.kept.push({ ...entry, reason }); report.timedOut = true; };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
-    if (Date.now() >= deadline) { report.kept.push({ ...entry, reason: OUT_OF_TIME }); report.timedOut = true; continue; }
+    if (late()) { stop(entry, OUT_OF_TIME); continue; }
     let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed, insideRun });
+    // A check cut by the deadline says nothing of the worktree.
+    if (late()) { stop(entry, OUT_OF_TIME); continue; }
     if (reason) {
       report.kept.push({ ...entry, reason });
       if (reclaimKept && !dryRun && fs.existsSync(entry.path) && !isParked(run, task) && !relayAlive(task.pid, task.startedAt, task.outDir)) reclaimTask(run, task);
@@ -191,19 +234,25 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id], ended });
       if (fs.existsSync(entry.path)) {
         reclaimTask(run, task);
-        const teardown = await teardownWorktree(run, task);
+        const teardown = await (deadline === Infinity ? teardownWorktree(run, task) : boundedTeardown(run, task));
         entry.teardownFailures = teardown.filter((r) => r.exitCode !== 0);
       }
+      if (late()) { stop(entry, STOPPED); continue; }
       // Teardown can modify tracked files, and another command may have reopened the task.
       task = loadTask(run, id);
       reason = task?.worktree ? worktreeSafety(run, task, { allowReadClosed, insideRun }) : 'task worktree changed';
+      if (late()) { stop(entry, STOPPED); continue; }
       if (reason || task.worktree.path !== entry.path) {
         report.kept.push({ ...entry, reason: reason || 'task worktree changed' }); continue;
       }
     }
     const missing = !fs.existsSync(entry.path);
+    // The size is for the report only: one that cannot be measured in time is unknown (null), and
+    // the worktree is removed all the same.
     const bytes = missing ? 0 : diskBytes(entry.path);
     if (!dryRun) {
+      // No removal starts after the deadline.
+      if (late()) { stop(entry, STOPPED); continue; }
       // The last step before removal: the pathname must still lead to the folder that was checked
       // (the same real path, device and inode), inside the run folder for gc, and removal then names
       // that real path, so a parent swapped for a link during the steps above is not followed. A
@@ -230,8 +279,10 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
   return report;
 }
 
-// The reason a worktree is kept when a collection pass reached its deadline before judging it.
+// The reasons a worktree is kept when a collection pass reaches its deadline: before the worktree
+// was judged, or while it was being handled, before its removal began.
 export const OUT_OF_TIME = 'not checked: the collection ran out of time';
+export const STOPPED = 'not removed: the collection ran out of time';
 
 // What a change by the automatic collection records: the collector as the actor, and a notice for
 // the run's owner whoever runs the collection, since nobody asked for the change.

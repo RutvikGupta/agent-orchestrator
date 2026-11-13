@@ -185,17 +185,18 @@ export function resetHostView() {
   hostView = null;
 }
 
-// Every process: a Map from PID to { ppid, started, command }, or null when `ps` fails. The start
-// time is written as processStarted() writes it.
+// Every process: a Map from PID to { ppid, state, started, command }, or null when `ps` fails. The
+// start time is written as processStarted() writes it; `state` is ps's (Z for a process that has
+// exited and only awaits its parent).
 function processTable() {
   const v = view();
   if (v.table !== undefined) return v.table;
-  const r = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 10000 });
+  const r = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,state=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 10000 });
   if (r.error || r.status !== 0) return (v.table = null);
   const rows = new Map();
   for (const line of r.stdout.split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec(line);
-    if (m) rows.set(Number(m[1]), { ppid: Number(m[2]), started: m[3].replace(/\s+/g, " "), command: m[4].trim() });
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec(line);
+    if (m) rows.set(Number(m[1]), { ppid: Number(m[2]), state: m[3], started: m[4].replace(/\s+/g, " "), command: m[5].trim() });
   }
   return (v.table = rows);
 }
@@ -268,32 +269,45 @@ function claudeSessionLive(id, root, recorded) {
   return state;
 }
 
-// The rollout files that live Codex processes (and their children) hold open, as real paths: one
-// `lsof` for the whole pass. Null when the process table or `lsof` cannot be read, or when `lsof`
-// says nothing of a Codex process that still lives.
+// The rollout files that live Codex processes (and their children) hold open, as real paths, read
+// once for the whole pass. Null unless the listing is known to be complete: when the process table
+// or `lsof` cannot be read, when `lsof` is cut short or ends with an error, when it says nothing of
+// a Codex process that still lives, or when a rollout it names cannot be resolved. `lsof` also ends
+// with an error when a process it was asked about has just gone, as a Codex session's short-lived
+// children do; it is then asked again about the ones that remain, a few times at most, and only a
+// listing that ended without error counts.
+const LSOF_TRIES = 3;
 function openRollouts() {
   const v = view();
   if (v.open !== undefined) return v.open;
   const table = processTable();
   if (!table) return (v.open = null);
-  const hosts = [...table].filter(([, row]) => agentOfCommand(row.command) === "codex").map(([pid]) => pid);
-  const pids = [...new Set([...hosts, ...[...table].filter(([, row]) => hosts.includes(row.ppid)).map(([pid]) => pid)])];
-  const open = new Set();
-  if (!pids.length) return (v.open = open);
-  const r = spawnSync("lsof", ["-nP", "-Fn", "-p", pids.join(",")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15000 });
-  // lsof exits 1 when one of the processes has gone meanwhile; its list of the others still stands.
-  if (r.error || r.signal) return (v.open = null);
-  const listed = new Set();
-  for (const line of (r.stdout || "").split("\n")) {
-    if (line.startsWith("p")) listed.add(Number(line.slice(1)));
-    else if (line.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) {
-      try {
-        open.add(fs.realpathSync(line.slice(1)));
-      } catch {}
+  // A process that has exited and awaits its parent (state Z) holds no file, and lsof lists none.
+  const running = [...table].filter(([, row]) => !row.state.startsWith("Z"));
+  const hosts = running.filter(([, row]) => agentOfCommand(row.command) === "codex").map(([pid]) => pid);
+  const pids = [...new Set([...hosts, ...running.filter(([, row]) => hosts.includes(row.ppid)).map(([pid]) => pid)])];
+  for (let attempt = 0; attempt < LSOF_TRIES; attempt++) {
+    const asked = pids.filter(exists);
+    const open = new Set();
+    if (!asked.length) return (v.open = open);
+    const r = spawnSync("lsof", ["-nP", "-Fn", "-p", asked.join(",")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15000 });
+    if (r.error || r.signal) return (v.open = null);
+    if (r.status !== 0) continue;
+    const listed = new Set();
+    for (const line of (r.stdout || "").split("\n")) {
+      if (line.startsWith("p")) listed.add(Number(line.slice(1)));
+      else if (line.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) {
+        try {
+          open.add(fs.realpathSync(line.slice(1)));
+        } catch {
+          return (v.open = null);
+        }
+      }
     }
+    if (asked.some((pid) => hosts.includes(pid) && !listed.has(pid))) return (v.open = null);
+    return (v.open = open);
   }
-  if (hosts.some((pid) => !listed.has(pid) && exists(pid))) return (v.open = null);
-  return (v.open = open);
+  return (v.open = null);
 }
 
 // Whether a Codex process holds session `id`'s rollout file open under `root`, as a running Codex
@@ -326,14 +340,16 @@ function codexSessionLive(id, root, recorded) {
   if (!files.length) return absent;
   const open = openRollouts();
   if (!open) return "unknown";
-  const held = files.some((f) => {
+  // A rollout whose path cannot be resolved cannot be matched with the open files: unknown.
+  let state = absent;
+  for (const f of files) {
     try {
-      return open.has(fs.realpathSync(f));
+      if (open.has(fs.realpathSync(f))) return "alive";
     } catch {
-      return false;
+      state = "unknown";
     }
-  });
-  return held ? "alive" : absent;
+  }
+  return state;
 }
 
 // A session launcher: alive while its recorded process runs, or while the host reports its session

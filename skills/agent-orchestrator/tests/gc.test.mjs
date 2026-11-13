@@ -756,3 +756,19 @@ test('gc --auto records its change in a run with no launcher record, and the use
   assert.deepEqual((status.changedByOthers || []).map((n) => [n.task, n.action]), [['old', 'worktree removed']]);
   assert.match(status.changedByOthers[0].text, /worktree removed by automatic worktree collection/);
 });
+
+test('a worktree that cannot be measured is still removed, its size unknown: only the git checks keep a worktree', async (t) => {
+  const f = await fixture(t), run = await f.newRun('unmeasured');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  // A `du` that fails, as one stopped at its time limit does.
+  const bin = path.join(f.root, 'failing-du');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'du'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const collected = await f.command(['gc'], { env: { PATH: `${bin}:${f.env.PATH}` } });
+  assert.match(collected.stdout, /freed 0 bytes \(some sizes unavailable\)/);
+  assert.match(collected.stdout, /removed 1 worktree and freed 0 bytes; kept 0;/);
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.ok(await f.git(['branch', '--list', wt.branch]), 'the removed worktree lost its branch');
+  assert.equal(readJson(f.taskFile(run, 'old')).worktree, undefined);
+});
