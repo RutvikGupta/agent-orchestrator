@@ -6,7 +6,7 @@ import { CACHE_PATH, CLI_PATH } from './config.mjs';
 import { diskRefusal, diskSize, diskState } from './disk.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
 import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
-import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, sessionsEnded } from './ownership.mjs';
+import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, sessionsEnded, sinceLastUse } from './ownership.mjs';
 import { isParked, listRuns, loadTask, relayAlive, saveTask } from './runs.mjs';
 import { die, parseDuration, readJson } from './util.mjs';
 import { teardownWorktree } from './worktree-prep.mjs';
@@ -61,10 +61,35 @@ function registration(run, wt) {
   return { registered: Boolean(record), head: record?.split('\0').find((line) => line.startsWith('HEAD '))?.slice(5) };
 }
 
-export function worktreeSafety(run, task, { allowReadClosed = false } = {}) {
+// A path with every link resolved: the path's own real path, or, for a path that does not exist, its
+// nearest existing parent's with the rest appended. Null for a link that cannot be resolved.
+function canonical(p) {
+  let at = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync(at), ...rest); } catch {}
+    try { fs.lstatSync(at); return null; } catch {}
+    const up = path.dirname(at);
+    if (up === at) return null;
+    rest.unshift(path.basename(at));
+    at = up;
+  }
+}
+
+// Whether a worktree's real path lies inside its run's folder. `gc` collects only those: a folder
+// placed elsewhere with `worktree --path`, or reached through a link that leads out of the run
+// folder, may be something a person still uses.
+export function insideRunFolder(run, wt) {
+  const root = canonical(run.dir), real = canonical(wt);
+  return Boolean(root && real && real.startsWith(root + path.sep));
+}
+
+// `insideRun`: also keep a worktree whose real path is outside the run's folder (gc).
+export function worktreeSafety(run, task, { allowReadClosed = false, insideRun = false } = {}) {
   const wt = task.worktree?.path;
   if (!wt) return 'worktree path missing';
   if (isParked(run, task) || relayAlive(task.pid, task.startedAt, task.outDir)) return 'task still running';
+  if (insideRun && !insideRunFolder(run, wt)) return 'worktree is outside the run folder';
   try {
     const root = fs.existsSync(wt) ? fs.realpathSync(wt) : path.resolve(wt);
     if (runningDirectories().some((dir) => dir === root || dir.startsWith(root + path.sep))) return 'worktree is used by a running or parked task';
@@ -126,13 +151,15 @@ function diskBytes(wt) {
 // kept, as `result` and `accept` do; a worktree whose task still runs, or that another task uses,
 // is left alone. `actor` is what each removal records, and the notice to the run's owner names it.
 // `ended`: the caller may act on the run because its launching sessions have ended (gc).
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false } = {}) {
+// `insideRun`: keep a worktree outside the run's folder (gc). `auto`: the automatic collection made
+// the change, so it records that, and the run's owner gets a notice even when the caller owns it.
+export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false, insideRun = false, auto = false } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
-    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed });
+    let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed, insideRun });
     if (reason) {
       report.kept.push({ ...entry, reason });
       if (reclaimKept && !dryRun && fs.existsSync(entry.path) && !isParked(run, task) && !relayAlive(task.pid, task.startedAt, task.outDir)) reclaimTask(run, task);
@@ -148,7 +175,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       }
       // Teardown can modify tracked files, and another command may have reopened the task.
       task = loadTask(run, id);
-      reason = task?.worktree ? worktreeSafety(run, task, { allowReadClosed }) : 'task worktree changed';
+      reason = task?.worktree ? worktreeSafety(run, task, { allowReadClosed, insideRun }) : 'task worktree changed';
       if (reason || task.worktree.path !== entry.path) {
         report.kept.push({ ...entry, reason: reason || 'task worktree changed' }); continue;
       }
@@ -162,15 +189,19 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       if (removed.status !== 0) { report.kept.push({ ...entry, reason: 'git worktree remove failed', detail: removed.stderr.trim() }); continue; }
       task.removedWorktree = { ...task.worktree, removedAt: new Date().toISOString() };
       delete task.worktree;
-      task.worktreeRemovedBy = actor || g.actor;
+      task.worktreeRemovedBy = auto ? AUTO_COLLECTOR : actor || g.actor;
       saveTask(run, task);
-      recordChange(run, actor ? { ...g, actor } : g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
+      recordChange(run, auto ? automatic(g) : actor ? { ...g, actor } : g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
     }
     report.removed.push({ ...entry, bytes, dryRun, missing, recreateCommand: `node ${CLI_PATH} worktree ${run.id} ${id}` });
     report.bytesFreed += bytes || 0;
   }
   return report;
 }
+
+// What a change by the automatic collection records: the collector as the actor, and a notice for
+// the run's owner whoever runs the collection, since nobody asked for the change.
+const automatic = (g) => ({ ...g, owned: false, actor: AUTO_COLLECTOR });
 
 // The existing duration parser accepts hours; GC also accepts days for its longer defaults.
 export const duration = (s) => /^\d+(?:\.\d+)?d$/.test(String(s)) ? Number.parseFloat(s) * 86400000 : parseDuration(s);
@@ -191,11 +222,17 @@ function activity(run, rows) {
   return latest;
 }
 
+// A run whose launching sessions have ended is collected automatically only once none of them has
+// used it for this long, so a session that has just ended or resumed elsewhere keeps its run.
+export const ENDED_QUIET_MS = 3600000;
+
 // gc over every run: expire unread finished tasks, then collect worktrees, in each run the caller
 // may collect that has no running task and no activity for `olderThan`. The caller may collect its
 // own runs; at a terminal, any run (not in `auto` mode, which leaves a live session's runs to it);
-// and any caller, a run whose launching sessions have all ended (sessionsEnded). A caller whose
-// identity cannot be read collects nothing. `auto` records the automatic collector as the actor.
+// and any caller, a run whose launching sessions have all certainly ended (sessionsEnded), in `auto`
+// mode only once they have not used it for ENDED_QUIET_MS. A caller whose identity cannot be read
+// collects nothing. Only worktrees inside the run's folder are collected. `auto` records the
+// automatic collector as the actor, and leaves the run's owner a notice of every change.
 export async function collectRuns({ dryRun = false, olderThan, expireAfter = duration(process.env.AGENT_ORCH_EXPIRE ?? '7d'), auto = false, now = Date.now() } = {}) {
   const reports = [];
   for (const run of listRuns()) {
@@ -203,7 +240,7 @@ export async function collectRuns({ dryRun = false, olderThan, expireAfter = dur
     const report = { run: run.id, removed: [], kept: [], expired: [], bytesFreed: 0 };
     const known = own.caller.kind !== 'unknown';
     const allowed = (known && own.mine) || (!auto && own.caller.kind === 'user');
-    const ended = !allowed && known && sessionsEnded(own).ended;
+    const ended = !allowed && known && sessionsEnded(own).ended && (!auto || sinceLastUse(own) >= ENDED_QUIET_MS);
     // A refused run needs only its task ids, to list its kept worktrees: the automatic collection
     // passes over every run every five minutes, and reading each task's attempts costs time.
     const rows = allowed || ended ? gcTasks(run) : taskIds(run).map((id) => ({ id }));
@@ -222,7 +259,7 @@ export async function collectRuns({ dryRun = false, olderThan, expireAfter = dur
     }
     if (ended) report.sessionEnded = sessionsEnded(own).why;
     const g = dryRun ? null : guard(run, `garbage collect run ${run.id}`, { ended });
-    const change = g && auto ? { ...g, actor: AUTO_COLLECTOR } : g;
+    const change = g && auto ? automatic(g) : g;
     const expired = new Set();
     for (const row of rows) {
       const task = loadTask(run, row.id);
@@ -235,7 +272,7 @@ export async function collectRuns({ dryRun = false, olderThan, expireAfter = dur
         recordChange(run, change, { task: row.id, attempt: task.attempt || null, action: 'expired' });
       }
     }
-    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true, ended, ...(auto ? { actor: AUTO_COLLECTOR } : {}) });
+    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true, ended, insideRun: true, auto });
     reports.push({ ...report, ...collected });
   }
   return reports;

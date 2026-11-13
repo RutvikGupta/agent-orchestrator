@@ -729,3 +729,45 @@ test('the automatic collection runs five minutes after each pass, as the user wh
   await eventually(() => off.output().includes('dashboard: http'), 'the dashboard did not finish starting');
   assert.deepEqual(off.pending('autoCollect'), []);
 });
+
+test('dashboard --detach reports a server still building its first board after a minute as starting, not as failed', async (t) => {
+  let server = null, ctl = null;
+  // The detached server is no child of this test: stop it by its PID; it kills its worker as it
+  // exits. Registered before the fixture's own cleanup, which removes the folders, so it runs first.
+  t.after(async () => {
+    if (ctl) fs.writeFileSync(path.join(ctl, 'release'), '');
+    if (server && alive(server)) process.kill(server, 'SIGTERM');
+    if (server) await eventually(() => !alive(server), 'the detached dashboard did not exit');
+    for (const line of ctl && fs.existsSync(path.join(ctl, 'workers')) ? fs.readFileSync(path.join(ctl, 'workers'), 'utf8').split('\n').filter(Boolean) : []) {
+      const pid = Number(line.split(' ')[0]);
+      if (isWorker(pid)) process.kill(pid, 'SIGKILL');
+      await eventually(() => !alive(pid), `worker ${pid} outlived the test`);
+    }
+  });
+  const f = await fixture(t);
+  ctl = path.join(f.root, 'ctl');
+  fs.mkdirSync(ctl);
+  const preload = path.join(f.root, 'board-preload.cjs');
+  fs.writeFileSync(preload, PRELOAD);
+  fs.writeFileSync(path.join(ctl, 'hang'), '');
+  const port = await freePort();
+  // Both the waiting command and the server load PRELOAD: their clocks stand still unless ctl/clock moves them.
+  const env = { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_BOARD_CTL: ctl, TEST_BOARD_RUNS: path.join(f.state, 'runs'), AGENT_ORCH_RECLAIM: 'off', AGENT_ORCH_AUTO_GC: 'off', AGENT_ORCH_NOTIFY: 'off' };
+  const command = spawn(process.execPath, [cli, 'dashboard', '--detach', '--host', '127.0.0.1', '--port', String(port)], { cwd: f.repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  command.stdout.on('data', (chunk) => { output += chunk; });
+  command.stderr.on('data', (chunk) => { output += chunk; });
+  const exited = new Promise((resolve) => command.on('exit', (code) => resolve(code)));
+  await eventually(() => fs.existsSync(path.join(ctl, 'blocked')), 'the server\'s first build did not start');
+  const health = await eventually(async () => {
+    try { const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) }); return r.ok && r.json(); } catch { return false; }
+  }, 'the server did not answer while building');
+  server = health.pid;
+  // A minute passes for the waiting command, and the first board is still not built.
+  fs.writeFileSync(path.join(ctl, 'clock'), '61000');
+  assert.equal(await exited, 0, output);
+  assert.match(output, new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port}/  \\(background pid ${server}, still building its first board\\)\\n`));
+  assert.doesNotMatch(output, /did not start/);
+  assert.ok(alive(server), 'the server stopped');
+  assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false, 'the server recorded itself before its first board');
+});

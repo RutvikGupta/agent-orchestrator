@@ -368,7 +368,8 @@ function idleRun(f, run, days = 3) {
 
 for (const closure of ['result', 'legacy']) test(`round two: idle gc collects ${closure} closure and worktree restores retained commits`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
-  const wt = await f.json(['worktree', run.id, 'restore', '--branch', 'retained-feature', '--path', path.join(f.root, 'custom-folder'), '--no-prep']);
+  // A folder of its own name, inside the run's folder: gc collects only worktrees there.
+  const wt = await f.json(['worktree', run.id, 'restore', '--branch', 'retained-feature', '--path', path.join(run.dir, 'custom-folder'), '--no-prep']);
   const tip = await commit(f, wt);
   finished(f, run, 'restore', 3);
   if (closure === 'result') await f.command(['result', run.id, 'restore']);
@@ -673,8 +674,51 @@ test('gc --auto collects the caller\'s own and ended sessions\' idle runs, never
   }
   assert.match(lines[2], /^orch: auto gc freed \S+ \S+ from 2 worktrees; disk 20 GB free$/);
   assert.equal(fs.existsSync(liveWt.path), true, 'automatic collection took a live session\'s worktree');
-  assert.deepEqual(notices(ended).map((n) => [n.action, n.byLabel]), [['worktree removed', 'automatic worktree collection']]);
-  assert.equal(fs.existsSync(path.join(own.dir, 'owner-notices.jsonl')), false, 'the caller\'s own run got a notice');
+  // Nobody asked for an automatic change, so every run's owner is told, the caller's own included.
+  for (const r of [ended, own]) assert.deepEqual(notices(r).map((n) => [n.action, n.byLabel]), [['worktree removed', 'automatic worktree collection']]);
   // An explicit gc from a terminal still collects any run, the live session's too.
   assert.deepEqual((await f.json(['gc'])).runs.find((r) => r.run === live.id).removed.map((r) => r.task), ['old']);
+});
+
+test('gc keeps a worktree whose real path is outside its run folder: one made with --path elsewhere, and one reached through a link that leads out', async (t) => {
+  const f = await fixture(t), run = await f.newRun('outside');
+  const inside = await worktree(f, run, 'inside', { closedAt: daysAgo(3) });
+  const elsewhere = await f.json(['worktree', run.id, 'elsewhere', '--no-prep', '--path', path.join(f.root, 'review-elsewhere')]);
+  patch(f, run, 'elsewhere', { closedAt: daysAgo(3), closedExplicitlyAttempt: 0 });
+  // A link inside the run folder whose target is outside it.
+  const target = await f.json(['worktree', run.id, 'linked', '--no-prep', '--path', path.join(f.root, 'linked-target')]);
+  const link = path.join(run.dir, 'worktrees', 'linked');
+  fs.symlinkSync(target.path, link);
+  patch(f, run, 'linked', { closedAt: daysAgo(3), closedExplicitlyAttempt: 0, worktree: { ...readJson(f.taskFile(run, 'linked')).worktree, path: link } });
+  idleRun(f, run);
+  const outside = 'worktree is outside the run folder';
+
+  const preview = await f.json(['gc', '--dry-run']);
+  const planned = preview.runs.find((r) => r.run === run.id);
+  assert.deepEqual(planned.removed.map((r) => r.task), ['inside']);
+  assert.deepEqual(Object.fromEntries(planned.kept.map((r) => [r.task, r.reason])), { elsewhere: outside, linked: outside });
+  const report = await f.json(['gc']);
+  assert.deepEqual(Object.fromEntries(report.runs.find((r) => r.run === run.id).kept.map((r) => [r.task, r.reason])), { elsewhere: outside, linked: outside });
+  assert.equal(fs.existsSync(inside.path), false);
+  for (const wt of [elsewhere, target]) assert.equal(fs.existsSync(path.join(wt.path, '.git')), true, `${wt.path} was removed`);
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+  // The automatic collection keeps them too, on a low disk.
+  const auto = await f.json(['gc', '--auto', '--older-than', '0s'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.deepEqual(auto.runs.find((r) => r.run === run.id).kept.map((r) => r.reason), [outside, outside]);
+  for (const wt of [elsewhere, target]) assert.equal(fs.existsSync(path.join(wt.path, '.git')), true);
+});
+
+test('gc --auto leaves a run whose session ended under an hour ago; an explicit gc collects it', async (t) => {
+  const f = await fixture(t), run = await f.newRun('recent');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  launchedBy(run);
+  idleRun(f, run);
+  const file = path.join(run.dir, 'run.json');
+  writeJson(file, { ...readJson(file), orchestrator: { ...readJson(file).orchestrator, lastSeenAt: new Date(Date.now() - 10 * 60000).toISOString() } });
+  const auto = await f.json(['gc', '--auto', '--older-than', '0s'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.equal(auto.runs.find((r) => r.run === run.id).reason, 'ownership refused');
+  assert.equal(fs.existsSync(wt.path), true);
+  const B = { CLAUDE_CODE_SESSION_ID: 'session-b', CODEX_THREAD_ID: 'session-b' };
+  const explicit = await f.json(['gc', '--older-than', '0s'], { env: B });
+  assert.deepEqual(explicit.runs.find((r) => r.run === run.id).removed.map((r) => r.task), ['old']);
 });

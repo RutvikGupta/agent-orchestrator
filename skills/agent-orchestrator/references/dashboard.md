@@ -6,7 +6,9 @@ act on. `SKILL.md` step 5 says when to open it.
 ## The server
 
 - `$ORCH dashboard --detach --open` starts a web server on `127.0.0.1:4777`, or reuses the running
-  one, and opens it unless a tab already shows it.
+  one, and opens it unless a tab already shows it. It waits up to a minute for a new server's first
+  board. A server still building it then is reported as "still building its first board" and
+  opened anyway; the tab shows the board once it is built.
 - It exits by itself once no task is running and no tab has shown it for 30 minutes.
   `$ORCH dashboard --stop` stops it sooner.
 - `$ORCH watch` shows the same tree in a terminal, for a user who asks for it.

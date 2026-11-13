@@ -582,3 +582,84 @@ test('a run counts as ended only when every launcher up its chain is gone; only 
   assert.equal(fs.existsSync(wt.path), false);
   assert.equal(fs.existsSync(mine.path), true);
 });
+
+// A process that stands for a host: `title` is what `ps` shows for it, and `file`, when given, is a
+// file it holds open, as a running Codex session holds its rollout. Stopped by its PID at the end.
+async function standIn(t, f, title, file = null) {
+  const ready = path.join(f.root, `stand-in-${Math.random().toString(36).slice(2)}`);
+  const script = `const fs=require('fs');process.title=${JSON.stringify(title)};${file ? `globalThis.held=fs.openSync(${JSON.stringify(file)},'a');` : ''}fs.writeFileSync(${JSON.stringify(ready)},'');setInterval(()=>{},10000);`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await eventually(() => child.exitCode !== null || child.signalCode !== null, 'the stand-in did not exit');
+  };
+  t.after(stop);
+  await eventually(() => fs.existsSync(ready), 'the stand-in did not start');
+  return { pid: child.pid, stop };
+}
+
+// An idle run with a closed task's worktree, launched by `orchestrator` (or as `new` recorded it),
+// last used three days ago.
+async function idleLaunched(f, name, orchestrator, env = {}) {
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+  const run = await f.newRun(name, env);
+  const wt = await f.json(['worktree', run.id, 'kid', '--no-prep'], { env });
+  const file = path.join(run.dir, 'tasks', 'kid', 'task.json');
+  writeJson(file, { ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 });
+  fs.utimesSync(file, new Date(old), new Date(old));
+  const runFile = path.join(run.dir, 'run.json');
+  const record = readJson(runFile);
+  writeJson(runFile, { ...record, createdAt: old, orchestrator: { ...(orchestrator || record.orchestrator), lastSeenAt: old } });
+  return { run, wt };
+}
+const gcReason = async (f, run, env = B) => {
+  const r = (await f.json(['gc', '--dry-run'], { env })).runs.find((x) => x.run === run.id);
+  return r.reason ?? `ended: ${r.sessionEnded}`;
+};
+
+test('a session resumed under a new process keeps its run, however its recorded process ended: Claude by its session file, Codex by its open rollout', async (t) => {
+  const f = await fixture(t);
+  // Claude: the recorded process is gone, but Claude Code reports the session live in another one.
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'resumed-claude', pid: 99999999 });
+  const host = await standIn(t, f, 'claude');
+  fs.mkdirSync(path.join(f.claude, 'sessions'), { recursive: true });
+  writeJson(path.join(f.claude, 'sessions', `${host.pid}.json`), { pid: host.pid, sessionId: 'resumed-claude' });
+  assert.equal(await gcReason(f, claude.run), 'ownership refused');
+  // Codex: a live process holds the session's rollout open.
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'resumed-codex', pid: 99999999 });
+  const rollout = path.join(f.codex, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-resumed-codex.jsonl');
+  fs.mkdirSync(path.dirname(rollout), { recursive: true });
+  fs.writeFileSync(rollout, '');
+  const holder = await standIn(t, f, 'codex', rollout);
+  assert.equal(await gcReason(f, codex.run), 'ownership refused');
+  assert.equal((await f.json(['gc'], { env: B })).totals.removed, 0);
+  for (const wt of [claude.wt, codex.wt]) assert.equal(fs.existsSync(wt.path), true);
+  // Once those processes end too, both sessions have ended.
+  await host.stop();
+  await holder.stop();
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+  assert.equal(await gcReason(f, codex.run), 'ended: its process (pid 99999999) is gone');
+});
+
+test('a launcher whose process cannot be read is not ended: a live relay with ps failing keeps its nested run', async (t) => {
+  const f = await fixture(t);
+  const parent = await f.newRun('parent');
+  const lead = await f.start(parent, 'lead', { config: { hold: true } });
+  await f.ready(lead);
+  const parentFile = path.join(parent.dir, 'run.json');
+  writeJson(parentFile, { ...readJson(parentFile), orchestrator: { agent: 'claude', sessionId: 'gone-session', pid: 99999999, lastSeenAt: new Date(Date.now() - 3 * 86400000).toISOString() } });
+  const nested = await idleLaunched(f, 'nested', null, as(parent, 'lead'));
+  // A `ps` that fails, first on the PATH.
+  const bin = path.join(f.root, 'failing-ps');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const blind = { ...B, PATH: `${bin}:${f.env.PATH}` };
+  assert.equal(await gcReason(f, nested.run, blind), 'ownership refused');
+  await f.command(['gc'], { env: blind });
+  assert.equal(fs.existsSync(nested.wt.path), true, 'a run whose relay could not be read was collected');
+  // With ps readable the relay is seen running; once it has finished, the chain has ended.
+  assert.equal(await gcReason(f, nested.run), 'ownership refused');
+  f.release(lead);
+  await f.finished(parent, 'lead');
+  assert.equal(await gcReason(f, nested.run), 'ended: its process (pid 99999999) is gone');
+});

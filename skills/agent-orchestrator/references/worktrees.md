@@ -107,6 +107,10 @@ with the reason:
 - Its commits, and the task's accepted commit, are reachable from its branch or the run's base
   branch.
 - It is a worktree of the run's repository, and not the repository's own checkout.
+- For `gc` and the automatic collection only: its real path is inside the run's folder. A folder
+  made elsewhere with `worktree --path`, or reached through a link that leads out of the run
+  folder, is kept with the reason "worktree is outside the run folder". `close`, `integrate` and
+  `cleanup` still collect such a folder.
 
 Before it removes a worktree, it runs the recipe's `teardown` there. A failed `teardown` is
 reported and does not keep the worktree. A `teardown` that leaves tracked changes does.
@@ -120,11 +124,20 @@ $ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
 - It takes no run. It looks at the runs the caller may act on (`references/ownership.md`): at a
   terminal, any run; in a session or a delegated agent, the runs it launched and their nested
   runs; with no identity, none.
-- It also collects, for any caller with an identity, a run whose launching session has ended:
-  the session's process is gone, and for a nested run, every launcher up its chain is gone too.
-  Nobody else is left to collect it. The report says "its session has ended" for such a run. A run whose session
-  is alive stays that session's to collect. A run launched from a terminal never counts as ended.
-  Other commands, such as `cleanup` or `close`, still refuse such a run without `--adopt`.
+- It also collects, for any caller with an identity, a run whose launching session has certainly
+  ended. Nobody else is left to collect it. The report says "its session has ended" for such a
+  run. Other commands, such as `cleanup` or `close`, still refuse such a run without `--adopt`.
+  - A session has ended when its recorded process is gone (or that PID now runs something else),
+    and the host reports no other process for its session id: Claude Code's
+    `~/.claude/sessions/<pid>.json` files name no live Claude process for it, and no process holds
+    the Codex session's rollout file open. A session resumed under a new process is therefore
+    alive.
+  - An orch task that launched a nested run has ended when its relay's process is gone. For a
+    nested run, every launcher up its chain must have ended.
+  - When any of this cannot be read (`ps` or `lsof` fails, a host's folder cannot be read, no
+    process was recorded, the parent run is gone), the run is kept, as if alive.
+  - A run whose session is alive stays that session's to collect. A run launched from a terminal
+    never counts as ended.
 - A run is collected only when no task in it runs or is parked and it has had no activity for 24
   hours. `--older-than DUR` changes that (`12h`, `7d`). For any other run `gc` keeps every
   worktree and says why: `ownership refused`, `run has running tasks` or `run is too recent`.
@@ -152,13 +165,14 @@ after it starts, then five minutes after each pass ends, for as long as it runs.
 - It collects only the caller's own runs and the runs whose session has ended, never a live
   session's run, even for the user. The dashboard runs it as the user at a terminal, whoever
   started the dashboard, so it collects the user's own runs and the runs of ended sessions.
+- It treats a run as ended only once no launcher up its chain has used the run for an hour.
 - It collects a run once it has had no activity for 24 hours, or for 1 hour while the disk is low
   (below twice `AGENT_ORCH_MIN_FREE_DISK`). `--older-than DUR` sets another age.
 - It prints one line per worktree removed and per task expired, then the space freed and the free
   space left, and nothing when it changed nothing. The dashboard's log
   (`<state root>/dashboard.log` for a background dashboard) keeps these lines.
 - The owner of each run it changed gets a notice that "automatic worktree collection" made the
-  change.
+  change, even when the caller owns the run: nobody asked for the change.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

@@ -20,8 +20,10 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH, RUNS_DIR } from "./config.mjs";
-import { agentOfCommand, detectOrchestrator, isParked, listRuns, loadTask, processInfo, processStarted, relayAlive } from "./runs.mjs";
+import { spawnSync } from "node:child_process";
+import { CLAUDE_SESSIONS, CLI_PATH, CODEX_HOME, RUNS_DIR } from "./config.mjs";
+import { codexRolloutsSince } from "./codex.mjs";
+import { agentOfCommand, detectOrchestrator, isParked, listRuns, loadTask, processInfo, processStarted, relayAlive, relayOf } from "./runs.mjs";
 import { die, parseDuration, readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -167,20 +169,116 @@ function launcherGone(links, i, broken) {
   return !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
 }
 
-// Whether every launcher up the run's chain has ended (its process is gone), however recently it
-// used the run: { ended, why }. `gc` collects such a run's worktrees for anyone, under its own
-// safety rules, since no session is left to do it. A run launched from a terminal never has ended,
-// and neither has a session whose PID was not recorded: neither is known to be gone.
+// Liveness for `gc`, which removes worktrees on its strength, so it must be certain: "alive",
+// "ended" or "unknown", with why. Unknown (a process that `ps` cannot read, a host registry that
+// cannot be read) keeps the run, as alive does. Adoption keeps its own, looser test (launcherGone).
+const ALIVE = { state: "alive", why: null };
+const unknown = (why) => ({ state: "unknown", why });
+
+// Whether the host reports session `id` live in some process other than the recorded one, as a
+// session resumed under a new process is: "alive", "ended" or "unknown". Claude Code writes
+// <pid>.json, naming its session, for each running session (CLAUDE_SESSIONS); Codex holds each
+// running session's rollout file open, which `lsof` reports. A missing folder means the host runs
+// no session there.
+function claudeSessionLive(id) {
+  let names;
+  try {
+    names = fs.readdirSync(CLAUDE_SESSIONS);
+  } catch (error) {
+    return error.code === "ENOENT" ? "ended" : "unknown";
+  }
+  let state = "ended";
+  for (const name of names.filter((n) => /^\d+\.json$/.test(n))) {
+    const record = readJson(path.join(CLAUDE_SESSIONS, name));
+    if (record?.sessionId !== id) continue;
+    const info = processInfo(Number(record.pid) || Number.parseInt(name, 10));
+    if (info === undefined) state = "unknown";
+    else if (info && agentOfCommand(info.command) === "claude") return "alive";
+  }
+  return state;
+}
+// lsof scans every process, so one answer per session serves all the runs it launched.
+const codexLive = new Map();
+function codexSessionLive(id) {
+  if (!codexLive.has(id)) codexLive.set(id, readCodexSessionLive(id));
+  return codexLive.get(id);
+}
+function readCodexSessionLive(id) {
+  const root = path.join(CODEX_HOME, "sessions");
+  try {
+    fs.readdirSync(root);
+  } catch (error) {
+    return error.code === "ENOENT" ? "ended" : "unknown";
+  }
+  const files = codexRolloutsSince(0).filter((f) => f.endsWith(`-${id}.jsonl`));
+  if (!files.length) return "ended";
+  const r = spawnSync("lsof", ["-t", "--", ...files], { encoding: "utf8", timeout: 5000 });
+  if (r.error || r.signal) return "unknown";
+  if (r.stdout.trim()) return "alive";
+  // lsof exits 1 with no output when no process holds the files, and 1 with a message on an error.
+  return r.status === 1 && !r.stderr.trim() ? "ended" : "unknown";
+}
+
+// A session launcher: alive while its recorded process runs, or while the host reports its session
+// live in another process; ended only when neither is so; unknown when either cannot be read, or
+// when no process was recorded for it.
+function sessionLiveness(o) {
+  if (!o?.pid) return unknown("no process was recorded for its session");
+  const info = processInfo(o.pid);
+  if (info === undefined) return unknown(`its process (pid ${o.pid}) could not be read`);
+  const why = info === null ? `its process (pid ${o.pid}) is gone`
+    : !agentOfCommand(info.command) ? `pid ${o.pid} now runs another program`
+      : o.started && info.started !== o.started ? `pid ${o.pid} now belongs to a process started at another time` : null;
+  if (!why) return ALIVE;
+  if (!o.sessionId) return { state: "ended", why };
+  const live = o.agent === "claude" ? claudeSessionLive(o.sessionId) : o.agent === "codex" ? codexSessionLive(o.sessionId) : "unknown";
+  if (live === "alive") return { state: "alive", why: `session ${o.sessionId} runs in another process` };
+  if (live === "unknown") return unknown(`${why}, and whether session ${o.sessionId} runs in another process could not be read`);
+  return { state: "ended", why };
+}
+
+// An orch task launcher: alive while its relay runs or it is parked; ended once its relay's process
+// is gone or runs something else. Unknown when its relay cannot be read, or when its run or task
+// record is gone, so nothing tells whose it was.
+function taskLiveness(parent, o, broken) {
+  if (!parent) return unknown(`its parent run ${broken} is gone, so its launchers cannot be checked`);
+  const task = loadTask(parent, o.parentTask);
+  if (!task) return unknown(`task ${o.parentTask} of run ${o.parentRun} has no record`);
+  const stopped = { state: "ended", why: `task ${o.parentTask} of run ${o.parentRun} is not running` };
+  if (isParked(parent, task)) return ALIVE;
+  if (!task.pid) return stopped;
+  const info = processInfo(task.pid);
+  if (info === undefined) return unknown(`the relay of task ${o.parentTask} of run ${o.parentRun} (pid ${task.pid}) could not be read`);
+  if (info === null) return stopped;
+  if (info.command.includes("relay.mjs")) return !task.outDir || relayOf(info.command, task.outDir) ? ALIVE : stopped;
+  // Right after `start` forks it, a relay still shows its parent's command for a moment.
+  const age = task.startedAt ? Date.now() - Date.parse(task.startedAt) : Infinity;
+  return age >= 0 && age < 10000 ? ALIVE : stopped;
+}
+
+// Whether every launcher up the run's chain has certainly ended: { ended, state, why }. `gc`
+// collects such a run's worktrees for anyone, under its own safety rules, since no session is left
+// to do it. A run launched from a terminal never has ended. `state` is the chain's: ended, or
+// alive or unknown with the first link that is so.
 const endedCache = new WeakMap();
 export function sessionsEnded(own) {
   if (endedCache.has(own)) return endedCache.get(own);
-  let state = { ended: false, why: null };
+  let state = { ended: false, state: "alive", why: null };
   if (!own.mine && !own.userOwned) {
-    const states = own.links.map((_, i) => launcherGone(own.links, i, own.broken));
-    if (states.every((s) => s.gone)) state = { ended: true, why: states.at(-1).why };
+    const states = own.links.map((link, i) => link.launcher?.agent === "delegated-agent"
+      ? taskLiveness(own.links[i + 1]?.run || null, link.launcher, own.broken)
+      : sessionLiveness(link.launcher));
+    const live = states.find((s) => s.state !== "ended");
+    state = live ? { ended: false, ...live } : { ended: true, state: "ended", why: states.at(-1).why };
   }
   endedCache.set(own, state);
   return state;
+}
+
+// How long since any launcher up the run's chain last used it (or the run was created, when no use
+// is recorded), in milliseconds: the least of them.
+export function sinceLastUse(own, now = Date.now()) {
+  return Math.min(...own.links.map((l) => now - (Date.parse(l.launcher?.lastSeenAt || l.run.createdAt) || 0)));
 }
 
 // Whether every owner up the chain has gone: each link's launcher (a session's host process, an

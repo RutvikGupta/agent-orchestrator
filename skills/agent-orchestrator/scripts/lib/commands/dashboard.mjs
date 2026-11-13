@@ -11,6 +11,19 @@ const PAGE_OPEN_MS = 10000; // the page polls every 2 s, so a request this recen
 // Each open tab also holds an event stream (/api/presence) for as long as it is open. Chrome
 // throttles a background tab's polling to about once a minute, but not an open connection.
 
+// How long `dashboard --detach` waits for the server it started to record itself.
+const DETACH_WAIT_MS = 60_000;
+
+// The address of the dashboard with process `pid`, found by its health check on the ports it tries
+// (the asked one and the next ten), or null.
+async function serverUrl(host, port, pid) {
+  for (let p = port; p <= port + 10; p++) {
+    const url = `http://${host}:${p}/`;
+    if ((await dashboardHealth(url))?.pid === pid) return url;
+  }
+  return null;
+}
+
 // The dashboard answering at URL, or null when none does.
 async function dashboardHealth(url) {
   const get = (p) => fetch(new URL(p, url), { signal: AbortSignal.timeout(1500) });
@@ -93,17 +106,25 @@ export async function cmdDashboard(args) {
     });
     child.unref();
     fs.closeSync(log);
-    for (let i = 0; i < 240; i++) {
+    const exited = () => child.exitCode !== null || child.signalCode !== null;
+    const stopHint = `  exits once no task is running and no browser tab has shown it for ${idle}; stop now with: node ${self} dashboard --stop`;
+    // The server records itself once its first board is built. Wait a minute for that, while it lives.
+    const deadline = Date.now() + DETACH_WAIT_MS;
+    while (!exited() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       const rec = readJson(DASHBOARD_FILE);
       if (rec?.pid !== child.pid) continue;
       if (args.open) openBrowser(keyedUrl(rec.url));
-      return emit(
-        args,
-        rec,
-        `dashboard: ${rec.url}  (background pid ${rec.pid}${args.open ? ", opened in the browser" : ""})\n` +
-          `  exits once no task is running and no browser tab has shown it for ${idle}; stop now with: node ${self} dashboard --stop`,
-      );
+      return emit(args, rec, `dashboard: ${rec.url}  (background pid ${rec.pid}${args.open ? ", opened in the browser" : ""})\n${stopHint}`);
+    }
+    // A first build on a busy machine can take minutes (AGENT_ORCH_FIRST_BUILD_TIMEOUT, 5m). A server
+    // that still lives answers its health check meanwhile: it is starting, not failed, and a tab
+    // opened now shows the board as soon as it is built.
+    const url = exited() ? null : await serverUrl(host, port, child.pid);
+    if (url) {
+      if (args.open) openBrowser(keyedUrl(url));
+      return emit(args, { url, pid: child.pid, building: true },
+        `dashboard: ${url}  (background pid ${child.pid}, still building its first board${args.open ? "; opened in the browser" : ""})\n${stopHint}`);
     }
     die(`the background dashboard did not start; see ${logPath}`);
   }
