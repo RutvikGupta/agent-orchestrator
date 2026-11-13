@@ -154,15 +154,16 @@ const turn = () => new Promise((resolve) => setImmediate(resolve));
 const flush = async () => { for (let i = 0; i < 8; i++) await turn(); };
 
 // `time` stands in for the browser's time formatter (a function of milliseconds), so a test can run the
-// page under a locale whatever the host's is; `setup` prepares the board before the page's first read.
-async function openPage({ tasks = ['alpha', 'beta'], time, setup } = {}) {
+// page under a locale whatever the host's is; `setup` prepares the board before the page's first read;
+// `local` is the browser's storage of an earlier page, for a reload.
+async function openPage({ tasks = ['alpha', 'beta'], time, setup, local: kept } = {}) {
   const clock = { now: Date.UTC(2026, 10, 9, 12, 0, 0) };
   const board = new Board(clock, tasks);
   if (setup) setup(board);
   const document = parseMarkup(markup);
   const calls = [], held = [];
   const storage = () => { const kept = new Map(); return { getItem: (k) => (kept.has(k) ? kept.get(k) : null), setItem: (k, v) => { kept.set(k, String(v)); }, removeItem: (k) => { kept.delete(k); } }; };
-  const local = storage();
+  const local = kept || storage();
   local.setItem('orchSendKey', 'a'.repeat(48));
   const answer = (status, json) => ({ ok: status < 400, status, json: async () => json });
   const fetch = async (url, init = {}) => {
@@ -948,4 +949,77 @@ test('sending, queued, read, failed and steering behave the same while the board
   assert.deepEqual(page.thread(), [['you', 'read', 'over a stale board'], ['you', 'failed', 'refused']]);
   assert.equal(page.queue().hidden, true);
   assert.equal(page.stamp().className, 'live');
+});
+
+// Dragging a row by its grip, through the page's own drag handlers. The fake DOM has no layout, so the
+// pointer is always in a row's upper half: a drop lands before the row it is over.
+const dragData = () => ({ effectAllowed: '', dropEffect: '', types: [], setData(type) { this.types.push(type); }, setDragImage() {} });
+test('a row dragged by its grip keeps its place across redraws and a reload, until the automatic order changes', async () => {
+  const page = await openPage({ tasks: ['alpha', 'beta', 'gamma'] });
+  const runs = page.el('runs');
+  const order = () => runs.querySelectorAll('tbody.session').map((b) => b.dataset.key.split('/')[1]);
+  const row = (task) => runs.querySelector(`tbody.session[data-key="${RUN}/${task}"]`);
+  const remembered = () => JSON.parse(page.local.getItem('orchOrder') || 'null');
+  assert.deepEqual(order(), ['alpha', 'beta', 'gamma']);
+  // Only the grips are draggable, and a click on one chooses nothing.
+  const grip = row('gamma').querySelector('.grip');
+  assert.deepEqual(runs.querySelectorAll('[draggable]').map((e) => [e.classes(), e.attrs.draggable]), [[['grip'], 'true'], [['grip'], 'true'], [['grip'], 'true']]);
+  await runs.dispatch('click', { target: grip });
+  assert.equal(page.json('sel'), null);
+  // Drag gamma: it fades, and the line marks where it would land; over itself it lands nowhere.
+  const data = dragData();
+  await runs.dispatch('dragstart', { target: grip, dataTransfer: data });
+  assert.deepEqual(data.types, ['application/x-orch-order']);
+  assert.ok(row('gamma').classList.contains('dragging'));
+  let allowed = 0;
+  const over = (target) => runs.dispatch('dragover', { target, dataTransfer: data, clientY: 0, preventDefault() { allowed++; } });
+  await over(row('alpha').querySelector('td'));
+  assert.equal(allowed, 1);
+  assert.ok(row('alpha').classList.contains('drop-before'));
+  await over(row('gamma'));
+  assert.equal(allowed, 1, 'a row is no place for itself');
+  assert.ok(!row('alpha').classList.contains('drop-before'), 'the line leaves with the pointer');
+  // The message box takes no row: it still waits for image files only.
+  await page.el('compose').dispatch('dragover', { dataTransfer: data });
+  assert.ok(!page.el('compose').classList.contains('drop'));
+  // A board read during the drag waits, so the row being dragged stays on the page.
+  const dragging = row('gamma');
+  page.board.add('beta', { text: 'news during the drag', from: 'orchestrator' });
+  await page.poll();
+  assert.equal(row('gamma'), dragging);
+  // The drop puts gamma before alpha, and the board redraws (the poll stands in for the catch-up timer).
+  await over(row('alpha'));
+  await runs.dispatch('drop', { target: row('alpha'), dataTransfer: data, clientY: 0 });
+  await runs.dispatch('dragend', { target: grip });
+  await page.poll();
+  assert.deepEqual(order(), ['gamma', 'alpha', 'beta']);
+  assert.deepEqual(runs.querySelectorAll('.dragging, .drop-before, .drop-after'), []);
+  assert.deepEqual(remembered(), { [JSON.stringify([RUN, ''])]: { auto: ['alpha', 'beta', 'gamma'], order: ['gamma', 'alpha', 'beta'] } });
+  // A drop that changes nothing remembers nothing: alpha dropped just before beta, where it is.
+  const before = page.local.getItem('orchOrder');
+  await runs.dispatch('dragstart', { target: row('alpha').querySelector('.grip'), dataTransfer: dragData() });
+  await runs.dispatch('drop', { target: row('beta'), dataTransfer: data, clientY: 0 });
+  await page.poll();
+  assert.equal(page.local.getItem('orchOrder'), before);
+  assert.deepEqual(order(), ['gamma', 'alpha', 'beta']);
+  // New activity that leaves the automatic order as it was keeps the user's order.
+  page.board.add('alpha', { text: 'more news', from: 'orchestrator' });
+  await page.poll();
+  assert.deepEqual(order(), ['gamma', 'alpha', 'beta']);
+  // A reload keeps it.
+  const again = await openPage({ tasks: ['alpha', 'beta', 'gamma'], local: page.local });
+  const shown = () => again.el('runs').querySelectorAll('tbody.session').map((b) => b.dataset.key.split('/')[1]);
+  assert.deepEqual(shown(), ['gamma', 'alpha', 'beta']);
+  // A row that appears changes the automatic order: the page forgets the order and sorts itself again.
+  again.board.tasks.set('delta', []);
+  await again.poll();
+  assert.deepEqual(shown(), ['alpha', 'beta', 'gamma', 'delta']);
+  assert.equal(page.local.getItem('orchOrder'), null);
+  // The message box still takes an image dropped into it.
+  await again.choose('alpha');
+  const box = again.el('compose'), files = { types: ['Files'], files: [{ name: 'shot.png', type: 'image/png', size: 10 }] };
+  await box.dispatch('dragover', { dataTransfer: files });
+  assert.ok(box.classList.contains('drop'));
+  await box.dispatch('drop', { dataTransfer: files });
+  assert.equal(again.el('compose-files').querySelectorAll('.f').length, 1);
 });
