@@ -248,9 +248,14 @@ test('status rows count a task\'s messages', async (t) => {
     { id: a.id, time: a.time, attempt: 1, read, from: 'orchestrator', text: 'first' },
     { id: b.id, time: b.time, attempt: 1, read, from: 'orchestrator', text: 'x'.repeat(800) },
   ];
+  // Every unread message, whole up to 2000 characters, with who sent it; and when the agent reads them.
   assert.deepEqual((await row()).inbox, {
     unread: 2, read: 0, lastSentAt: b.time,
-    unreadMessages: [{ id: a.id, time: a.time, text: 'first' }, { id: b.id, time: b.time, text: 'x'.repeat(500) }],
+    unreadMessages: [
+      { id: a.id, time: a.time, text: 'first', from: 'orchestrator', sender: 'the launching session' },
+      { id: b.id, time: b.time, text: 'x'.repeat(800), from: 'orchestrator', sender: 'the launching session' },
+    ],
+    delivery: { how: 'inbox', text: 'The orch-inbox hook is not registered, so it reads them the next time it runs `inbox`, at its next gate run.' },
     messages: listed(false),
   });
   await f.command(['inbox', run.id, 'steer', '--ack']);

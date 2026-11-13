@@ -3,14 +3,14 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
+import { CLI_PATH, DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { asksDecision, decisionsIn } from "./briefs.mjs";
 import { failureHistory } from "./escalation.mjs";
 import { inboxFields } from "./inbox.mjs";
 import { attemptReasonOf, isClosedPreparation, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
-import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
+import { commandRuns, newSummary, shellNow, summarizeEvents, summarizeRollout } from "./events.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { COMMAND_AGENT, modelLabel } from "./policy.mjs";
 import { die, readJson, tailText, writeJson } from "./util.mjs";
@@ -450,6 +450,80 @@ export function isParked(run, task) {
   return result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
 }
 
+// Resume claims (steer.mjs, resumeLock). Every way a task is resumed (a `start` by hand, a retry, a
+// rework, an interrupt) claims the attempt it replaces first: resume-<k>.json in that attempt's
+// folder, created whole and exclusively with the next k, naming its owner (PID and start time) and
+// its `kind` ("start", "retry" or "interrupt"; "adopt" for a claimant that took over a relay a dead
+// resume left running, steer.mjs, adoptResume). So two of them never both start the next attempt. A
+// parked babysitter's resume claims its park instead (park.mjs), and an interrupt never resumes one.
+// The highest k is the current claim: `released` when the resume failed or was refused (with
+// `error`), `attempt` once the resumed attempt is saved. An interrupt stops the running relay first,
+// so while its claim is live, describe() reports the task as running: `wait`, the parallel limit and
+// the plan never see the gap between the two relays.
+const RESUME_RE = /^resume-(\d+)\.json$/;
+export const resumeFile = (dir, generation) => path.join(dir, `resume-${generation}.json`);
+// An interrupt's sender hands its claim to the helper it starts: resume-<k>.handoff.json names the
+// helper ({ pid, started }) as the claim's owner. The sender writes it once and never touches the
+// claim again, and the helper never writes it, so neither overwrites the other's record.
+export const resumeHandoffFile = (dir, generation) => path.join(dir, `resume-${generation}.handoff.json`);
+const RESUME_GRACE_MS = 60000; // a claim whose owner cannot be read counts as live this long
+
+// The current resume claim of an attempt's folder: { generation, record, state }, where state is
+// `none`, `live` (its owner still runs), `done` (the resumed attempt is saved), `released`, or
+// `abandoned` (its owner is gone without saving anything). Folders that were never resumed cost one
+// `stat`.
+export function resumeClaim(dir) {
+  if (!dir || !fs.existsSync(resumeFile(dir, 1))) return { generation: 0, record: null, state: "none" };
+  const generation = highest(dir, RESUME_RE);
+  const record = readJson(resumeFile(dir, generation));
+  let state;
+  if (!record) state = "live"; // created whole, so only a moment's read race leaves it unreadable
+  else if (record.released) state = "released";
+  else if (record.attempt) state = "done";
+  else {
+    // The owner is whoever the claim was handed to, else whoever its record names.
+    const handoff = readJson(resumeHandoffFile(dir, generation));
+    const owner = handoff?.pid ? handoff : record.owner;
+    if (owner?.pid) state = ownerAlive(owner) ? "live" : "abandoned";
+    else state = Date.now() - (Date.parse(record.claimedAt) || 0) < RESUME_GRACE_MS ? "live" : "abandoned";
+  }
+  return { generation, record, state };
+}
+
+// Whether an interrupt is resuming the task's session: a live or finished interrupt claim on its
+// current attempt's folder. Other resumes start only once the relay has ended, as before.
+export function interruptHeld(task) {
+  const claim = resumeClaim(task?.outDir);
+  return claim.record?.kind === "interrupt" && ["live", "done"].includes(claim.state) ? claim : null;
+}
+
+// The interrupt that holds a task whose relay has exited, or null.
+function interruptOf(task) {
+  const claim = interruptHeld(task);
+  return claim ? { at: claim.record?.claimedAt || null, by: claim.record?.by || null, was: claim.record?.was || null } : null;
+}
+
+// A Claude relay whose turn ended (claude.mjs, applyTurn) while its process lives on waits on a
+// background work: it reads no message until its next turn starts. Its own background command, an
+// open child call, or any sub-agent event since the turn ended proves it is waiting. Otherwise the process may still be exiting, so the
+// state counts only once the session has been quiet this long.
+const IDLE_GRACE_MS = 5000;
+function idleOf(run, task, file, lastEventMs, summary) {
+  const pending = commandRuns("claude", file).filter((r) => r.background && r.exitCode === null).at(-1);
+  const child = Boolean(summary.childAfterTurn) || Object.values(summary.openTools || {}).some((tool) => tool.sub);
+  if (!pending && !child && !(Date.now() - (lastEventMs || Date.now()) >= IDLE_GRACE_MS)) return null;
+  return {
+    since: lastEventMs ? new Date(lastEventMs).toISOString() : null,
+    background: pending ? shortText(pending.cmd, 200) : null,
+    steer: `node ${CLI_PATH} steer ${run.id} ${task.id}`,
+  };
+}
+
+// An idle row's activity line.
+export function idleText(idle) {
+  return `idle: ended its turn and waits on its own background ${idle.background ? `command \`${shortText(idle.background, 80)}\`` : "work"}`;
+}
+
 // A parked row's activity line: what it waits for, and its watcher when that needs saying.
 function parkedNow(p) {
   const watcher = p.resuming ? "resuming" : p.watcher === "dead" || p.watcher === "none" ? "watcher not running (status, start or the dashboard restarts it)" : null;
@@ -549,13 +623,16 @@ function attemptsOf(task, seen, row) {
     const resumedAttempt = from ? sessions.lastIndexOf(from) + 1 || null : null;
     sessions.push(session);
     let state = now ? (row.phase === "parked" ? "parked" : row.state) : r ? r.status : "aborted";
-    if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
+    // An attempt an interrupt stopped to resume its session (steer.mjs) did not fail: the next one
+    // continues it.
+    if (!now && attemptReasonOf(task, n + 1) === "interrupt") state = "interrupted";
+    else if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
     else if (!now && state === "completed" && r.parked && (task.babysit || task.plan?.type === "babysit")) state = "parked";
     const startedAt = now ? row.startedAt : r?.startedAt || null;
     const finishedAt = now ? result?.finishedAt || null : r?.finishedAt || null;
     const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
     const errorText = now ? (typeof result?.error === "string" ? result.error : result?.error ? JSON.stringify(result.error) : "") : r?.error || "";
-    const failed = !["completed", "needs-decision", "running", "prepared", "parked"].includes(state);
+    const failed = !["completed", "needs-decision", "running", "prepared", "parked", "interrupted"].includes(state);
     return {
       n,
       limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (r && r.status !== "completed" && USAGE_LIMIT_RE.test(summary.error || "")) || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
@@ -609,10 +686,14 @@ export function taskLastActivity(task) {
 }
 
 export function describe(run, task) {
-  const { result, running } = taskStatus(task);
+  let { result, running } = taskStatus(task);
+  // An interrupt that stopped the relay to resume its session (steer.mjs): the task still runs, and
+  // the stopped relay's result is not the task's.
+  const interrupting = !running && task.pid ? interruptOf(task) : null;
+  if (interrupting) result = null;
   let state;
   if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
-  else if (running) state = "running";
+  else if (running || interrupting) state = "running";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
   // A session that ended by handing back a question is waiting on its orchestrator, not done.
@@ -623,7 +704,7 @@ export function describe(run, task) {
   if (parked) state = "running";
   else if (state === "completed" && task.stoppedAt && parkedSignal(result.finalMessage)) state = "stopped";
   const started = task.startedAt ? Date.parse(task.startedAt) : null;
-  const ended = running ? Date.now() : result?.finishedAt ? Date.parse(result.finishedAt) : null;
+  const ended = running || interrupting ? Date.now() : result?.finishedAt ? Date.parse(result.finishedAt) : null;
   const elapsedMs = started && ended ? ended - started : null;
 
   // Tokens and cost add up across attempts; activity and session come from the current attempt.
@@ -668,10 +749,17 @@ export function describe(run, task) {
   // A task that stopped because its agent ran out of usage: the one case where limits matter.
   const finishedText = [current.error, result?.error, result?.finalMessage, result?.stderrTail].filter(Boolean).join("\n");
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
-  const limitHit = !running && !parked && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
+  const limitHit = !running && !interrupting && !parked && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
+  // Where a running agent is in its turn: the foreground shell command it is in, if any, and, for a
+  // Claude relay that ended its turn and stays alive on a background command of its own, `idle`
+  // ({ since, background, steer }): it reads no message until that command ends.
+  const agentNow = attemptAgent(task, task.attempt);
+  const shell = running && !command ? shellNow(agentNow, current) : null;
+  const idle = running && agentNow === "claude" && current.turnEnded && task.outDir ? idleOf(run, task, path.join(task.outDir, "events.jsonl"), lastEventMs, current) : null;
   let now;
   const activity = command ? progress?.line || `$ ${shortText(commandText(task.command), 200)}` : current.activity || "starting";
-  if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${activity}`;
+  if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${idle ? idleText(idle) : activity}`;
+  else if (interrupting) now = "interrupted to deliver a message: resuming its session";
   else if (decisions) now = firstLine(`asks: ${decisions.join(" · ")}`);
   else if (parked) now = parkedNow(parked);
   else if (result && command) now = commandOutcome(result) || "(no output)";
@@ -718,6 +806,9 @@ export function describe(run, task) {
     decisions,
     limitHit,
     result,
+    ...(shell ? { shell } : {}),
+    ...(idle ? { idle } : {}),
+    ...(interrupting ? { interrupting } : {}),
     ...(parked ? { parked } : {}),
     // Set when this attempt began a fresh session from the babysitter's handoff note (park.mjs).
     ...(task.handoffs?.[task.attempt] ? { handoff: task.handoffs[task.attempt] } : {}),

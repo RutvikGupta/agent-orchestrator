@@ -35,7 +35,55 @@ function applyLocalCommand(s, text) {
   else if (named) s.model = `claude-${named[1].toLowerCase()}-${named[2]}${named[3] ? `-${named[3]}` : ""}`;
 }
 
+// Where the relay's session is in its turn, for steering (steer.mjs) and the idle state (runs.mjs).
+// `claude -p` ends each turn with a `result` event. While a background command the agent started is
+// pending, its process stays alive after that, and the next turn starts with a task notification:
+// `turnEnded` holds from a `result` until an event of a next turn arrives, or a new model request.
+// Only the session's own events count: a sub-agent's (stream-json marks them with
+// parent_tool_use_id, Claude Code's transcripts with isSidechain) neither end nor reopen its turn.
+// `openTools` holds every tool call without a result yet, the session's and its sub-agents', as
+// "#<id>" -> { name, command, background, sub }, oldest first. When the session's turn ends, its
+// own calls are over; a sub-agent's stays, marked `ended`, since a background sub-agent runs on.
+// A sub-agent's new calls while that turn is over are background work too.
+const OPEN_TOOLS = 32; // a call that never gets a result is dropped once this many are open
+export const subagentEvent = (e) => Boolean(e.parent_tool_use_id) || e.isSidechain === true;
+// The parent's turn boundary is shared by summaries and the steering command scan. Child events
+// never reopen the parent, even when they start a new tool call after the parent's result.
+export function claudeTurnEnded(ended, e) {
+  if (subagentEvent(e)) return ended;
+  if (e.type === "result") return true;
+  if (e.type === "assistant" || e.type === "user" || e.type === "api-request" || (e.type === "system" && e.subtype === "task_notification")) return false;
+  return ended;
+}
+function applyTurn(s, e) {
+  const sub = subagentEvent(e);
+  const content = Array.isArray(e.message?.content) ? e.message.content : [];
+  s.openTools ||= {};
+  if (e.type === "assistant") {
+    for (const b of content) {
+      if (b?.type !== "tool_use" || !b.id) continue;
+      s.openTools[`#${b.id}`] = { name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background), sub, ...(sub && s.turnEnded ? { ended: true } : {}) };
+      const ids = Object.keys(s.openTools);
+      if (ids.length > OPEN_TOOLS) delete s.openTools[ids[0]];
+    }
+  } else if (e.type === "user") {
+    for (const b of content) if (b?.type === "tool_result" && b.tool_use_id) delete s.openTools[`#${b.tool_use_id}`];
+  }
+  s.turnEnded = claudeTurnEnded(s.turnEnded, e);
+  // A sub-agent that works on after the session's turn ended is background work the session
+  // waits on, also between two of its calls, when none is open.
+  if (!s.turnEnded) s.childAfterTurn = false;
+  else if (sub) s.childAfterTurn = true;
+  if (!sub && e.type === "result") {
+    for (const [id, tool] of Object.entries(s.openTools)) {
+      if (tool.sub) tool.ended = true;
+      else delete s.openTools[id];
+    }
+  }
+}
+
 export function applyClaudeEvent(s, e, cwd) {
+  applyTurn(s, e);
   if (e.timestamp && (e.type === "assistant" || (e.type === "user" && !e.isCompactSummary && !e.isVisibleInTranscriptOnly))) s.lastAt = e.timestamp;
   // A command Claude Code runs itself (/model, /effort) is recorded as two user lines: the command,
   // then its output. The command line reads as a prompt, so it opens a turn below, as a command
@@ -50,8 +98,10 @@ export function applyClaudeEvent(s, e, cwd) {
     return;
   }
   if (text.startsWith("<command-name>")) s.beforeCommand = { busy: s.busy, ended: s.ended, interrupted: s.interrupted };
+  // The session id is the task's own: a sub-agent's events name another session.
+  const own = !subagentEvent(e);
   if (e.type === "system" && e.subtype === "init") {
-    s.sessionId = e.session_id || s.sessionId;
+    if (own) s.sessionId = e.session_id || s.sessionId;
     s.model = e.model || s.model;
   } else if (e.type === "assistant" && e.message) {
     const m = e.message;
@@ -114,7 +164,7 @@ export function applyClaudeEvent(s, e, cwd) {
     };
     if (typeof e.total_cost_usd === "number") s.costUsd = e.total_cost_usd;
     s.exact = true;
-    s.sessionId = e.session_id || s.sessionId;
+    if (own) s.sessionId = e.session_id || s.sessionId;
     if (e.is_error) s.error = shortText(e.result || e.subtype);
   } else if (e.type === "rate_limit_event") {
     s.limits = claudeLimits(e.rate_limit_info);
@@ -199,6 +249,10 @@ export function claudeActionEvent(e, t) {
 const CLAUDE_SKIPPED = new Set(["api-request-blob", "api-request-shape", "file-history-snapshot", "file-history-delta", "mode", "permission-mode", "atis-latch", "last-prompt", "ai-title", "cost-state", "queue-operation", "pr-link"]);
 export function claudeLineShortcut(s, line) {
   const type = /^\{"type":"([^"]+)"/.exec(line)?.[1];
-  if (type === "api-request") s.busy = true; // the session sent a model request: a turn is open
+  if (type === "api-request") {
+    s.busy = true; // the session sent a model request: a turn is open
+    // A sub-agent's request leaves the session's own turn as it was (applyTurn).
+    if (!/"isSidechain":true|"parent_tool_use_id":"/.test(line)) s.turnEnded = false;
+  }
   return type === "api-request" || CLAUDE_SKIPPED.has(type);
 }

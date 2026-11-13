@@ -6,10 +6,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
-import { fixture } from './helpers.mjs';
+import { eventually, fixture } from './helpers.mjs';
 
 const hook = fileURLToPath(new URL('../scripts/hooks/orch-inbox.mjs', import.meta.url));
 const inboxFile = (run, id) => path.join(run.dir, 'tasks', id, 'inbox.jsonl');
+// The events of a Claude turn that started a background command and then ended: `claude -p` stays
+// alive until that command ends, and reads no message meanwhile.
+const IDLE_EVENTS = [
+  { type: 'assistant', message: { id: 'm-bg', content: [{ type: 'tool_use', id: 'toolu_bg', name: 'Bash', input: { command: 'bash tmp/watch.sh', run_in_background: true } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_bg', content: 'Command running in background with ID: b1' }] }, tool_use_result: { backgroundTaskId: 'b1' } },
+  { type: 'assistant', message: { id: 'm-end', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Waiting for the watcher.' }] } },
+  { type: 'result', subtype: 'success', is_error: false, result: 'Waiting for the watcher.', session_id: 'fixture-claude' },
+];
+// A task's board row, and its section, from /api/state.
+async function boardRow(dash, run, id) {
+  for (const section of await dash.json('api/state')) {
+    const row = section.tasks.find((t) => t.run === run.id && t.id === id);
+    if (row) return { row, section };
+  }
+  return {};
+}
 
 // A raw request, so a test can send any Host, Origin and content type, as another page could.
 function request(url, { method = 'POST', headers = {}, body = '' } = {}) {
@@ -251,4 +267,65 @@ test('reply refuses a task with no message from the user', async (t) => {
   await f.finished(run, 'quiet');
   const refused = await f.command(['reply', run.id, 'quiet', 'hello'], { code: 2 });
   assert.match(refused.stderr, /has no message from the user to answer/);
+});
+
+test('the board lists every message waiting for a task, who sent it, and when the agent reads them; the box leaves a busy agent alone', async (t) => {
+  const { f, run, task, dash, post } = await dashboardWithTask(t);
+  const mine = JSON.parse((await post({ run: run.id, task: 'steer', text: 'From the box.' })).text);
+  assert.equal(mine.steer, null, 'an agent mid-turn is not interrupted without the Interrupt option');
+  const theirs = await f.json(['send', run.id, 'steer', 'From the session.']);
+  const fromTask = await f.json(['send', run.id, 'steer', 'From a task.'], { env: { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: 'other-run', AGENT_ORCH_TASK: 'lead' } });
+  // The board is rebuilt as files change: wait until it lists all three.
+  const { row } = await eventually(async () => {
+    const found = await boardRow(dash, run, 'steer');
+    return found.row?.inbox?.unreadMessages?.length === 3 ? found : null;
+  }, 'the board did not list the three messages');
+  assert.deepEqual(row.inbox.unreadMessages.map((m) => [m.id, m.from, m.sender, m.text]), [
+    [mine.id, 'user', 'you', 'From the box.'],
+    [theirs.id, 'orchestrator', 'the launching session', 'From the session.'],
+    [fromTask.id, 'orchestrator', 'task other-run/lead', 'From a task.'],
+  ]);
+  assert.deepEqual(row.inbox.delivery, { how: 'inbox', text: 'The orch-inbox hook is not registered, so it reads them the next time it runs `inbox`, at its next gate run.' });
+  assert.equal(row.attention, null);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(run.dir, 'tasks', 'steer', 'task.json'), 'utf8')).attempt, 1);
+  f.release(task);
+  await f.finished(run, 'steer');
+});
+
+test('the board flags an idle task with waiting messages, and a message from the box resumes its session at once', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = await f.start(run, 'idler', { config: { hold: true, extraEvents: IDLE_EVENTS } });
+  await f.ready(task);
+  const queued = await f.json(['send', run.id, 'idler', 'Also update the changelog.']);
+  const dash = await f.dashboard();
+  const token = fs.readFileSync(path.join(f.state, 'dashboard-token'), 'utf8').trim();
+  const origin = new URL(dash.url).origin;
+  const { row, section } = await eventually(async () => {
+    const found = await boardRow(dash, run, 'idler');
+    return found.row?.inbox?.unread === 1 ? found : null;
+  }, 'the board did not list the waiting message');
+  assert.equal(row.idle.background, 'bash tmp/watch.sh');
+  assert.equal(row.now, 'idle: ended its turn and waits on its own background command `bash tmp/watch.sh`');
+  assert.deepEqual(row.inbox.unreadMessages.map((m) => [m.id, m.sender]), [[queued.id, 'the launching session']]);
+  assert.equal(row.inbox.delivery.how, 'idle');
+  assert.match(row.inbox.delivery.text, /^It ended its turn and waits on its own background command `bash tmp\/watch\.sh`: it will not read them until that ends\. Interrupt it to deliver them now\.$/);
+  const item = section.attention.find((a) => a.id === 'idler');
+  assert.deepEqual([item.kind, item.rank, item.label], ['unreachable', 2.7, 'unreachable']);
+  assert.match(item.reason, /^ended its turn and waits on its own background command `bash tmp\/watch\.sh`, so a message waits unread until that ends; deliver it now with `node \S+ steer \S+ idler`$/);
+
+  // A message from the box, without the Interrupt option: nothing else would reach the agent.
+  const sent = await request(dash.url, { headers: { origin, 'content-type': 'application/json', 'x-orch-token': token }, body: JSON.stringify({ run: run.id, task: 'idler', text: 'Stop waiting; the run is done.' }) });
+  assert.equal(sent.status, 200, sent.text);
+  const reply = JSON.parse(sent.text);
+  assert.deepEqual([reply.steer.resuming, reply.steer.was, reply.delivery], [true, 'idle', "an interrupt resumes the agent's session with this message as its next prompt"]);
+  const second = path.join(run.dir, 'tasks', 'idler', 'attempt-2');
+  await eventually(() => fs.existsSync(path.join(second, 'invocation.json')), 'the session did not resume', 20_000);
+  const argv = JSON.parse(fs.readFileSync(path.join(second, 'invocation.json'), 'utf8')).argv;
+  assert.equal(argv[argv.indexOf('--session') + 1], 'fixture-claude');
+  assert.match(fs.readFileSync(path.join(second, 'orch-brief.md'), 'utf8'), /\n\nAlso update the changelog\.\n[\s\S]*\n\nStop waiting; the run is done\.\n\nAnswer the user first/);
+  // The dashboard passes on no fake-relay controls, so the resumed relay finishes at once.
+  const done = await f.finished(run, 'idler');
+  assert.deepEqual([done.attempt, done.state, done.attempts.map((a) => [a.n, a.state, a.reason])], [2, 'completed', [[2, 'completed', 'interrupt'], [1, 'interrupted', 'first']]]);
+  assert.equal(done.inbox.unread, 0);
 });

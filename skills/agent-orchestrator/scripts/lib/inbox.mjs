@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH, RUNS_DIR } from "./config.mjs";
+import { CLAUDE_PROJECTS, CLI_PATH, RUNS_DIR } from "./config.mjs";
 
 export const INBOX_FILE = "inbox.jsonl";
 export const READ_FILE = "inbox-read.jsonl";
@@ -90,10 +90,12 @@ export function logSize(dir, attempt) {
 // `steeredBy` who stopped it (ownership.mjs). `kind` and `about` mark a message from an agent the
 // task started (see the header), or a notice to an owning task.
 // `answers` lists the questions a message from the user answers beyond its own (openQuestions).
-export function appendMessage(dir, attempt, text, { id = randomUUID().slice(0, 8), from = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, steeredBy = null, kind = null, about = null, answers = [] } = {}) {
+// `by` is the orch task, "<run>/<task>", whose shell sent a message with `send`; a message from the
+// launching session has none.
+export function appendMessage(dir, attempt, text, { id = randomUUID().slice(0, 8), from = null, by = null, body = null, images = [], logOffset = logSize(dir, attempt), steered = null, steeredBy = null, kind = null, about = null, answers = [] } = {}) {
   const message = {
     id, time: new Date().toISOString(), attempt, text,
-    ...(from === "user" || fromAgent({ from }) ? { from } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
+    ...(from === "user" || fromAgent({ from }) ? { from } : {}), ...(by ? { by } : {}), ...(body != null && body !== text ? { body } : {}), ...(images.length ? { images } : {}), logOffset,
     ...(steered ? { steered } : {}), ...(steered && steeredBy ? { steeredBy } : {}), ...(kind ? { kind } : {}), ...(about ? { about } : {}), ...(answers.length ? { answers } : {}),
   };
   fs.appendFileSync(path.join(dir, INBOX_FILE), `${JSON.stringify(message)}\n`);
@@ -253,9 +255,84 @@ Stay reachable, so a message from the user is handled before the work in hand:
 `;
 }
 
-// The task's messages for its row from describe(): counts, and the unread ones for the dashboard's
-// tooltip; and `question`, the oldest question of a running task that waits on the user (`open`
-// counts them all), which attentionOf() lists. Nothing when no message was ever sent or asked.
+// Claude Code's user settings, where the orchestrator registers the orch-inbox hook.
+export const CLAUDE_SETTINGS = path.join(path.dirname(CLAUDE_PROJECTS), "settings.json");
+
+// The text of `file`, read again only when it changes: the dashboard asks for every task's each second.
+const textMemo = new Map(); // file -> { mtimeMs, size, text }
+function memoText(file) {
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    textMemo.delete(file);
+    return "";
+  }
+  const hit = textMemo.get(file);
+  if (hit?.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.text;
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {}
+  if (textMemo.size >= 2000) textMemo.delete(textMemo.keys().next().value);
+  textMemo.set(file, { mtimeMs: st.mtimeMs, size: st.size, text });
+  return text;
+}
+
+// Whether the orch-inbox hook is registered for Claude, and whether an attempt's brief has the inbox
+// note (an attempt started before messages existed has none, so it never runs `inbox`).
+export const inboxHookRegistered = () => memoText(CLAUDE_SETTINGS).includes("orch-inbox.mjs");
+export const briefNoted = (outDir) => memoText(path.join(outDir || "", "orch-brief.md")).includes(INBOX_HEADING);
+
+// When a task's agent reads the messages waiting for it, from its describe() row: { how, text } and,
+// where an interrupt delivers them now, `steer`, the command that does. `how` is `parked`,
+// `resuming` (an interrupt is resuming its session), `not-running`, `never`, `idle` (it ended its
+// turn and waits on a background command of its own), `shell` (in a foreground shell command),
+// `tool-call` (the orch-inbox hook adds them after its next tool call) or `inbox` (it runs `inbox`).
+export function readsWhen(run, task, row) {
+  const steer = `node ${CLI_PATH} steer ${run.id} ${task.id}`;
+  const quoted = (command) => `\`${String(command).replace(/\s+/g, " ").trim().slice(0, 80)}\``;
+  if (row.phase === "parked") return { how: "parked", text: "It is parked: its watcher resumes it with them within a few seconds." };
+  if (row.interrupting) return { how: "resuming", text: "An interrupt is resuming its session with them now." };
+  if (row.state !== "running") return { how: "not-running", text: "It is not running: they reach it only in the brief that resumes it." };
+  if (task.agent === "command") return { how: "never", text: "A command task has no agent to read them." };
+  if (row.idle) {
+    const on = row.idle.background ? `background command ${quoted(row.idle.background)}` : "background work";
+    return { how: "idle", text: `It ended its turn and waits on its own ${on}: it will not read them until that ends. Interrupt it to deliver them now.`, steer };
+  }
+  const resume = "stop it and resume it with a delta brief instead";
+  const noted = briefNoted(task.outDir);
+  if (task.agent === "codex") {
+    if (!noted) return { how: "never", text: `Its brief has no inbox note, so it will not read them; ${resume}.` };
+    return { how: "inbox", text: `It reads them the next time it runs \`inbox\`: after each gate run, and at least every 10 commands.${row.shell ? ` It is in the shell command ${quoted(row.shell)} now; interrupt it to deliver them now.` : ""}`, ...(row.shell ? { steer } : {}) };
+  }
+  if (inboxHookRegistered()) {
+    if (row.shell) return { how: "shell", text: `It reads them when its current shell command ends (${quoted(row.shell)}). Interrupt it to deliver them now.`, steer };
+    return { how: "tool-call", text: "It reads them after its next tool call." };
+  }
+  if (task.readOnly) return { how: "never", text: `The orch-inbox hook is not registered, and a read-only agent has no shell to run \`inbox\`, so it will not read them; ${resume}.` };
+  if (!noted) return { how: "never", text: `The orch-inbox hook is not registered, and its brief has no inbox note, so it will not read them; ${resume}.` };
+  return { how: "inbox", text: "The orch-inbox hook is not registered, so it reads them the next time it runs `inbox`, at its next gate run." };
+}
+
+// Who sent a message, as the dashboard's queue names it: "you" (the user, from the dashboard), the
+// task that sent it ("task <run>/<task>": an agent it started, or the orch task that ran `send`), the
+// orchestrator itself for a notice it wrote, or else whoever runs the run: the task that started a
+// nested run, or the launching session.
+export function senderName(run, message) {
+  if (message.from === "user") return "you";
+  if (fromAgent(message)) return `task ${message.from.slice("agent:".length)}`;
+  if (typeof message.by === "string" && message.by) return `task ${message.by}`;
+  if (message.kind) return "the orchestrator";
+  const o = run.orchestrator || {};
+  return o.parentRun && o.parentTask ? `task ${o.parentRun}/${o.parentTask}` : "the launching session";
+}
+
+// The task's messages for its row from describe(): counts; every unread one, oldest first, with who
+// sent it, for the dashboard's queue and the row's tooltip; when the agent reads them (`delivery`,
+// readsWhen); the latest messages for the thread; and `question`, the oldest question of a running
+// task that waits on the user (`open` counts them all), which attentionOf() lists. Nothing when no
+// message was ever sent or asked.
 export function inboxFields(run, task, row) {
   const dir = folder(run, task.id);
   const asked = row.state === "running" && fs.existsSync(path.join(dir, QUESTIONS_FILE));
@@ -282,7 +359,8 @@ export function inboxFields(run, task, row) {
       unread: unread.length,
       read: messages.length - unread.length,
       lastSentAt: messages.at(-1)?.time || null,
-      unreadMessages: unread.map((m) => ({ id: m.id, time: m.time, text: m.text.slice(0, 500) })),
+      unreadMessages: unread.map((m) => ({ id: m.id, time: m.time, text: String(m.body ?? m.text).slice(0, 2000), from: m.from === "user" ? "user" : fromAgent(m) ? m.from : "orchestrator", sender: senderName(run, m), ...(m.images?.length ? { images: m.images.length } : {}) })),
+      ...(unread.length ? { delivery: readsWhen(run, task, row) } : {}),
       // The latest messages for the dashboard's details panel, oldest first.
       messages: messages.slice(-20).map((m) => {
         const answers = replies.filter((r) => r.to === m.id).map((r) => ({ time: r.time, text: r.text.slice(0, 2000) }));

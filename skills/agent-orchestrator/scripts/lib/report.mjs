@@ -286,10 +286,11 @@ function checkCommand(value) {
 }
 
 // The attempts whose commands back the current attempt's report: the current one, and those an
-// automatic retry continued, since a retry picks up where the failed turn left off.
+// automatic retry or an interrupt (steer.mjs) continued, since both pick up the same session where
+// the earlier turn left off.
 function reportAttempts(task) {
   const attempts = [task.attempt || 0];
-  while (attempts[0] > 1 && attemptReasonOf(task, attempts[0]) === "retry") attempts.unshift(attempts[0] - 1);
+  while (attempts[0] > 1 && ["retry", "interrupt"].includes(attemptReasonOf(task, attempts[0]))) attempts.unshift(attempts[0] - 1);
   return attempts;
 }
 

@@ -353,7 +353,8 @@ function adoptRelay(run, dir, current, by, table = null) {
 // Claim a parked attempt's park for `by`: { generation, record, file } when this process won it,
 // taking over an abandoned claim if need be; { adopted: task } when the abandoned claim's relay
 // still runs and became the task's attempt; { holder } when a resume, stop or close holds it.
-function takeClaim(run, dir, by) {
+// `since` is the task's close and stop as the claimant saw them, which a resume's claim records.
+function takeClaim(run, dir, by, since = null) {
   for (let tries = 0; tries < 5; tries++) {
     const current = parkClaim(dir);
     if (current.state === "live" || current.state === "done") return { holder: current.record?.by || "another command" };
@@ -362,7 +363,7 @@ function takeClaim(run, dir, by) {
       if (adopted) return { adopted };
     }
     const generation = current.generation + 1;
-    const record = { by, claimedAt: new Date().toISOString(), owner: owner(), ...(current.state === "abandoned" ? { takesOver: current.generation } : {}) };
+    const record = { by, claimedAt: new Date().toISOString(), owner: owner(), ...(since ? { since } : {}), ...(current.state === "abandoned" ? { takesOver: current.generation } : {}) };
     const file = parkClaimFile(dir, generation);
     if (createExclusive(file, record)) return { generation, record, file };
   }
@@ -372,14 +373,17 @@ function takeClaim(run, dir, by) {
 // For `start` and the watcher: claim a parked task's park before writing anything of the next
 // attempt, so that exactly one resume ends it and a resume that loses changes nothing. Null when the
 // task is not parked; { refused } when a resume, stop or close holds the claim, or when an earlier
-// resume's relay was adopted instead (then also { adopted }). Otherwise: spawned(task), to call right
-// after the relay starts, which records it so that a takeover can adopt it; release(), to give the
-// claim back if the start fails; and done(task) once the new attempt is saved, which records it and
-// stops the watcher (unless the watcher is the one resuming).
+// resume's relay was adopted instead (then also { adopted }). Otherwise: `since`, the task's close
+// and stop as the claimant saw them when it claimed, so that a stop or close that comes after the
+// claim always wins (startTask); spawned(task), to call right after the relay starts, which records
+// it so that a takeover can adopt it; release(), to give the claim back if the start fails; and
+// done(task) once the new attempt is saved, which records it and stops the watcher (unless the
+// watcher is the one resuming).
 export function claimParked(run, task, by = "start") {
   if (!isParked(run, task)) return null;
   const dir = attemptDir(run, task.id, task.attempt);
-  const won = takeClaim(run, dir, by);
+  const since = { closedAt: task.closedAt || null, stoppedAt: task.stoppedAt || null };
+  const won = takeClaim(run, dir, by, since);
   if (won.adopted) {
     return { adopted: won.adopted, refused: `task ${task.id}'s earlier resume died after starting its relay (pid ${won.adopted.pid}), which still runs: it is now attempt ${won.adopted.attempt}, so nothing new was started` };
   }
@@ -387,6 +391,7 @@ export function claimParked(run, task, by = "start") {
     return { refused: `task ${task.id} is parked, and ${won.holder === "watcher" ? "its watcher is resuming it" : `\`${won.holder}\` already ended its park`} right now; run \`status\` to see its new attempt` };
   }
   return {
+    since,
     spawned: (planned) => writeJson(won.file, { ...won.record, relay: { pid: planned.pid, started: processStarted(planned.pid) }, task: planned }),
     release: () => writeJson(won.file, { ...won.record, released: true, releasedAt: new Date().toISOString() }),
     done: (started) => {
@@ -450,8 +455,10 @@ export function messagesText(messages) {
 // The brief that resumes a parked babysitter: what its watcher saw, and what to do next. Every
 // message is in full in `messagesFile`; short ones are quoted here too.
 // `handoff` (handoffOf) says whether the brief opens a fresh session, and whether the session's note
-// is missing or stale, which the same session is then told to put right.
-export function resumeBrief(run, task, parked, pr, messages, messagesFile = null, handoff = null) {
+// is missing or stale, which the same session is then told to put right. With `quote` false the
+// brief holds no text of a message: the watcher passes the quotes to `start` as data (messageQuotes),
+// so that nothing a message says is ever read as part of the brief.
+export function resumeBrief(run, task, parked, pr, messages, messagesFile = null, handoff = null, { quote = true } = {}) {
   const fresh = Boolean(handoff?.fresh);
   const ref = task.pr?.url || (parked.pr ? `#${parked.pr}` : "its pull request");
   const watch = `node ${CLI_PATH} pr-watch ${task.pr?.number ?? task.pr?.url ?? "<PR>"} --repo .`;
@@ -466,8 +473,8 @@ export function resumeBrief(run, task, parked, pr, messages, messagesFile = null
     lines.push(`- ${messages.length === 1 ? "A message arrived" : `${messages.length} messages arrived`}. Read ${messages.length === 1 ? "it" : "every one"} in full in \`${messagesFile}\` before anything else.`, "");
     for (const m of messages) {
       const short = m.text.length <= INLINE_CHARS;
-      lines.push(`  - ${senderLabel(m)} (${m.time})${short ? ":" : `: a long message (${m.text.length} characters), only in the file.`}`);
-      if (short) lines.push("", ...m.text.split("\n").map((l) => `    > ${l}`), "");
+      lines.push(`  - ${senderLabel(m)} (${m.time})${short ? (quote ? ":" : ", message " + m.id + ": quoted at the end of this brief.") : `: a long message (${m.text.length} characters), only in the file.`}`);
+      if (short && quote) lines.push("", ...m.text.split("\n").map((l) => `    > ${l}`), "");
       if (m.from === "user") lines.push(`    ${replyHint(run.id, task.id)}`, "");
     }
   }
@@ -486,6 +493,13 @@ export function resumeBrief(run, task, parked, pr, messages, messagesFile = null
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+// The short messages of a resume, quoted: the data that follows a brief written with `quote` false.
+export function messageQuotes(messages) {
+  const short = messages.filter((m) => m.text.length <= INLINE_CHARS);
+  if (!short.length) return null;
+  return ["## The messages, quoted", "", ...short.flatMap((m) => [`- ${senderLabel(m)} (${m.time}), message ${m.id}:`, "", ...m.text.split("\n").map((l) => `    > ${l}`), ""])].join("\n");
 }
 
 // One check of a parked attempt's folder `dir` by watcher `generation`: resume the task when its
@@ -552,10 +566,10 @@ export async function checkPark(dir, generation) {
   const brief = path.join(dir, "park-resume.md");
   let started;
   try {
-    const changed = resumeBrief(run, task, parked, pr, messages, messagesFile, handoff);
+    const changed = resumeBrief(run, task, parked, pr, messages, messagesFile, handoff, { quote: false });
     fs.writeFileSync(brief, handoff.fresh ? handoffBrief(handoff, changed) : changed);
     ({ task: started } = startTask({
-      _: [run.dir, id], agent: task.agent, brief, passthrough: handoff.fresh ? [] : ["--session", session], parkClaim: claim,
+      _: [run.dir, id], agent: task.agent, brief, briefData: messageQuotes(messages), passthrough: handoff.fresh ? [] : ["--session", session], parkClaim: claim,
       fromHandoff: handoff.fresh,
       attemptFiles: messages.length ? { [PARK_MESSAGES_FILE]: messagesText(messages) } : {},
       // The record that this attempt began a fresh session from a handoff, and at what context size.

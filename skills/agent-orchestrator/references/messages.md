@@ -95,16 +95,104 @@ found:
 $ORCH send <run> <task-id> "<message>" [--steer]    # or --file FILE
 ```
 
-- `--steer` is for a message the agent must act on now. It stops the agent's current shell command
-  (never a commit, push, rebase, merge or other publishing command) so the message reaches it at
-  once. The agent reruns the command if it still needs it.
-- Every brief tells agents to wait with `$ORCH nap <duration>`, `wait` or `pr-watch`, which return as
-  soon as a message arrives.
 - A Claude agent gets the message as context after its next tool call, through the user's
   `PostToolUse` hook. A Codex agent reads it with `$ORCH inbox <run> <task-id> --ack` at each gate,
   as its brief tells it.
+- Every brief tells agents to wait with `$ORCH nap <duration>`, `wait` or `pr-watch`, which return as
+  soon as a message arrives.
 - Send only what the agent needs. A change of goal or scope still goes through a resume with a delta
   brief (`references/review.md`, "Rework").
+
+### The interrupt
+
+`--steer` (the interrupt) is for a message the agent must act on now. It delivers the message at
+once, whatever the agent is doing, and says which of these it did:
+
+- **In a shell command:** it stops that command, so the tool call returns and the message reaches
+  the agent. The agent reruns the command if it still needs it. Every shell command of the turn that
+  has not returned counts, also when a later tool call is open, and each is stopped. A commit, push,
+  rebase, merge or other publishing command is never stopped: the message waits for it.
+- **Mid-turn, but not in a shell command** (in a model call, or in another tool such as an edit or a
+  sub-agent): it stops the session and resumes it in the same session, with the unread messages as
+  its next prompt.
+- **Idle:** the same resume (see below).
+
+A resume keeps the task's agent, tier, mode, worktree and brief, and every relay option of the
+attempt it replaces: model and effort, timeout, sandbox, network, permission rules, and what was
+passed after `--`. Only the session and the prompt change. It is recorded as a new attempt with the
+reason `interrupt`; the stopped attempt shows as `interrupted`, and it is neither a counted failure
+nor a rework round. The task stays `running` for `wait`, the parallel limit and the plan, also in the
+moment between the two relays. The stopped attempt sends its parent no finish notice when the
+resume succeeds; the resumed one reports to the same parent at the same depth. If the interrupt
+helper dies without starting a replacement relay, the stopped attempt sends its finish notice
+after all. If it already started a relay, the notice stays suppressed until that relay is adopted
+and the adopted attempt ends. The resumed prompt says the session was
+interrupted to deliver a message, and that its background commands were stopped with it, so the
+agent can start again what it still needs. The messages follow as they were written: no text of a
+message is ever read as part of the brief.
+
+Before it stops anything, the interrupt checks the resume with every check `start` makes. When one
+fails (the task's folder is gone, say), it says why and the session runs on. Just before it stops
+the session it looks at the agent's commands once more. If a publishing command has started
+meanwhile, the session runs on and the message waits. If another shell command has started, that
+command is stopped instead, unless it belongs to a sub-agent while the parent is idle: then it is
+background work and the parent session is resumed. A command the agent starts in the instant
+between that look and the stop can still be ended with the session: nothing outside the agent can
+hold it back from starting one.
+
+Every way of resuming a task (`start`, a retry, a rework, an interrupt) first claims the attempt it
+replaces, so two of them never both start the next attempt. When two senders interrupt at once, one
+resumes the session and the other only adds its message, which that resume or the hook delivers.
+A `start` while an interrupt resumes the task is refused. `stop` and `close` end an interrupt that is
+between its two relays: the task ends stopped or closed, and is not resumed. A stop or close that
+comes after a resume claimed the task always wins, for a parked task's watcher too.
+
+If a resume ends unexpectedly after it started its relay and before it saved the task, that relay is
+not left alone. The next `start`, interrupt, `stop` or `close` adopts it as the task's next attempt:
+`start` then starts nothing new, and `stop` and `close` stop it.
+
+A resume is refused, with the reason, and nothing changes, for:
+
+- a babysitter, running or parked: its park watcher delivers messages;
+- a command task: it has no session and no agent;
+- a task whose session id is not known yet, just after it started;
+- a sandboxed Codex task with the network on: the Codex relay cannot resume its session;
+- a task with a publishing command running in the background, its own or a sub-agent's, which
+  stopping the session would end. A sub-agent's command still counts after the task ended its turn.
+
+`$ORCH steer <run> <task-id>` does the same for messages already queued, and so does "Send now" on
+the dashboard.
+
+### Idle
+
+An idle agent waits on background work. A Claude agent can end its turn while a command it started in the background still runs (for
+example `bash watch.sh`, started with `run_in_background`). Its process stays alive, but it reads no
+message until that command ends and its next turn starts. An open sub-agent call also counts as
+background work after the parent's turn ends, even without a background Bash command of the
+parent's own. Such a task is **idle**:
+
+- `status`, `wait` and the dashboard show it as running, with the activity "idle: ended its turn and
+  waits on its own background command `<command>`", or "background work" for an open sub-agent
+  call. Its row has `idle`.
+- With a message unread, it needs attention at once: `wait` exits 5 with an `unreachable` item, and
+  the dashboard's attention lane lists it. It is not left until it shows as silent after 15 minutes.
+- A plain `send` stores the message and says the agent will not read it until its own wait ends,
+  with the commands that deliver it now: `$ORCH steer <run> <task-id>`, or `send ... --steer`.
+- A message from the dashboard's box interrupts an idle task at once, since nothing else would
+  deliver it.
+
+A Codex agent is never idle: `codex exec` ends its process when its turn ends. An interrupt of a
+Codex agent that is not in a shell command resumes its thread the same way.
+
+### When the agent reads its messages
+
+`$ORCH inbox <run> <task-id>` (without `--ack` or `--all`), run by anyone but the agent itself,
+prints one line above the unread
+messages that says when the agent will read them: after its next tool call; when its current shell
+command ends; not until its background work ends (idle); when its watcher wakes it (parked);
+or at its next `inbox` (Codex). Where an interrupt would deliver them now, a second line gives the
+command. The dashboard shows the same line above its message box. In `status --json`, a task row's
+`inbox.delivery` holds it as `{ how, text, steer }`.
 
 ## Messages from the user
 

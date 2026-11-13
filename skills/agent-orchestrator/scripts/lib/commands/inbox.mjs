@@ -4,46 +4,90 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLAUDE_PROJECTS, CLI_PATH } from "../config.mjs";
+import { CLI_PATH } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
-import { INBOX_HEADING, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, childHint, fromAgent, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
-import { guard, recordChange } from "../ownership.mjs";
-import { describe, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
-import { planSteer, shorten, stopCommand } from "../steer.mjs";
-import { die, emit, parseDuration } from "../util.mjs";
+import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { actorLabel, guard, recordChange } from "../ownership.mjs";
+import { describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
+import { adoptResume, awaitInterrupt, claimResume, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
+import { die, emit, parseDuration, readJson } from "../util.mjs";
 
-// Claude Code's user settings, where the orchestrator registers the orch-inbox hook.
-const CLAUDE_SETTINGS = path.join(path.dirname(CLAUDE_PROJECTS), "settings.json");
-
-const readText = (file) => {
-  try {
-    return fs.readFileSync(file, "utf8");
-  } catch {
-    return "";
-  }
-};
-
-// How a message reaches this attempt of the task. An attempt started before messages existed has
-// no inbox note in its brief, so it never runs `inbox`.
-function delivery(task) {
-  const noted = readText(path.join(task.outDir || "", "orch-brief.md")).includes(INBOX_HEADING);
+// How a message reaches this attempt of the task: { delivery, reaches }. An attempt started before
+// messages existed has no inbox note in its brief, so it never runs `inbox`. `row`, the task's
+// describe() row when the caller has it, tells a task that ended its turn and waits on a background
+// command of its own (`idle`): it reads the message only once that command ends.
+function delivery(run, task, row = null) {
   const resume = "stop it and resume it with a delta brief instead";
-  if (task.agent === "codex") {
-    return noted
-      ? "Codex reads it the next time it runs `inbox`: after each gate run, and at least every 10 commands"
-      : `this attempt's brief has no inbox note, so Codex will not read it; ${resume}`;
+  if (row?.idle && run) {
+    const on = row.idle.background ? `background command \`${shorten(row.idle.background)}\`` : "background work";
+    return { delivery: `the agent ended its turn and waits on its own ${on}, so it does not read this message until that wait ends. Deliver it now with \`node ${CLI_PATH} steer ${run.id} ${task.id}\`; next time, send with --steer: \`node ${CLI_PATH} send ${run.id} ${task.id} "<message>" --steer\``, reaches: true };
   }
-  if (readText(CLAUDE_SETTINGS).includes("orch-inbox.mjs")) return "the orch-inbox hook adds it to Claude's context after its next tool call";
+  const noted = briefNoted(task.outDir);
+  const will = (text) => ({ delivery: text, reaches: !text.includes("will not read it") });
+  if (task.agent === "codex") {
+    return will(noted
+      ? "Codex reads it the next time it runs `inbox`: after each gate run, and at least every 10 commands"
+      : `this attempt's brief has no inbox note, so Codex will not read it; ${resume}`);
+  }
+  if (inboxHookRegistered()) return will("the orch-inbox hook adds it to Claude's context after its next tool call");
   const unhooked = `the orch-inbox hook is not registered in ${CLAUDE_SETTINGS}`;
-  if (task.readOnly) return `${unhooked}, and a read-only Claude agent has no shell to run \`inbox\`, so it will not read it; ${resume}`;
-  if (!noted) return `${unhooked}, and this attempt's brief has no inbox note, so Claude will not read it; ${resume}`;
-  return `${unhooked}, so Claude reads it the next time it runs \`inbox\`, at its next gate run`;
+  if (task.readOnly) return will(`${unhooked}, and a read-only Claude agent has no shell to run \`inbox\`, so it will not read it; ${resume}`);
+  if (!noted) return will(`${unhooked}, and this attempt's brief has no inbox note, so Claude will not read it; ${resume}`);
+  return will(`${unhooked}, so Claude reads it the next time it runs \`inbox\`, at its next gate run`);
 }
 
 // How a message sent now would reach this attempt of the task, and whether it would be read.
-export function messageReach(task) {
-  const how = delivery(task);
-  return { delivery: how, reaches: !how.includes("will not read it") };
+export function messageReach(task, run = null, row = null) {
+  return delivery(run, task, row);
+}
+
+// Interrupt a task's session to deliver its unread messages now (steer.mjs, "Interrupts"): claim
+// the attempt and start the helper that resumes it. `plan` is planSteer()'s { resume }. Returns the
+// answer's `steer`: { resuming, was, doing, attempt, generation } once the helper started; BUSY when
+// another interrupt is already resuming it; or { waiting } when the helper could not start.
+function interrupt(run, task, plan, g) {
+  return startClaimed(run, task, plan, g, claimResume(task, "interrupt", { by: g ? actorLabel(g.actor) : null, ...plan.resume }));
+}
+
+// Start the helper for an interrupt that claimResume() answered: BUSY when another resume holds the
+// task, a refusal when an earlier resume left a relay running, else the helper for this claim.
+function startClaimed(run, task, plan, g, claim) {
+  if (claim.busy) return BUSY;
+  if (claim.orphan) {
+    // That relay becomes the task's attempt (steer.mjs, adoptResume): the next interrupt reaches it.
+    const adopted = adoptResume(run, task);
+    return { waiting: `an earlier resume ended after starting its relay (pid ${claim.orphan}), which still runs${adopted ? `: it is now attempt ${adopted.attempt}` : ""}, so nothing was interrupted; send again to reach it`, refused: true };
+  }
+  if (!launchInterrupt(run, task, claim)) return { waiting: readJson(claim.file)?.error || "the interrupt could not start" };
+  recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "interrupted" });
+  return { resuming: true, was: plan.resume.was, doing: plan.resume.doing, attempt: task.attempt, generation: claim.generation };
+}
+
+// The answer while another interrupt resumes the task's session.
+const BUSY = Object.freeze({ resuming: true, busy: true, note: "another interrupt is already resuming its session, which delivers the unread messages with it, or after its next tool call" });
+
+// For the command line: wait for an interrupt that `steer` started to resume the session, and say
+// how it ended: { resumed: attempt, pid } added, or { failed: error, kept } (`kept` when its session
+// was not stopped: a check refused the resume first); unchanged when it is still starting after the wait.
+function settleInterrupt(run, id, steer) {
+  if (!steer?.resuming || steer.busy) return steer;
+  const record = awaitInterrupt(path.join(taskDir(run, id), `attempt-${steer.attempt}`), steer.generation);
+  const { resuming, ...rest } = steer;
+  if (record?.attempt) return { ...rest, resumed: record.attempt, pid: record.pid ?? null };
+  // A shell command that started meanwhile was stopped in the session's place.
+  if (record?.released && record.command) return { stopped: record.command, seconds: record.seconds ?? null };
+  if (record?.released) return { ...rest, failed: record.error || "the resume failed", kept: record.stopped !== true };
+  return steer;
+}
+
+// The line `send` and `steer` print about an interrupt.
+function interruptLine(steer, what) {
+  if (steer.resumed) return `steered: the agent ${steer.doing}, so its session was stopped and resumed in attempt ${steer.resumed} (pid ${steer.pid}) with ${what} as its next prompt`;
+  const unread = what === "this message" ? "the message stays" : "they stay";
+  if (steer.failed && steer.kept) return `not steered: its session cannot be resumed (${steer.failed}), so it was not stopped; ${unread} unread`;
+  if (steer.failed) return `not steered: the agent ${steer.doing}, and resuming its session failed: ${steer.failed}; ${unread} unread`;
+  if (steer.busy) return `steered: ${steer.note}`;
+  return `steered: the agent ${steer.doing}, so its session is being stopped and resumed with ${what} as its next prompt (still starting; see \`status\`)`;
 }
 
 // A message the task cannot take now, with the HTTP status the dashboard answers with.
@@ -75,9 +119,14 @@ function shownToUser(run, task, dir) {
 // Append `text` to a running task's inbox. `send` and the dashboard both deliver through this.
 // Attached images (Buffers that imageKind accepts) are saved in the task's folder, where only the
 // user can read them, and their paths are added to the text the agent receives.
-// `steer` stops the agent's pending command so the message reaches it now (see steer.mjs); the
-// answer's `steer` says what happened: { stopped, seconds } or { waiting }. A message from an agent
-// the task started (finish-notice.mjs, `ask`) has `from` "agent:<run>/<task>", `kind` and `about`.
+// `steer` delivers the message now (steer.mjs): it stops the agent's pending shell command, or,
+// when the agent is not in one, interrupts its session to resume it with the message. `wakeIdle`
+// (the dashboard's box) does the same without `steer` for a task that ended its turn and waits on a
+// background command of its own, which nothing else would reach. The answer's `steer` says what
+// happened: { stopped, seconds }, { resuming, was, doing, attempt, generation } (or { resuming,
+// busy, note } while another interrupt resumes it), or { waiting } (with `refused` when an interrupt
+// would do harm). A message from an agent the task started (finish-notice.mjs, `ask`) has `from`
+// "agent:<run>/<task>", `kind` and `about`; one that an orch task sent records that task in `by`.
 // Steering is guarded (ownership.mjs): `caller` is who steers, this command's caller by default, or
 // the dashboard (DASHBOARD_CALLER) for the user's clicks. The message records who stopped the
 // command (`steeredBy`), and a steer by anyone but the owner leaves the owner a notice.
@@ -85,7 +134,7 @@ function shownToUser(run, task, dir) {
 // with { id, delivery, reaches }: the message's id and how it would reach the agent. `ask` records
 // its question there, so the question exists before its notice can be read. If it throws, nothing
 // is written and the error propagates.
-export function deliverMessage(run, id, text, { from = null, images = [], steer = false, kind = null, about = null, caller = null, prepare = null } = {}) {
+export function deliverMessage(run, id, text, { from = null, images = [], steer = false, wakeIdle = false, kind = null, about = null, caller = null, prepare = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
   text = String(text ?? "").trim();
@@ -93,9 +142,12 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const kinds = images.map(imageKind);
   if (kinds.some((kind) => !kind)) throw new SendError("attachments must be PNG, JPEG, GIF or WebP images", 400);
   // A message reaches only a running agent; a finished one gets it in the brief that resumes it. A
-  // parked babysitter counts as running: its watcher resumes it with the message (park.mjs).
-  const parked = !relayAlive(task.pid, task.startedAt, task.outDir) && isParked(run, task);
-  if (!relayAlive(task.pid, task.startedAt, task.outDir) && !parked) {
+  // parked babysitter counts as running: its watcher resumes it with the message (park.mjs). So does
+  // a task whose session an interrupt is resuming: the resume, or the hook after it, delivers it.
+  const alive = relayAlive(task.pid, task.startedAt, task.outDir);
+  const parked = !alive && isParked(run, task);
+  const resuming = !alive && !parked && Boolean(task.pid) && Boolean(interruptHeld(task));
+  if (!alive && !parked && !resuming) {
     const row = describe(run, task);
     if (!task.pid) throw new SendError(`task ${id} has not started; put the message in its brief`, 409);
     throw new SendError(
@@ -120,16 +172,30 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
       `Attached ${paths.length === 1 ? "image" : "images"}: open ${paths.length === 1 ? "it" : "each"} with your image-viewing tool (Claude: Read; Codex: view_image).`,
       ...paths.map((file) => `- ${file}`)].join("\n")
     : text;
-  // The plan is made before the message is written, so the agent learns its command was stopped.
-  const plan = steer && !parked ? planSteer(task) : null;
-  const g = plan?.stop ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
+  // The plan is made before the message is written, so the agent learns its command was stopped,
+  // and an interrupt claims the attempt first, so its resume finds the message.
+  const row = alive ? describe(run, task) : null;
+  const plan = alive && (steer || (wakeIdle && row?.idle)) ? planSteer(task, row) : null;
+  const g = plan?.stop || plan?.resume ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
+  const claim = plan?.resume ? claimResume(task, "interrupt", { by: actorLabel(g.actor), ...plan.resume }) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
   const { delivery: how, reaches } = parked
     ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
-    : messageReach(task);
+    : resuming || claim?.busy
+      ? { delivery: "an interrupt is resuming the agent's session: it reads this message with that resume, or after its next tool call", reaches: true }
+      : plan?.resume
+        ? { delivery: "an interrupt resumes the agent's session with this message as its next prompt", reaches: true }
+        : messageReach(task, run, row);
   const messageId = randomUUID().slice(0, 8);
-  if (prepare) prepare({ id: messageId, delivery: how, reaches });
-  const message = appendMessage(dir, task.attempt || 1, sent, { id: messageId, from, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
+  try {
+    if (prepare) prepare({ id: messageId, delivery: how, reaches });
+  } catch (error) {
+    if (claim?.file) fs.rmSync(claim.file, { force: true }); // nothing was written: give the claim back
+    throw error;
+  }
+  // The orch task whose shell sends the message, if any (finish-notice.mjs, callerTask).
+  const by = !from && !kind && process.env.AGENT_ORCH_RUN && process.env.AGENT_ORCH_TASK ? `${process.env.AGENT_ORCH_RUN}/${process.env.AGENT_ORCH_TASK}` : null;
+  const message = appendMessage(dir, task.attempt || 1, sent, { id: messageId, from, by: by === `${run.id}/${id}` ? null : by, body: text, images: paths, steered: plan?.stop ? plan.stop.command : null, steeredBy: g?.actor ?? null, kind, about, answers });
   // A typed message may answer the task's questions: append the answers it gives to answers.jsonl
   // now (recordAnswers). A notice (`kind`) never answers. A failed write loses nothing, since
   // answerOf finds the answer from the messages, so it never fails the send.
@@ -140,22 +206,31 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   }
   let steered = null;
   if (plan?.stop) steered = stopCommand(plan).length ? { stopped: shorten(plan.stop.command), seconds: plan.stop.seconds } : { waiting: "its command had already finished" };
-  else if (plan) steered = { waiting: plan.wait };
+  else if (claim?.busy) steered = BUSY;
+  else if (claim) steered = startClaimed(run, task, plan, g, claim);
+  else if (plan) steered = { waiting: plan.wait, ...(plan.refused ? { refused: true } : {}) };
+  else if (steer && resuming) steered = BUSY;
+  else if (steer && parked) steered = { waiting: "the task is parked: its watcher resumes it with this message within a few seconds, so it is not interrupted", refused: true };
   if (steered?.stopped) recordChange(run, g, { task: id, attempt: task.attempt || null, action: "steered" });
   return { message, delivery: how, reaches, steer: steered };
 }
 
-// "Send now" for messages already waiting: stop the agent's current command so it reads them.
+// "Send now" for messages already waiting: deliver them now, by stopping the agent's current shell
+// command or, when it is not in one, by interrupting its session (deliverMessage's `steer`).
 // `caller` is who steers, as in deliverMessage().
 export function steerQueued(run, id, { caller = null } = {}) {
   const task = loadTask(run, id);
   if (!task) throw new SendError(`no task ${id} in run ${run.id}`, 404);
-  if (!relayAlive(task.pid, task.startedAt, task.outDir)) throw new SendError(`task ${id} is not running`, 409);
+  const alive = relayAlive(task.pid, task.startedAt, task.outDir);
+  const resuming = !alive && Boolean(task.pid) && Boolean(interruptHeld(task));
+  if (!alive && !resuming) throw new SendError(`task ${id} is not running`, 409);
   const dir = taskDir(run, id);
   const queued = readInbox(dir).filter((m) => !m.read).map((m) => m.id);
   if (!queued.length) throw new SendError(`task ${id} has no queued messages`, 409);
-  const plan = planSteer(task);
-  if (!plan.stop) return { queued: queued.length, steer: { waiting: plan.wait } };
+  if (resuming) return { queued: queued.length, steer: BUSY };
+  const plan = planSteer(task, describe(run, task));
+  if (plan.resume) return { queued: queued.length, steer: interrupt(run, task, plan, guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {})) };
+  if (!plan.stop) return { queued: queued.length, steer: { waiting: plan.wait, ...(plan.refused ? { refused: true } : {}) } };
   const g = guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {});
   markSteered(dir, queued, plan.stop.command, g.actor);
   const stopped = stopCommand(plan).length;
@@ -174,10 +249,12 @@ export function cmdSteer(args) {
     if (error instanceof SendError) die(error.message, 2);
     throw error;
   }
-  const { queued, steer } = result;
-  emit(args, { run: run.id, task: id, ...result }, steer.stopped
-    ? `stopped \`${steer.stopped}\` so ${id} reads its ${queued} queued message${queued === 1 ? "" : "s"} now`
-    : `not stopped: ${steer.waiting}`);
+  const { queued } = result;
+  const steer = settleInterrupt(run, id, result.steer);
+  const them = `its ${queued} queued message${queued === 1 ? "" : "s"}`;
+  emit(args, { run: run.id, task: id, ...result, steer }, steer.stopped
+    ? `stopped \`${steer.stopped}\` so ${id} reads ${them} now`
+    : steer.resuming || steer.resumed || steer.failed ? interruptLine(steer, them) : `not stopped: ${steer.waiting}`);
 }
 
 export function cmdSend(args) {
@@ -204,8 +281,11 @@ export function cmdSend(args) {
     if (error instanceof SendError) die(error.message, 2);
     throw error;
   }
-  const { message, delivery: how, steer } = sent;
-  const steerLine = steer?.stopped ? `\nsteered: stopped \`${steer.stopped}\` so the agent reads it now` : steer?.waiting ? `\nnot steered: ${steer.waiting}` : "";
+  const { message, delivery: how } = sent;
+  const steer = sent.steer ? settleInterrupt(run, id, sent.steer) : null;
+  const steerLine = steer?.stopped ? `\nsteered: stopped \`${steer.stopped}\` so the agent reads it now`
+    : steer?.resuming || steer?.resumed || steer?.failed ? `\n${interruptLine(steer, "this message")}`
+      : steer?.waiting ? `\nnot steered: ${steer.waiting}` : "";
   emit(args, { run: run.id, task: id, ...message, delivery: how, ...(steer ? { steer } : {}) }, `sent message ${message.id} to ${id} (attempt ${message.attempt})\ndelivery: ${how}${steerLine}`);
 }
 
@@ -259,11 +339,15 @@ export function cmdInbox(args) {
   // Someone looking for what a task asked often tries the run alone: point them at `questions`.
   if (!args._[1]) die(`missing TASK id: inbox shows one task's messages (inbox ${run.id} TASK). To list the run's open questions in full, run: node ${CLI_PATH} questions ${run.id}`, 2);
   const id = validTask(args._[1]);
-  if (!loadTask(run, id)) die(`no task ${id} in run ${run.id}`);
+  const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
   const dir = taskDir(run, id);
   const messages = readInbox(dir);
   const shown = args.all ? messages : messages.filter((m) => !m.read);
   const unread = shown.filter((m) => !m.read).map((m) => m.id);
+  // Whoever looks at the queue (no --ack or --all), when it is not the agent itself, is told when the
+  // agent reads them (inbox.mjs, readsWhen), and how to deliver them now where an interrupt does.
+  const self = process.env.AGENT_ORCH_RUN === run.id && process.env.AGENT_ORCH_TASK === id;
+  const waiting = unread.length && !self && !args.ack && !args.all ? describe(run, task).inbox?.delivery || null : null;
   // A sandboxed agent may be unable to write the state folder; it still gets its messages.
   let ackError = null;
   if (args.ack) {
@@ -278,6 +362,7 @@ export function cmdInbox(args) {
   if (!shown.length) lines.push(`no ${args.all ? "" : "unread "}messages for ${id}`);
   else {
     lines.push(args.all ? `${plural(shown.length, "message")} for ${id} (${unread.length} unread):` : `${plural(shown.length, "unread message")} for ${id}:`);
+    if (waiting) lines.push(waiting.text, ...(waiting.steer ? [`interrupt: ${waiting.steer}`] : []));
     const replies = readReplies(dir);
     for (const m of shown) {
       lines.push("", `[${m.id}] ${senderLabel(m)}, ${m.time}${m.read ? " (read)" : ""}`, m.text);
@@ -289,5 +374,5 @@ export function cmdInbox(args) {
     if (args.ack && unread.length && !ackError) lines.push("", `marked ${plural(unread.length, "message")} as read`);
   }
   if (ackError) process.stderr.write(`orch: could not mark the messages as read (${ackError}); they will show again\n`);
-  emit(args, { run: run.id, task: id, messages: shown, acked: args.ack && !ackError ? unread : [] }, lines.join("\n"));
+  emit(args, { run: run.id, task: id, messages: shown, acked: args.ack && !ackError ? unread : [], ...(waiting ? { delivery: waiting } : {}) }, lines.join("\n"));
 }

@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { eventually, fixture } from './helpers.mjs';
+import { eventually, fixture, writeJson } from './helpers.mjs';
 
 const hook = fileURLToPath(new URL('../scripts/hooks/orch-inbox.mjs', import.meta.url));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -139,6 +139,26 @@ test('the dashboard pushes queued messages through only from its own page', asyn
   assert.equal(ok.status, 200);
   assert.match((await ok.json()).steer.stopped, /sleep 61/);
   await eventually(() => !alive(pid), 'the pending command is still running');
+  f.release(task);
+  await f.finished(run, 'busy');
+});
+
+test('a task in a shell command reads its messages when the command ends: status and inbox say so, and how to interrupt it', async (t) => {
+  const f = await fixture(t);
+  writeJson(path.join(f.claude, 'settings.json'), { hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'node orch-inbox.mjs' }] }] } });
+  const run = await f.newRun();
+  const { task, pid } = await busy(f, run, 'busy');
+  const sent = await f.json(['send', run.id, 'busy', 'Later is fine.']);
+  assert.equal(sent.delivery, "the orch-inbox hook adds it to Claude's context after its next tool call");
+  const row = (await f.json(['status', run.id])).tasks.find((r) => r.id === 'busy');
+  assert.equal(row.shell, 'sleep 61; echo done');
+  assert.equal(row.idle, undefined);
+  assert.deepEqual([row.inbox.delivery.how, row.inbox.delivery.text], ['shell', 'It reads them when its current shell command ends (`sleep 61; echo done`). Interrupt it to deliver them now.']);
+  assert.match(row.inbox.delivery.steer, new RegExp(`orch\\.mjs steer ${run.id} busy$`));
+  const inbox = await f.command(['inbox', run.id, 'busy']);
+  assert.match(inbox.stdout, /^1 unread message for busy:\nIt reads them when its current shell command ends \(`sleep 61; echo done`\)\. Interrupt it to deliver them now\.\ninterrupt: node \S+ steer \S+ busy\n\n\[/);
+  assert.ok(alive(pid), 'reading the queue changes nothing');
+  process.kill(pid, 'SIGTERM');
   f.release(task);
   await f.finished(run, 'busy');
 });
