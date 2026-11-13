@@ -339,10 +339,11 @@ function fakeDom() {
 // The page's board, drawn by its own code into the fake DOM from a state the test changes.
 // With `realHold`, the page's own press and selection hold runs too, with its timers run by the test.
 function boardPage({ realHold = false } = {}) {
-  const doc = fakeDom(), stored = {};
-  const page = { doc, root: doc.getElementById('runs'), board: [], fetches: 0, held: false, timers: [], picked: [] };
+  const doc = fakeDom(), stored = {}, local = {};
+  const page = { doc, root: doc.getElementById('runs'), board: [], fetches: 0, held: false, timers: [], picked: [], local };
   const context = vm.createContext({
     document: doc, sessionStorage: { getItem: (k) => stored[k] ?? null, setItem: (k, v) => { stored[k] = v; } }, stored,
+    localStorage: { getItem: (k) => local[k] ?? null, setItem: (k, v) => { local[k] = String(v); }, removeItem: (k) => { delete local[k]; } },
     matchMedia: () => ({ matches: true }), CSS: { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`) },
     fetch: async () => { page.fetches++; return { headers: { get: () => null }, text: async () => JSON.stringify(page.board) }; },
     getSelection: () => ({ isCollapsed: !page.held, anchorNode: page.held ? page.root : null }), tick() {}, compose() {}, preload() {}, detail() {},
@@ -450,6 +451,53 @@ test('a press holds the board until it ends, so the click lands on the element p
   const before = page.find('tbody.session', 'key', 's2/r~a');
   await page.refresh();
   assert.ok(!root.contains(before));
+});
+
+test('a section dragged by the grip in its header holds its place until the automatic order of the sections changes', async () => {
+  const page = boardPage({ realHold: true }), { root } = page;
+  page.run(snippet('// Dragging a section by the grip', '// Jump to the top'));
+  page.board = [boardSection('s1'), boardSection('s2'), boardSection('s3')];
+  await page.refresh();
+  const order = () => root.querySelectorAll('.run').map((s) => s.dataset.run);
+  const section = (id) => page.find('.run', 'run', id);
+  const settle = async () => { while (page.timers.length) page.timers.shift()(); for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  let allowed = 0;
+  const fire = (name, event) => { for (const fn of root.listeners[name] || []) fn({ dataTransfer: { setData() {}, setDragImage() {} }, clientY: 0, preventDefault() { allowed++; }, ...event }); };
+  assert.deepEqual(order(), ['s1', 's2', 's3']);
+  // Drag s3 by its header's grip over s1: a line marks the place before s1, and the board holds still.
+  const grip = section('s3').querySelector('h2 .grip');
+  fire('dragstart', { target: grip });
+  assert.ok(section('s3').classList.contains('dragging'));
+  fire('dragover', { target: section('s1').querySelector('td') });
+  assert.ok(section('s1').classList.contains('drop-before'));
+  page.board[1].tasks[1].now = 'busy during the drag';
+  await page.refresh();
+  assert.ok(root.contains(grip), 'no redraw while the drag runs');
+  fire('drop', { target: section('s1').querySelector('td') });
+  fire('dragend', { target: grip });
+  await settle();
+  assert.deepEqual(order(), ['s3', 's1', 's2']);
+  assert.ok(!root.contains(grip), 'the board caught up after the drop');
+  assert.deepEqual(root.querySelectorAll('.dragging, .drop-before, .drop-after'), []);
+  assert.deepEqual(JSON.parse(page.local.orchOrder), { sections: { auto: ['s1', 's2', 's3'], order: ['s3', 's1', 's2'] } });
+  // A row's grip moves it only among the rows of its own section: over another section's row it lands nowhere.
+  allowed = 0;
+  fire('dragstart', { target: page.find('tbody.session', 'key', 's1/r~b').querySelector('.grip') });
+  fire('dragover', { target: page.find('tbody.session', 'key', 's2/r~a') });
+  fire('drop', { target: page.find('tbody.session', 'key', 's2/r~a') });
+  fire('dragend', {});
+  await settle();
+  assert.equal(allowed, 0);
+  assert.deepEqual(page.find('.run', 'run', 's2').querySelectorAll('tbody.session').map((b) => b.dataset.key), ['s2/r~a', 's2/r~b']);
+  assert.deepEqual(Object.keys(JSON.parse(page.local.orchOrder)), ['sections']);
+  // New activity inside a section keeps the sections' order; a change in their automatic order drops it.
+  page.board[0].tasks[0].now = 'more work';
+  await page.refresh();
+  assert.deepEqual(order(), ['s3', 's1', 's2']);
+  page.board = [page.board[1], page.board[0], page.board[2]];
+  await page.refresh();
+  assert.deepEqual(order(), ['s2', 's1', 's3']);
+  assert.equal(page.local.orchOrder, undefined);
 });
 
 test('a row opens by itself only for a running agent or a main session with a running row under it', () => {

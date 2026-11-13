@@ -6,7 +6,7 @@ const exitedLabel=t=>outcome(t);
 const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="closed"||s==="idle"||s==="parked"?"s-idle":"s-bad";
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
-let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
+let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18,GUTTER=10; // GUTTER: room left of the tree for the rows' grips
 // A row with sub-agents opens while any agent under it runs and closes once none do; clicking its
 // arrow, or the row itself, overrides that until the running state under it changes.
 const manual=new Map(),live=new Map();
@@ -20,6 +20,57 @@ const isOpen=k=>{const a=!!live.get(k),m=manual.get(k);if(m&&m.auto===a)return m
 // Sections whose older rows (finished and quiet a while; the server flags them) are shown, until
 // "hide older" is clicked or the page reloads.
 const olderShown=new Set();
+// The order rule for what the user dragged. A list is the board's sections, or the rows under one
+// parent in one section. A drop remembers, for its list, the automatic order (the server's) of the
+// list's keys at that moment and the user's order: `memo` is {auto, order}. The user's order shows
+// while the automatic order still has the same keys in the same order; any change there (an item
+// moved, appeared or left) makes the memory invalid, and the list shows the automatic order again.
+const sameOrder=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((k,i)=>k===b[i]);
+// Keys are distinct strings; anything else in a memory (it comes from storage) is never sorted or shown.
+const isKeys=a=>Array.isArray(a)&&a.every(k=>typeof k==="string")&&new Set(a).size===a.length;
+const sameKeys=(a,b)=>isKeys(a)&&isKeys(b)&&sameOrder([...a].sort(),[...b].sort());
+function heldOrder(auto,memo){const order=memo?.order;
+  const valid=sameOrder(auto,memo?.auto)&&sameKeys(order,auto);
+  return{keys:[...(valid?order:auto)],valid}}
+// The well-formed memories in what storage held: an object of lists, each with `auto` and `order`
+// holding the same distinct string keys. Everything else is dropped, so stored data never breaks a draw.
+function validOrders(v){const out={};if(!v||typeof v!=="object"||Array.isArray(v))return out;
+  for(const[n,m]of Object.entries(v))if(m&&typeof m==="object"&&sameKeys(m.auto,m.order))out[n]={auto:[...m.auto],order:[...m.order]};
+  return out}
+// A list's name: "sections", or the section's id and the parent's key ("" for the top level).
+const listName=(runId,parentKey)=>JSON.stringify([runId,parentKey||""]);
+const sameParent=(a,b)=>(a.parentKey||"")===(b.parentKey||"");
+// The memories still valid on this board; the others are forgotten, each list on its own.
+function keptOrders(board,memos){const auto=new Map([["sections",board.map(r=>r.id)]]),kept={};
+  for(const run of board)for(const t of run.tasks||[]){const n=listName(run.id,t.parentKey);if(!auto.has(n))auto.set(n,[]);auto.get(n).push(t.key)}
+  for(const[n,memo]of Object.entries(memos||{}))if(auto.has(n)&&heldOrder(auto.get(n),memo).valid)kept[n]=memo;
+  return kept}
+const sectionOrder=(board,memos)=>{const h=heldOrder(board.map(r=>r.id),memos?.sections),byId=new Map(board.map(r=>[r.id,r]));return h.valid?h.keys.map(id=>byId.get(id)):board};
+// A section's rows in tree order, with the rows under each parent in their held order, so a row
+// moves with every row under it. With no held order the server's rows stand as they are.
+function treeRows(run,memos){const tasks=run.tasks||[],byKey=new Map(tasks.map(t=>[t.key,t])),kids=new Map(),out=[];let held=false;
+  for(const t of tasks){const p=t.parentKey||"";if(!kids.has(p))kids.set(p,[]);kids.get(p).push(t.key)}
+  const walk=p=>{const auto=kids.get(p);if(!auto)return;const h=heldOrder(auto,memos?.[listName(run.id,p)]);held||=h.valid;for(const k of h.keys){out.push(byKey.get(k));walk(k)}};
+  walk("");return held&&out.length===tasks.length?out:tasks}
+// Where a dragged row lands over the row `over`: before or after the row with the same parent that
+// holds `over` (that row itself, or one under it, which puts it after that row's subtree). Null when
+// there is none: a row never changes parent or section, and the main session row never moves.
+function rowTarget(tasks,key,over,after){const byKey=new Map(tasks.map(t=>[t.key,t])),t=byKey.get(key);if(!t||t.main)return null;
+  let at=byKey.get(over),deep=false;while(at&&!sameParent(at,t)){at=byKey.get(at.parentKey);deep=true}
+  return!at||at.main||at.key===key?null:{target:at.key,after:deep||!!after}}
+// `keys` with `key` moved to just before, or after, `target`.
+const moveKey=(keys,key,target,after)=>{const rest=keys.filter(k=>k!==key),at=rest.indexOf(target);if(at<0||rest.length===keys.length)return keys;rest.splice(at+(after?1:0),0,key);return rest};
+// What a drop leaves remembered for its list, given the list's automatic and shown orders: undefined
+// when the drop changes nothing, null (forget) when it gives back the automatic order, else a memo.
+function dropMemo(auto,shown,key,target,after){const next=moveKey(shown,key,target,after);
+  return sameOrder(next,shown)?undefined:sameOrder(next,auto)?null:{auto:[...auto],order:next}}
+// The memories, kept in this browser so a redraw and a reload keep them. Every draw reads them from
+// memory; they load from storage once, at startup, and each change is written back when storage
+// takes it, so a full or blocked storage leaves dragging working until the page reloads.
+let orders=(()=>{try{return validOrders(JSON.parse(localStorage.getItem("orchOrder")||"{}"))}catch{return{}}})();
+const saveOrders=()=>{try{Object.keys(orders).length?localStorage.setItem("orchOrder",JSON.stringify(orders)):localStorage.removeItem("orchOrder")}catch{}};
+// On every new board: forget the lists whose automatic order changed, and give back the rest.
+function boardOrders(){const kept=keptOrders(state,orders);if(Object.keys(kept).length!==Object.keys(orders).length){orders=kept;saveOrders()}return orders}
 // Rows are rebuilt when data changes; starting every pulse at the page timeline's origin keeps
 // rebuilt dots in step instead of restarting their beat.
 // Rows that changed place glide from their old position to the new one (rising or dropping), and
@@ -52,7 +103,7 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sel&&!e.target?.clo
 function toggleRow(row){const k=row?.dataset.key;if(!k||!row.querySelector(".caret[data-key]"))return;
   const open=sel===k?!isOpen(k):true;if(open!==isOpen(k))manual.set(k,{open,auto:!!live.get(k)})}
 const pick=row=>{toggleRow(row);choose(row)};
-document.getElementById("runs").addEventListener("click",e=>{const cr=e.target.closest(".caret[data-key]");
+document.getElementById("runs").addEventListener("click",e=>{if(e.target.closest(".grip"))return;const cr=e.target.closest(".caret[data-key]");
   if(cr){const k=cr.dataset.key;manual.set(k,{open:!isOpen(k),auto:!!live.get(k)});lastState="";refresh();return}
   const ob=e.target.closest(".older[data-run]");if(ob){const r=ob.dataset.run;if(!olderShown.delete(r))olderShown.add(r);redrawSection(r);return}
   if(!getSelection().isCollapsed)return;const a=e.target.closest(".attn[data-key]");if(a)reveal(a.dataset.key);else pick(e.target.closest("tbody.session"))});
@@ -71,10 +122,11 @@ function askNotifications(){
 const needButton=document.getElementById("need");
 needButton.addEventListener("click",()=>{document.getElementById("runs").scrollTo({top:0});askNotifications()});
 needButton.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();needButton.click()}});
-// Hold a panel still while the user presses in it or has text selected in it, so an update
-// does not wipe the selection; it catches up once the selection is cleared.
+// Hold a panel still while the user presses in it, drags a section or row in it (`dragged`), or has
+// text selected in it, so an update does not wipe the selection or the drag; it catches up after.
 let pressed=null,behind=false;
-const holding=el=>{if(pressed&&el.contains(pressed))return true;const s=getSelection();return !!s&&!s.isCollapsed&&el.contains(s.anchorNode)};
+let dragged=null;
+const holding=el=>{if(pressed&&el.contains(pressed)||dragged&&el.contains(dragged.el))return true;const s=getSelection();return !!s&&!s.isCollapsed&&el.contains(s.anchorNode)};
 function catchUp(){if(!behind||holding(document.getElementById("runs"))||holding(document.getElementById("detail")))return;behind=false;lastState="";lastDetail="";refresh().then(detail)}
 // A press holds its panel from pointerdown until pointerup or pointercancel, so the click that follows
 // lands on the very element that was pressed, never on one a redraw put in its place; then one
@@ -123,7 +175,7 @@ async function refresh(){
   if(lane.length)root.append($("div",{class:"lane"},...(forUser.length?[$("h2",{},"Needs attention"),...forUser.map(attn)]:[]),
     ...(theirs.length?[$("h2",{class:"muted",title:"Agents are told about these; none needs you"},"For agents"),...theirs.map(attn)]:[])));
   tick();
-  for(const run of state){tin+=run.totals.tokensIn;tout+=run.totals.tokensOut;running+=run.totals.running;root.append(sectionView(run))}
+  for(const run of sectionOrder(state,boardOrders())){tin+=run.totals.tokensIn;tout+=run.totals.tokensOut;running+=run.totals.running;root.append(sectionView(run))}
   refocus(root,focus);
   syncPulses(root);
   slide(root,before);
@@ -149,14 +201,17 @@ function sectionView(run){
   // above it always show. Arrows and "+N hidden" count only the rows listed.
   const chosen=new Set();if(sel?.startsWith(run.id+"/"))for(let k=sel.slice(run.id.length+1);k;k=byKey.get(k)?.parentKey)chosen.add(k);
   const older=new Set(run.tasks.filter(t=>t.older&&!chosen.has(t.key))),showOlder=olderShown.has(run.id);
-  const listed=run.tasks.filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map();
+  // Rows in their held order (treeRows), each with a grip while another row under its parent is listed.
+  const listed=treeRows(run,orders).filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map(),tops=listed.filter(t=>!t.parentKey).length;
   for(const t of listed){if(t.parentKey)kids.set(t.parentKey,(kids.get(t.parentKey)||0)+1);for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey){below.set(p,(below.get(p)||0)+1);if(t.state==="running")busy.set(p,(busy.get(p)||0)+1)}}
   const hiddenBy=t=>{for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)if(!isOpen(run.id+"/"+p))return true;return false};
   const rows=listed.filter(t=>!hiddenBy(t)).map(t=>{
     const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
-    const indent=w=>({class:"name",style:"padding-left:"+(6+t.depth*IND+w)+"px;--pad:"+(4+t.depth*IND)+"px;--gw:"+(t.depth*IND)+"px"});
+    const indent=w=>({class:"name",style:"padding-left:"+(GUTTER+6+t.depth*IND+w)+"px;--pad:"+(GUTTER+4+t.depth*IND)+"px;--gw:"+(t.depth*IND)+"px"});
+    const movable=!t.main&&(t.parentKey?kids.get(t.parentKey):tops)>1;
     return $("tbody",{class:c,"data-key":key,tabindex:"0"},$("tr",{},
       $("td",{...indent(0),title:t.native&&t.parent!=="orchestrator"?"started by "+t.parent:""},
+        movable?$("span",{class:"grip",draggable:"true",title:"Drag to move this row among the rows beside it","aria-hidden":"true"}):null,
         nk?$("span",{class:"caret","data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
@@ -172,7 +227,7 @@ function sectionView(run){
   const summary=[tt.running?tt.running+" running":null,tt.finished?tt.finished+" finished":null,awaiting?awaiting+" awaiting review":null,ap+fmt(tt.tokensIn)+" in / "+ap+fmt(tt.tokensOut)+" out","started "+started,!run.running&&run.activeMs?"last active "+clock(run.activeMs):null].filter(Boolean).join(" · ");
   const tip=[[run.id,by,[(run.repo||"").split("/").pop(),run.baseBranch].filter(Boolean).join(" @ ")].filter(Boolean).join(" · "),...((run.runs||[]).length>1?["runs:",...run.runs.map(r=>"  "+(r.goal||r.id))]:[]),"token counts leave out the main session"].join("\n");
   const toggle=older.size?$("button",{class:"older","data-run":run.id,title:showOlder?"fold away the finished rows that have been quiet a while":"list the finished rows that have been quiet a while"},showOlder?"hide older":"show "+older.size+" older"):null;
-  return $("div",{class:"run","data-run":run.id},$("h2",{title:tip},sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
+  return $("div",{class:"run","data-run":run.id},$("h2",{title:tip},state.length>1?$("span",{class:"grip",draggable:"true",title:"Drag to move this section","aria-hidden":"true"}):null,sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
     $("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
       $("th",{class:"num"},"steps"),$("th",{class:"num"},"tokens in"),$("th",{class:"num"},"out"),$("th",{},"session"))),...(rows.length?rows:[$("tbody",{},$("tr",{},$("td",{colspan:"10",class:"muted"},older.size?"every row is older; show them from the header":"no tasks yet")))])),
   )}
@@ -589,6 +644,50 @@ document.getElementById("compose-file").addEventListener("change",e=>{addFiles([
   box.addEventListener("dragleave",()=>box.classList.remove("drop"));
   box.addEventListener("drop",e=>{box.classList.remove("drop");if(!hasFiles(e)||document.getElementById("compose-text").hidden)return;e.preventDefault();addFiles([...e.dataTransfer.files])})})();
 new ResizeObserver(()=>{const box=document.getElementById("compose");document.documentElement.style.setProperty("--compose-h",(box.hidden?0:box.offsetHeight)+"px")}).observe(document.getElementById("compose"));
+// Dragging a section by the grip in its header, or a row by the grip at its start, among the items of
+// its list (the order rule is described above `heldOrder`). Only a grip is draggable, so clicks, arrows, text
+// selection and the message box's image drop work as before. The board holds still while a drag
+// runs (`holding`), a line marks where the item would land, and the board catches up after the drop.
+let dropMark=null; // `dragged` is with the press hold, near the top
+const DRAG_TYPE="application/x-orch-order"; // not text, so no text field takes the drop
+function markDrop(el,after){if(dropMark&&(dropMark.el!==el||dropMark.after!==after))dropMark.el.classList.remove("drop-before","drop-after");
+  dropMark=el?{el,after}:null;if(el)el.classList.add(after?"drop-after":"drop-before")}
+// The last row drawn for `key`'s subtree in its section, where a line after it is drawn.
+function blockEnd(sec,run,key){const rows=[...sec.querySelectorAll("tbody.session")],byKey=new Map(run.tasks.map(t=>[t.key,t]));
+  const under=k=>{for(let p=byKey.get(k)?.parentKey;p;p=byKey.get(p)?.parentKey)if(p===key)return true;return false};
+  let i=rows.findIndex(b=>b.dataset.key===run.id+"/"+key);if(i<0)return null;while(rows[i+1]&&under(rows[i+1].dataset.key.split("/")[1]))i++;return rows[i]}
+const lowerHalf=(e,el)=>{const r=el.getBoundingClientRect();return e.clientY>r.top+r.height/2};
+// Where the dragged item would land under the pointer: {mark, after, target}, or null where it cannot.
+function dropAt(e){const d=dragged,el=e.target?.closest?.(d?.kind==="section"?".run[data-run]":"tbody.session[data-key]");if(!d||!el)return null;
+  if(d.kind==="section"){if(el.dataset.run===d.run)return null;const after=lowerHalf(e,el);return{mark:el,after,target:el.dataset.run}}
+  const[runId,over]=el.dataset.key.split("/"),run=state.find(r=>r.id===runId);if(runId!==d.run||!run)return null;
+  const at=rowTarget(run.tasks,d.key,over,lowerHalf(e,el));if(!at)return null;
+  const sec=el.closest(".run[data-run]"),mark=at.after?blockEnd(sec,run,at.target):sec.querySelector('tbody.session[data-key="'+CSS.escape(run.id+"/"+at.target)+'"]');
+  return mark?{mark,...at}:null}
+// Remember what a drop changed for its list; true when it changed the order shown.
+function dropOrder(d,at){const all={...orders};let name="sections",memo;
+  if(d.kind==="section")memo=dropMemo(state.map(r=>r.id),sectionOrder(state,all).map(r=>r.id),d.run,at.target,at.after);
+  else{const run=state.find(r=>r.id===d.run),t=run?.tasks.find(x=>x.key===d.key);if(!t)return false;name=listName(d.run,t.parentKey);
+    const same=x=>sameParent(x,t);memo=dropMemo(run.tasks.filter(same).map(x=>x.key),treeRows(run,all).filter(same).map(x=>x.key),d.key,at.target,at.after)}
+  if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];orders=all;saveOrders();return true}
+function endDrag(changed){markDrop(null);for(const el of document.getElementById("runs").querySelectorAll(".dragging"))el.classList.remove("dragging");
+  dragged=null;pressed=null;if(changed){behind=true;lastState=""}setTimeout(()=>catchUp(),0)}
+(()=>{const root=document.getElementById("runs");
+  root.addEventListener("dragstart",e=>{const g=e.target?.closest?.(".grip");if(!g)return; // other drags, such as selected text, stay the browser's
+    const row=g.closest("tbody.session[data-key]"),sec=g.closest(".run[data-run]");if(!sec)return;
+    if(row){const[run,key]=row.dataset.key.split("/");dragged={kind:"row",run,key,el:row}}else dragged={kind:"section",run:sec.dataset.run,el:sec};
+    e.dataTransfer.effectAllowed="move";e.dataTransfer.setData(DRAG_TYPE,dragged.run+"/"+(dragged.key||""));
+    const shown=row||g.parentNode,r=shown.getBoundingClientRect();try{e.dataTransfer.setDragImage(shown,e.clientX-r.left,e.clientY-r.top)}catch{}
+    // The item fades while it moves, a row with every row under it.
+    const run=state.find(x=>x.id===dragged.run),byKey=new Map((run?.tasks||[]).map(t=>[t.key,t]));
+    const moves=k=>{for(let p=k;p;p=byKey.get(p)?.parentKey)if(p===dragged.key)return true;return false};
+    if(row){for(const b of sec.querySelectorAll("tbody.session"))if(moves(b.dataset.key.split("/")[1]))b.classList.add("dragging")}else sec.classList.add("dragging")});
+  const over=e=>{if(!dragged)return;const at=dropAt(e);markDrop(at?.mark,at?.after);if(!at)return;e.preventDefault();e.dataTransfer.dropEffect="move"};
+  root.addEventListener("dragenter",over);root.addEventListener("dragover",over);
+  // Out over the rest of the page, the line goes; `dragleave` cannot tell, as it fires between cells too.
+  document.addEventListener("dragover",e=>{if(dragged&&!root.contains(e.target))markDrop(null)});
+  root.addEventListener("drop",e=>{if(!dragged)return;const at=dropAt(e);if(!at)return;e.preventDefault();endDrag(dropOrder(dragged,at))});
+  root.addEventListener("dragend",()=>{if(dragged)endDrag(false)})})();
 // Jump to the top or bottom of the details panel; each button shows only when it would move.
 (()=>{const d=document.getElementById("detail"),up=document.getElementById("jump-top"),down=document.getElementById("jump-bottom");
   const sync=()=>{up.hidden=d.scrollTop<40;down.hidden=atBottom(d)};
