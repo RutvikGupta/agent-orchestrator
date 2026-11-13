@@ -15,11 +15,15 @@ const PAGE_OPEN_MS = 10000; // the page polls every 2 s, so a request this recen
 const DETACH_WAIT_MS = 60_000;
 
 // The address of the dashboard with process `pid`, found by its health check on the ports it tries
-// (the asked one and the next ten), or null.
+// (the asked one and the next ten), or null. A health answer only claims a PID, and anyone can read
+// a PID: another account's server on the asked port could name ours, and the send key would go to
+// its page. So the address counts only when that process is this account's dashboard and itself
+// listens on that port (ownDashboard).
 async function serverUrl(host, port, pid) {
   for (let p = port; p <= port + 10; p++) {
     const url = `http://${host}:${p}/`;
-    if ((await dashboardHealth(url))?.pid === pid) return url;
+    const health = await dashboardHealth(url);
+    if (health?.pid === pid && ownDashboard(health, url)) return url;
   }
   return null;
 }
@@ -125,6 +129,11 @@ export async function cmdDashboard(args) {
       if (args.open) openBrowser(keyedUrl(url));
       return emit(args, { url, pid: child.pid, building: true },
         `dashboard: ${url}  (background pid ${child.pid}, still building its first board${args.open ? "; opened in the browser" : ""})\n${stopHint}`);
+    }
+    // Alive, but no address is proved to be its own yet: say so, and open nothing.
+    if (!exited()) {
+      return emit(args, { url: null, pid: child.pid, building: true },
+        `dashboard: starting in the background (pid ${child.pid}); its address is not known yet, so nothing was opened. Run this command again in a moment; its log is ${logPath}\n${stopHint}`);
     }
     die(`the background dashboard did not start; see ${logPath}`);
   }

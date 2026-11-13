@@ -6,13 +6,17 @@ import { CACHE_PATH, CLI_PATH } from './config.mjs';
 import { diskRefusal, diskSize, diskState } from './disk.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
 import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
-import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, sessionsEnded, sinceLastUse } from './ownership.mjs';
+import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, resetHostView, sessionsEnded, sinceLastUse } from './ownership.mjs';
 import { isParked, listRuns, loadTask, relayAlive, saveTask } from './runs.mjs';
 import { die, parseDuration, readJson } from './util.mjs';
 import { teardownWorktree } from './worktree-prep.mjs';
 
-const git = (cwd, args) => spawnSync('git', ['-C', cwd, ...args], {
-  encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+// A check that hangs (a huge or damaged worktree, a stuck filesystem) must not hold up collection, or
+// the worktree creation that waits for it: a git or du call that runs past its limit counts as failed,
+// which keeps the worktree. Removing a folder gets longer, since stopping it halfway helps nobody.
+const CHECK_TIMEOUT_MS = 30_000, REMOVE_TIMEOUT_MS = 5 * 60_000;
+const git = (cwd, args, timeout = CHECK_TIMEOUT_MS) => spawnSync('git', ['-C', cwd, ...args], {
+  encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, timeout,
 });
 const value = (cwd, args) => { const r = git(cwd, args); return r.status === 0 ? r.stdout.trim() : null; };
 const samePath = (a, b) => {
@@ -84,6 +88,18 @@ export function insideRunFolder(run, wt) {
   return Boolean(root && real && real.startsWith(root + path.sep));
 }
 
+// Which folder a path leads to now: its real path, and the device and inode of that folder. Null
+// when it does not resolve.
+function folderIdentity(wt) {
+  try {
+    const real = fs.realpathSync(wt), st = fs.statSync(real);
+    return { real, dev: st.dev, ino: st.ino };
+  } catch {
+    return null;
+  }
+}
+const sameFolder = (a, b) => Boolean(a && b && a.real === b.real && a.dev === b.dev && a.ino === b.ino);
+
 // `insideRun`: also keep a worktree whose real path is outside the run's folder (gc).
 export function worktreeSafety(run, task, { allowReadClosed = false, insideRun = false } = {}) {
   const wt = task.worktree?.path;
@@ -142,7 +158,7 @@ export function worktreeSafety(run, task, { allowReadClosed = false, insideRun =
 
 // du measures allocated blocks and does not follow preparation symlinks outside the worktree.
 function diskBytes(wt) {
-  const r = spawnSync('du', ['-sk', wt], { encoding: 'utf8' });
+  const r = spawnSync('du', ['-sk', wt], { encoding: 'utf8', timeout: CHECK_TIMEOUT_MS });
   const kb = Number.parseInt(r.stdout, 10);
   return r.status === 0 && Number.isFinite(kb) ? kb * 1024 : null;
 }
@@ -153,18 +169,23 @@ function diskBytes(wt) {
 // `ended`: the caller may act on the run because its launching sessions have ended (gc).
 // `insideRun`: keep a worktree outside the run's folder (gc). `auto`: the automatic collection made
 // the change, so it records that, and the run's owner gets a notice even when the caller owns it.
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false, insideRun = false, auto = false } = {}) {
+// `deadline`: a time (ms) after which no further worktree is judged; the rest are kept, unjudged.
+export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false, insideRun = false, auto = false, deadline = Infinity } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
     if (!task?.worktree) continue;
     const entry = { task: id, path: task.worktree.path, branch: task.worktree.branch };
+    if (Date.now() >= deadline) { report.kept.push({ ...entry, reason: OUT_OF_TIME }); report.timedOut = true; continue; }
     let reason = worktreeSafety(run, dryRun && expired.has(id) ? { ...task, closedAt: new Date().toISOString(), closedExplicitlyAttempt: task.attempt || 0 } : task, { allowReadClosed, insideRun });
     if (reason) {
       report.kept.push({ ...entry, reason });
       if (reclaimKept && !dryRun && fs.existsSync(entry.path) && !isParked(run, task) && !relayAlive(task.pid, task.startedAt, task.outDir)) reclaimTask(run, task);
       continue;
     }
+    // The folder the checks above looked at. Every slow step below (teardown, measuring) uses the
+    // pathname, which someone could meanwhile point elsewhere: removal acts only on this folder.
+    const pinned = dryRun ? null : folderIdentity(entry.path);
     let g;
     if (!dryRun) {
       g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id], ended });
@@ -183,10 +204,20 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
     const missing = !fs.existsSync(entry.path);
     const bytes = missing ? 0 : diskBytes(entry.path);
     if (!dryRun) {
+      // The last step before removal: the pathname must still lead to the folder that was checked
+      // (the same real path, device and inode), inside the run folder for gc, and removal then names
+      // that real path, so a parent swapped for a link during the steps above is not followed. A
+      // swap in the instant between this check and git's removal is not caught.
+      const now = missing ? null : folderIdentity(entry.path);
+      const target = missing ? canonical(entry.path) : now?.real;
+      const moved = missing ? Boolean(pinned) && fs.existsSync(pinned.real) : !sameFolder(pinned, now);
+      if (moved || !target || (insideRun && !insideRunFolder(run, target))) {
+        report.kept.push({ ...entry, reason: 'worktree folder changed while it was being collected' }); continue;
+      }
       // Remove this registration only; a repository-wide prune could affect another run.
       // --force permits ignored output and untracked cache files only.
-      const removed = missing && !registration(run, entry.path).registered ? { status: 0 } : git(run.repo, ['worktree', 'remove', '--force', entry.path]);
-      if (removed.status !== 0) { report.kept.push({ ...entry, reason: 'git worktree remove failed', detail: removed.stderr.trim() }); continue; }
+      const removed = missing && !registration(run, entry.path).registered ? { status: 0 } : git(run.repo, ['worktree', 'remove', '--force', target], REMOVE_TIMEOUT_MS);
+      if (removed.status !== 0) { report.kept.push({ ...entry, reason: 'git worktree remove failed', detail: (removed.stderr || '').trim() }); continue; }
       task.removedWorktree = { ...task.worktree, removedAt: new Date().toISOString() };
       delete task.worktree;
       task.worktreeRemovedBy = auto ? AUTO_COLLECTOR : actor || g.actor;
@@ -198,6 +229,9 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
   }
   return report;
 }
+
+// The reason a worktree is kept when a collection pass reached its deadline before judging it.
+export const OUT_OF_TIME = 'not checked: the collection ran out of time';
 
 // What a change by the automatic collection records: the collector as the actor, and a notice for
 // the run's owner whoever runs the collection, since nobody asked for the change.
@@ -233,9 +267,16 @@ export const ENDED_QUIET_MS = 3600000;
 // mode only once they have not used it for ENDED_QUIET_MS. A caller whose identity cannot be read
 // collects nothing. Only worktrees inside the run's folder are collected. `auto` records the
 // automatic collector as the actor, and leaves the run's owner a notice of every change.
-export async function collectRuns({ dryRun = false, olderThan, expireAfter = duration(process.env.AGENT_ORCH_EXPIRE ?? '7d'), auto = false, now = Date.now() } = {}) {
+// `deadline`: a time (ms) after which the pass stops: the runs it has not reached are left alone and
+// counted in `unchecked`, and `timedOut` is set. Returns { reports, timedOut, unchecked }.
+export async function collectRuns({ dryRun = false, olderThan, expireAfter = duration(process.env.AGENT_ORCH_EXPIRE ?? '7d'), auto = false, now = Date.now(), deadline = Infinity } = {}) {
   const reports = [];
-  for (const run of listRuns()) {
+  // One reading of the process table and of the hosts' sessions serves the whole pass.
+  resetHostView();
+  const runs = listRuns();
+  let timedOut = false, unchecked = 0;
+  for (const [index, run] of runs.entries()) {
+    if (Date.now() >= deadline) { timedOut = true; unchecked = runs.length - index; break; }
     const own = ownershipOf(run);
     const report = { run: run.id, removed: [], kept: [], expired: [], bytesFreed: 0 };
     const known = own.caller.kind !== 'unknown';
@@ -272,10 +313,11 @@ export async function collectRuns({ dryRun = false, olderThan, expireAfter = dur
         recordChange(run, change, { task: row.id, attempt: task.attempt || null, action: 'expired' });
       }
     }
-    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true, ended, insideRun: true, auto });
+    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true, ended, insideRun: true, auto, deadline });
+    if (collected.timedOut) timedOut = true;
     reports.push({ ...report, ...collected });
   }
-  return reports;
+  return { reports, timedOut, unchecked };
 }
 
 // Automatic collection collects runs idle this long, or LOW_DISK_AGE while the disk is low.
@@ -284,10 +326,15 @@ export const LOW_DISK_AGE = '1h';
 
 // Automatic collection: collectRuns in `auto` mode, with AUTO_AGE, or LOW_DISK_AGE while `disk` is
 // low (twice the minimum free space or less). Returns { olderThan, reports }.
-export async function autoCollect({ disk = diskState(), olderThan = null, dryRun = false } = {}) {
+export async function autoCollect({ disk = diskState(), olderThan = null, dryRun = false, deadline = Infinity } = {}) {
   const age = olderThan ?? duration(disk.low ? LOW_DISK_AGE : AUTO_AGE);
-  return { olderThan: age, reports: await collectRuns({ dryRun, olderThan: age, auto: true }) };
+  return { olderThan: age, ...(await collectRuns({ dryRun, olderThan: age, auto: true, deadline })) };
 }
+
+// How long worktree creation waits for the collection it runs on a full disk:
+// AGENT_ORCH_COLLECT_TIMEOUT, default 60s. At that time the pass stops where it is, and the disk is
+// read again with what it freed.
+const collectTimeout = () => parseDuration(process.env.AGENT_ORCH_COLLECT_TIMEOUT || '60s');
 
 // The log of an automatic collection: one line per worktree removed and per task expired, then
 // what it freed. Nothing when it changed nothing.
@@ -309,9 +356,11 @@ export async function ensureDisk(dir, what = 'create a worktree') {
   let disk;
   try { disk = diskState(dir); } catch (error) { die(error.message, 2); }
   if (!disk.critical) return disk;
+  const limit = collectTimeout();
   process.stderr.write(`orch: only ${diskSize(disk.freeBytes)} of disk is free, below the minimum of ${diskSize(disk.minBytes)} (AGENT_ORCH_MIN_FREE_DISK): collecting unused worktrees first\n`);
-  const { reports } = await autoCollect({ disk });
+  const { reports, timedOut, unchecked } = await autoCollect({ disk, deadline: Date.now() + limit });
   const lines = autoCollectionLines(reports);
+  if (timedOut) lines.push(`auto gc stopped at its limit of ${limit / 1000}s (AGENT_ORCH_COLLECT_TIMEOUT)${unchecked ? `, with ${unchecked} run${unchecked === 1 ? '' : 's'} not checked` : ''}; \`gc\` checks them all`);
   if (lines.length) process.stderr.write(lines.map((line) => `orch: ${line}\n`).join(''));
   const after = diskState(dir);
   if (!after.critical) return after;

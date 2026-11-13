@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
 import { compact, firstLine, slug, stamp, table } from "../format.mjs";
-import { guard, recordChange } from "../ownership.mjs";
+import { guard, recordChange, withHostRoot } from "../ownership.mjs";
 import { detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { totals } from "../views.mjs";
@@ -40,8 +40,9 @@ export function cmdNew(args) {
     baseBranch: top ? git(top, ["branch", "--show-current"], { allowFail: true }) || null : null,
     baseCommit: top ? git(top, ["rev-parse", "HEAD"], { allowFail: true }) : null,
     goal: args.goal || null,
-    // lastSeenAt: when its owner last used the run (ownership.mjs, touchOwner).
-    orchestrator: { ...detectOrchestrator({ started: true }), lastSeenAt: createdAt },
+    // lastSeenAt: when its owner last used the run (ownership.mjs, touchOwner). hostRoot: where the
+    // launching session's host keeps its sessions, which tells later whether that session still runs.
+    orchestrator: { ...withHostRoot(detectOrchestrator({ started: true })), lastSeenAt: createdAt },
     createdAt,
   };
   writeJson(path.join(dir, "run.json"), run);

@@ -67,6 +67,9 @@ Every worktree is created after one check of the free space on the volume that w
   space, the minimum, and the commands that free space: `gc --dry-run`, `gc`,
   `close RUN TASK...`, and `git worktree remove` for a worktree made by hand. `dispatch` reports it
   as that task's refusal.
+- That collection stops after `AGENT_ORCH_COLLECT_TIMEOUT` (default `60s`). It finishes the
+  worktree in hand, leaves the runs it has not reached, and says how many. The disk is then judged
+  on what was freed. `gc` and the dashboard's own pass have no such limit.
 - No option bypasses the check. Only the setting changes it.
 - The disk counts as low below twice the minimum. The dashboard's header then shows the free space
   as a warning, and the automatic collection collects sooner (`references/dashboard.md`).
@@ -111,6 +114,12 @@ with the reason:
   made elsewhere with `worktree --path`, or reached through a link that leads out of the run
   folder, is kept with the reason "worktree is outside the run folder". `close`, `integrate` and
   `cleanup` still collect such a folder.
+- The folder is still the one that was checked. Just before removal, the path must lead to the
+  same real path, device and inode as at the first check, and removal names that real path. A
+  folder moved or swapped for a link meanwhile is kept, with "worktree folder changed while it
+  was being collected".
+
+A `git` or `du` check that runs longer than 30 seconds counts as failed, which keeps the worktree.
 
 Before it removes a worktree, it runs the recipe's `teardown` there. A failed `teardown` is
 reported and does not keep the worktree. A `teardown` that leaves tracked changes does.
@@ -129,13 +138,18 @@ $ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
   run. Other commands, such as `cleanup` or `close`, still refuse such a run without `--adopt`.
   - A session has ended when its recorded process is gone (or that PID now runs something else),
     and the host reports no other process for its session id: Claude Code's
-    `~/.claude/sessions/<pid>.json` files name no live Claude process for it, and no process holds
-    the Codex session's rollout file open. A session resumed under a new process is therefore
-    alive.
+    `sessions/<pid>.json` files name no live Claude process for it, and no Codex process holds
+    the session's rollout file open. A session resumed under a new process is therefore alive.
+  - The host's report is read under the host root the run recorded: `new` and `--adopt` save the
+    launcher's Claude configuration folder or `CODEX_HOME` as `hostRoot` in `run.json`. A session
+    started with another `CLAUDE_CONFIG_DIR` or `CODEX_HOME` than the collector's is therefore
+    still found. A run recorded before this uses the collector's own root.
   - An orch task that launched a nested run has ended when its relay's process is gone. For a
     nested run, every launcher up its chain must have ended.
-  - When any of this cannot be read (`ps` or `lsof` fails, a host's folder cannot be read, no
-    process was recorded, the parent run is gone), the run is kept, as if alive.
+  - When any of this cannot be read, the run is kept, as if alive: `ps` or `lsof` fails, a
+    recorded host root is missing or unreadable, a session file of a live process cannot be read
+    or parsed, a Codex date folder cannot be listed, no process was recorded, or the parent run
+    is gone.
   - A run whose session is alive stays that session's to collect. A run launched from a terminal
     never counts as ended.
 - A run is collected only when no task in it runs or is parked and it has had no activity for 24
@@ -172,12 +186,14 @@ after it starts, then five minutes after each pass ends, for as long as it runs.
   space left, and nothing when it changed nothing. The dashboard's log
   (`<state root>/dashboard.log` for a background dashboard) keeps these lines.
 - The owner of each run it changed gets a notice that "automatic worktree collection" made the
-  change, even when the caller owns the run: nobody asked for the change.
+  change, even when the caller owns the run: nobody asked for the change. A run with no launcher
+  record is the user's: the notice is kept in the run, and the user's `status` shows it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `AGENT_ORCH_MIN_FREE_DISK` | `15GB` | The least free space for creating a worktree; `0` turns the check off. Low means below twice this |
 | `AGENT_ORCH_AUTO_GC` | on | `off` stops the dashboard's automatic collection |
+| `AGENT_ORCH_COLLECT_TIMEOUT` | `60s` | How long worktree creation waits for the collection it runs on a full disk |
 | `AGENT_ORCH_EXPIRE` | `7d` | When an unread finished task expires, in `gc` and `gc --auto` |
 
 ## Restoring a collected worktree

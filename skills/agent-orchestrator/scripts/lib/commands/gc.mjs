@@ -16,7 +16,7 @@ export async function cmdGc(args) {
   const given = args['older-than'] === undefined ? null : duration(args['older-than']);
   const { olderThan, reports } = args.auto
     ? await autoCollect({ disk, dryRun, olderThan: given })
-    : { olderThan: given ?? duration('24h'), reports: await collectRuns({ dryRun, olderThan: given ?? duration('24h'), expireAfter }) };
+    : { olderThan: given ?? duration('24h'), reports: (await collectRuns({ dryRun, olderThan: given ?? duration('24h'), expireAfter })).reports };
   const totals = { removed: 0, kept: 0, keptByReason: {}, expired: 0, bytesFreed: 0 };
   for (const r of reports) {
     totals.removed += r.removed.length; totals.kept += r.kept.length;

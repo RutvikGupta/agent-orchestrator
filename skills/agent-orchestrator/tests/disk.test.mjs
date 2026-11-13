@@ -130,3 +130,23 @@ test('the dashboard\'s health carries the disk reading, and its header has a pla
   const script = await (await d.get('/app.js')).text();
   assert.match(script, /fetch\("api\/health"\)/);
 });
+
+test('the collection that worktree creation runs on a full disk stops at AGENT_ORCH_COLLECT_TIMEOUT, and the disk is judged on what it freed', async (t) => {
+  const f = await fixture(t);
+  const ended = await endedRun(f, 'ended');
+  const target = await f.newRun('target');
+  const full = { AGENT_ORCH_DISK_FREE_BYTES: '9GB' };
+  // No time at all: nothing is judged, nothing is removed, and the refusal says so.
+  const stopped = await f.command(['worktree', target.id, 'first', '--no-prep'], { code: 1, env: { ...full, AGENT_ORCH_COLLECT_TIMEOUT: '0s' } });
+  assert.match(stopped.stderr, /orch: auto gc stopped at its limit of 0s \(AGENT_ORCH_COLLECT_TIMEOUT\), with \d+ runs? not checked/);
+  assert.match(stopped.stderr, /Automatic collection removed 0 worktrees first/);
+  assert.equal(fs.existsSync(ended.wt.path), true, 'a collection with no time left removed a worktree');
+  await assertNotCreated(f, target, 'first');
+  // With the default limit the same pass collects it.
+  const collected = await f.command(['worktree', target.id, 'second', '--no-prep'], { code: 1, env: full });
+  assert.doesNotMatch(collected.stderr, /stopped at its limit/);
+  assert.match(collected.stderr, /Automatic collection removed 1 worktree first/);
+  assert.equal(fs.existsSync(ended.wt.path), false);
+  const bad = await f.command(['worktree', target.id, 'third', '--no-prep'], { code: 2, env: { ...full, AGENT_ORCH_COLLECT_TIMEOUT: 'soon' } });
+  assert.match(bad.stderr, /bad duration "soon"/);
+});

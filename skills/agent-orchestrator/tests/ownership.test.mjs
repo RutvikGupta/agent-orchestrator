@@ -663,3 +663,80 @@ test('a launcher whose process cannot be read is not ended: a live relay with ps
   await f.finished(parent, 'lead');
   assert.equal(await gcReason(f, nested.run), 'ended: its process (pid 99999999) is gone');
 });
+
+test('a session is looked for under the host root its run recorded: one live there keeps its run, and a recorded root that is gone proves nothing', async (t) => {
+  const f = await fixture(t);
+  // `new` records where the launching session's host keeps its sessions.
+  const made = await f.newRun('made', { CODEX_THREAD_ID: 'session-a' });
+  assert.deepEqual([made.orchestrator.agent, made.orchestrator.hostRoot], ['codex', f.codex]);
+  // A Claude session and a Codex session that run under other roots than the collector's.
+  const claudeRoot = path.join(f.root, 'other-claude'), codexRoot = path.join(f.root, 'other-codex');
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'elsewhere-claude', pid: 99999999, hostRoot: claudeRoot });
+  const host = await standIn(t, f, 'claude');
+  fs.mkdirSync(path.join(claudeRoot, 'sessions'), { recursive: true });
+  writeJson(path.join(claudeRoot, 'sessions', `${host.pid}.json`), { pid: host.pid, sessionId: 'elsewhere-claude' });
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'elsewhere-codex', pid: 99999999, hostRoot: codexRoot });
+  const rollout = path.join(codexRoot, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-elsewhere-codex.jsonl');
+  fs.mkdirSync(path.dirname(rollout), { recursive: true });
+  fs.writeFileSync(rollout, '');
+  const holder = await standIn(t, f, 'codex', rollout);
+  // A run whose recorded root no longer exists: nothing says its session has ended.
+  const lost = await idleLaunched(f, 'lost', { agent: 'claude', sessionId: 'lost-session', pid: 99999999, hostRoot: path.join(f.root, 'no-such-root') });
+  for (const r of [claude, codex, lost]) assert.equal(await gcReason(f, r.run), 'ownership refused', `${r.run.id} counted as ended`);
+  await host.stop();
+  await holder.stop();
+  for (const r of [claude, codex]) assert.equal(await gcReason(f, r.run), 'ended: its process (pid 99999999) is gone');
+  assert.equal(await gcReason(f, lost.run), 'ownership refused');
+});
+
+test('session evidence that cannot be read in full is not an ended session: a corrupt file of a live process, an unreadable rollout folder', async (t) => {
+  const f = await fixture(t);
+  const sessions = path.join(f.claude, 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'unclear-claude', pid: 99999999 });
+  // A corrupt file of a PID that names no process cannot name a live session: it blocks nothing.
+  fs.writeFileSync(path.join(sessions, '99999998.json'), '{"sessionId": "uncl');
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+  // The same file under a live process's PID may name this session.
+  const host = await standIn(t, f, 'claude');
+  fs.writeFileSync(path.join(sessions, `${host.pid}.json`), '{"sessionId": "uncl');
+  assert.equal(await gcReason(f, claude.run), 'ownership refused');
+  await host.stop();
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+
+  // Codex: a date folder that cannot be listed may hold the session's rollout.
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'unclear-codex', pid: 99999999 });
+  const day = path.join(f.codex, 'sessions', '2026', '11', '12');
+  fs.mkdirSync(day, { recursive: true });
+  assert.equal(await gcReason(f, codex.run), 'ended: its process (pid 99999999) is gone');
+  fs.chmodSync(day, 0o000);
+  try {
+    assert.equal(await gcReason(f, codex.run), 'ownership refused');
+    assert.equal((await f.json(['gc'], { env: B })).runs.find((r) => r.run === codex.run.id).reason, 'ownership refused');
+    assert.equal(fs.existsSync(codex.wt.path), true);
+  } finally {
+    fs.chmodSync(day, 0o700);
+  }
+});
+
+test('one lsof serves a whole collection pass, however many Codex sessions it judges', async (t) => {
+  const f = await fixture(t);
+  const day = path.join(f.codex, 'sessions', '2026', '11', '13');
+  fs.mkdirSync(day, { recursive: true });
+  const runs = [];
+  for (const n of [1, 2, 3]) {
+    fs.writeFileSync(path.join(day, `rollout-2026-11-13T00-00-0${n}-many-${n}.jsonl`), '');
+    runs.push(await idleLaunched(f, `many-${n}`, { agent: 'codex', sessionId: `many-${n}`, pid: 99999999 }));
+  }
+  // An `lsof` that records each call, then runs the real one.
+  const real = f.env.PATH.split(':').map((dir) => path.join(dir, 'lsof')).find((file) => fs.existsSync(file));
+  assert.ok(real, 'no lsof on the PATH');
+  const bin = path.join(f.root, 'counting-lsof'), log = path.join(f.root, 'lsof.log');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'lsof'), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${real}" "$@"\n`, { mode: 0o755 });
+  const report = await f.json(['gc', '--dry-run'], { env: { ...B, PATH: `${bin}:${f.env.PATH}` } });
+  for (const r of runs) assert.equal(report.runs.find((x) => x.run === r.run.id).sessionEnded, 'its process (pid 99999999) is gone');
+  // Calls that ask which files are open (not the ones that ask for working directories).
+  const probes = fs.readFileSync(log, 'utf8').split('\n').filter((line) => line && !line.includes('-d cwd'));
+  assert.equal(probes.length, 1, probes.join('\n'));
+});

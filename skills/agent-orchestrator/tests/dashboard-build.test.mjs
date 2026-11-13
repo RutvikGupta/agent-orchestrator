@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -730,10 +731,13 @@ test('the automatic collection runs five minutes after each pass, as the user wh
   assert.deepEqual(off.pending('autoCollect'), []);
 });
 
-test('dashboard --detach reports a server still building its first board after a minute as starting, not as failed', async (t) => {
+// `dashboard --detach` on `port`, with a server whose first build hangs. Both the waiting command and
+// the server load PRELOAD: their clocks stand still unless ctl/clock moves them. `stop(pid)` names
+// the server for the cleanup: it is no child of this test, so it is stopped by its PID, and it
+// kills its worker as it exits.
+async function detached(t, port) {
   let server = null, ctl = null;
-  // The detached server is no child of this test: stop it by its PID; it kills its worker as it
-  // exits. Registered before the fixture's own cleanup, which removes the folders, so it runs first.
+  // Registered before the fixture's own cleanup, which removes the folders, so it runs first.
   t.after(async () => {
     if (ctl) fs.writeFileSync(path.join(ctl, 'release'), '');
     if (server && alive(server)) process.kill(server, 'SIGTERM');
@@ -750,8 +754,6 @@ test('dashboard --detach reports a server still building its first board after a
   const preload = path.join(f.root, 'board-preload.cjs');
   fs.writeFileSync(preload, PRELOAD);
   fs.writeFileSync(path.join(ctl, 'hang'), '');
-  const port = await freePort();
-  // Both the waiting command and the server load PRELOAD: their clocks stand still unless ctl/clock moves them.
   const env = { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_BOARD_CTL: ctl, TEST_BOARD_RUNS: path.join(f.state, 'runs'), AGENT_ORCH_RECLAIM: 'off', AGENT_ORCH_AUTO_GC: 'off', AGENT_ORCH_NOTIFY: 'off' };
   const command = spawn(process.execPath, [cli, 'dashboard', '--detach', '--host', '127.0.0.1', '--port', String(port)], { cwd: f.repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -759,15 +761,49 @@ test('dashboard --detach reports a server still building its first board after a
   command.stderr.on('data', (chunk) => { output += chunk; });
   const exited = new Promise((resolve) => command.on('exit', (code) => resolve(code)));
   await eventually(() => fs.existsSync(path.join(ctl, 'blocked')), 'the server\'s first build did not start');
-  const health = await eventually(async () => {
-    try { const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) }); return r.ok && r.json(); } catch { return false; }
-  }, 'the server did not answer while building');
-  server = health.pid;
-  // A minute passes for the waiting command, and the first board is still not built.
-  fs.writeFileSync(path.join(ctl, 'clock'), '61000');
-  assert.equal(await exited, 0, output);
-  assert.match(output, new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port}/  \\(background pid ${server}, still building its first board\\)\\n`));
-  assert.doesNotMatch(output, /did not start/);
-  assert.ok(alive(server), 'the server stopped');
-  assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false, 'the server recorded itself before its first board');
+  return {
+    f, ctl, exited, output: () => output,
+    // The server's health on a port, once it answers; it is then also named for the cleanup.
+    async health(at) {
+      const answer = await eventually(async () => {
+        try { const r = await fetch(`http://127.0.0.1:${at}/api/health`, { signal: AbortSignal.timeout(1000) }); return r.ok && r.json(); } catch { return false; }
+      }, 'the server did not answer while building');
+      server = answer.pid;
+      return answer;
+    },
+    // A minute passes for the waiting command, and the first board is still not built.
+    minutePasses() { fs.writeFileSync(path.join(ctl, 'clock'), '61000'); },
+  };
+}
+
+test('dashboard --detach reports a server still building its first board after a minute as starting, not as failed', async (t) => {
+  const port = await freePort();
+  const d = await detached(t, port);
+  const { pid } = await d.health(port);
+  d.minutePasses();
+  assert.equal(await d.exited, 0, d.output());
+  assert.match(d.output(), new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port}/  \\(background pid ${pid}, still building its first board\\)\\n`));
+  assert.doesNotMatch(d.output(), /did not start/);
+  assert.ok(alive(pid), 'the server stopped');
+  assert.equal(fs.existsSync(path.join(d.f.state, 'dashboard.json')), false, 'the server recorded itself before its first board');
+});
+
+test('dashboard --detach never takes another server that names its dashboard\'s PID for the dashboard: the send key goes only to a port that process listens on', async (t) => {
+  // Something else holds the asked port, so the dashboard listens on the next one. It answers the
+  // health check with the dashboard's PID, which anyone can read.
+  const port = await freePort();
+  let real = null;
+  const impostor = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ pid: real, url: `http://127.0.0.1:${port}/`, tabs: 0, pageAgoMs: null }));
+  });
+  await new Promise((resolve, reject) => { impostor.once('error', reject); impostor.listen(port, '127.0.0.1', resolve); });
+  t.after(() => new Promise((resolve) => { impostor.closeAllConnections?.(); impostor.close(resolve); }));
+  const d = await detached(t, port);
+  real = (await d.health(port + 1)).pid;
+  assert.notEqual(real, process.pid);
+  d.minutePasses();
+  assert.equal(await d.exited, 0, d.output());
+  assert.doesNotMatch(d.output(), new RegExp(`127\\.0\\.0\\.1:${port}/`), `the impostor's address was reported:\n${d.output()}`);
+  assert.match(d.output(), new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port + 1}/  \\(background pid ${real}, still building its first board\\)\\n`));
 });

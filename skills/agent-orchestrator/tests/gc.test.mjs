@@ -722,3 +722,37 @@ test('gc --auto leaves a run whose session ended under an hour ago; an explicit 
   const explicit = await f.json(['gc', '--older-than', '0s'], { env: B });
   assert.deepEqual(explicit.runs.find((r) => r.run === run.id).removed.map((r) => r.task), ['old']);
 });
+
+test('a worktree whose folder is moved away and replaced by a link while it is measured is kept: removal never follows the link', async (t) => {
+  const f = await fixture(t), run = await f.newRun('swap');
+  await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  // A `du` that, when gc measures the worktree (its last slow step), moves the run's worktrees
+  // folder out of the run and leaves a link to it in its place.
+  const bin = path.join(f.root, 'swapping-du');
+  fs.mkdirSync(bin);
+  const from = path.join(run.dir, 'worktrees'), to = path.join(f.root, 'moved-worktrees');
+  fs.writeFileSync(path.join(bin, 'du'), `#!/bin/sh\nif [ ! -L "${from}" ]; then mv "${from}" "${to}" && ln -s "${to}" "${from}"; fi\nprintf '8\\t%s\\n' "$2"\n`, { mode: 0o755 });
+  const report = await f.json(['gc'], { env: { PATH: `${bin}:${f.env.PATH}` } });
+  assert.equal(fs.lstatSync(from).isSymbolicLink(), true, 'the swap did not happen');
+  const mine = report.runs.find((r) => r.run === run.id);
+  assert.deepEqual(mine.removed, []);
+  assert.deepEqual(mine.kept.map((r) => [r.task, r.reason]), [['old', 'worktree folder changed while it was being collected']]);
+  assert.equal(fs.existsSync(path.join(to, 'old', '.git')), true, 'the folder now outside the run was removed through the link');
+  assert.ok(readJson(f.taskFile(run, 'old')).worktree, 'the task lost its worktree record');
+});
+
+test('gc --auto records its change in a run with no launcher record, and the user\'s status shows it', async (t) => {
+  const f = await fixture(t), run = await f.newRun('legacy');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  const file = path.join(run.dir, 'run.json');
+  const { orchestrator, ...legacy } = readJson(file);
+  writeJson(file, legacy);
+  await f.command(['gc', '--auto'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.deepEqual(notices(run).map((n) => [n.task, n.action, n.byLabel, n.owners.map((o) => o.agent)]), [['old', 'worktree removed', 'automatic worktree collection', ['terminal']]]);
+  const status = await f.json(['status', run.id]);
+  assert.deepEqual((status.changedByOthers || []).map((n) => [n.task, n.action]), [['old', 'worktree removed']]);
+  assert.match(status.changedByOthers[0].text, /worktree removed by automatic worktree collection/);
+});
