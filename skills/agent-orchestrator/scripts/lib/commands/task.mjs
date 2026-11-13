@@ -12,7 +12,7 @@ import { stopResume } from "../steer.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
-import { attemptAgent, describe, earlierNames, isParked, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
+import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -138,56 +138,107 @@ export function cmdLog(args) {
   process.stdout.write(`${parts.join("\n")}\n`);
 }
 
-export function cmdStop(args) {
-  const run = loadRun(args._[0]);
-  const id = validTask(args._[1]);
-  let task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
-  const g = guard(run, `stop task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
+// Stop one task of `run`, as `stop` does: mark it stopped (stoppedAt, stoppedBy), end its park, stop
+// a resume that holds it between two relays, and signal its relay's process group. `g` is guard()'s
+// answer for its run, and a change by anyone but the run's owner leaves the owner a notice. Returns
+// null when nothing of the task runs; otherwise { finish }, where finish() waits for the relay to
+// exit, ends what its command left running, and returns { text, exited }: the line `stop` prints, and
+// whether everything has gone. Signalling and waiting are apart, so that a caller stopping several
+// tasks signals them all before it waits for any.
+function stopTask(run, task, g) {
+  const id = task.id;
+  const mark = () => saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
   const stopped = () => recordChange(run, g, { task: id, attempt: task.attempt || null, action: "stopped" });
+  const ended = (text) => ({ finish: () => ({ text, exited: true }) });
   // A parked babysitter has no relay. Mark it stopped first, so that a resume that has not started
   // its relay yet starts nothing and one that has keeps the stop; then end its park, stopping its
   // watcher and any relay a resume started.
   if (isParked(run, task)) {
-    saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
+    mark();
     const parked = endPark(run, task, "stop");
     parked?.ended?.();
     const latest = loadTask(run, id) || task;
     if (latest.attempt === task.attempt || !relayAlive(latest.pid, null, latest.outDir)) {
       const what = [parked?.stopped?.length ? `its watcher (pid ${parked.stopped.join(", ")})` : null, parked?.relayStopped ? `the relay a resume had started (pid ${parked.relayStopped})` : null].filter(Boolean);
       stopped();
-      process.stdout.write(`stopped parked ${shownName(task)}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}\n`);
-      return;
+      return ended(`stopped parked ${shownName(task)}${what.length ? ` and ${what.join(" and ")}` : ""}${parked?.error ? `; ending its park failed: ${parked.error}` : ""}`);
     }
     task = latest; // a resume saved its attempt first: stop that attempt too
   }
   // A resume between the task's two relays, such as an interrupt's (steer.mjs): mark the task
   // stopped first, so that it starts nothing, and stop what it runs.
-  const resume = stopResume(run, task, () => saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor }));
+  const resume = stopResume(run, task, mark);
   if (resume?.text) {
     stopped();
-    process.stdout.write(`${resume.text}\n`);
-    return;
+    return ended(resume.text);
   }
   if (resume?.task) task = resume.task;
   if (!relayAlive(task.pid, null, task.outDir)) {
     const left = endCommandGroups(run, task);
-    if (!left) die(`task ${shownName(task)} is not running`);
-    if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
+    if (!left) return null;
+    if (!task.stoppedAt) mark();
     stopped();
-    process.stdout.write(`stopped the ${leftText(left)}; its relay had already exited\n`);
-    return;
+    return ended(`stopped the ${leftText(left)}; its relay had already exited`);
   }
   // Recorded on the task, whatever its attempt: a babysitter stopped as it ends parked never parks.
-  if (!task.stoppedAt) saveTask(run, { ...(loadTask(run, id) || task), stoppedAt: new Date().toISOString(), stoppedBy: g.actor });
+  if (!task.stoppedAt) mark();
   stopped();
   try {
     process.kill(-task.pid, "SIGTERM"); // detached → the relay leads its own process group
   } catch {
     process.kill(task.pid, "SIGTERM");
   }
-  const gone = waitForExit(task.pid, 15000, task.outDir);
-  const left = gone ? endCommandGroups(run, task) : null;
-  process.stdout.write(`${gone ? "stopped" : "sent SIGTERM to"} ${shownName(task)} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}\n`);
+  return {
+    finish: () => {
+      const gone = waitForExit(task.pid, 15000, task.outDir);
+      const left = gone ? endCommandGroups(run, task) : null;
+      return { exited: gone, text: `${gone ? "stopped" : "sent SIGTERM to"} ${shownName(task)} (pid ${task.pid})${gone ? "" : ", which has not exited yet"}; its relay records the outcome${left ? `\nalso stopped the ${leftText(left)}` : ""}` };
+    },
+  };
+}
+
+// Stop every task below task `id` of `run`: each running task of every run that the task created
+// (the run's orchestrator names it as parentRun and parentTask, as `status` lists nested runs), then
+// of every run that any task of those runs created, and so on down. Each level is signalled, then
+// waited for, before the next is read, so a task has stopped before the tasks it started are, and
+// cannot start more or react to theirs ending. Owning the named task's run is enough: the runs below
+// it exist only through it. Each is marked stopped as `stop` marks its own task. `g` is guard()'s
+// answer for `run`. Returns [{ run, task, name, exited }], one per task stopped.
+function stopBelow(run, id, g) {
+  const done = [];
+  const seen = new Set([run.id]);
+  let parents = new Set([`${run.id}/${id}`]);
+  for (let depth = 0; parents.size && depth < 20; depth++) {
+    const runs = listRuns().filter((r) => !seen.has(r.id) && parents.has(`${r.orchestrator?.parentRun}/${r.orchestrator?.parentTask}`));
+    const level = [];
+    for (const nested of runs) {
+      seen.add(nested.id);
+      const own = ownershipOf(nested);
+      const ng = { actor: g.actor, owned: own.mine, own };
+      for (const task of listTaskRecords(nested)) {
+        const handle = stopTask(nested, task, ng);
+        if (handle) level.push({ run: nested.id, task: task.id, name: shownName(task), handle });
+      }
+    }
+    for (const { handle, ...stopped } of level) done.push({ ...stopped, exited: handle.finish().exited });
+    parents = new Set(runs.flatMap((r) => listTaskRecords(r).map((t) => `${r.id}/${t.id}`)));
+  }
+  return done;
+}
+
+// The line that lists the tasks stopped below the named one, by run and task.
+const belowText = (below) => `also stopped ${below.length} task${below.length === 1 ? "" : "s"} below it: ${below.map((b) => `${b.run}/${b.name}${b.exited ? "" : " (sent SIGTERM; it has not exited yet)"}`).join(", ")}`;
+
+export function cmdStop(args) {
+  const run = loadRun(args._[0]);
+  const id = validTask(args._[1]);
+  const task = loadTask(run, id) || die(`no task ${id} in run ${run.id}`);
+  const g = guard(run, `stop task ${id} of run ${run.id}`, { adopt: args.adopt, refused: [id] });
+  // The named task first, waiting for it to exit, then the tasks below it.
+  const own = stopTask(run, task, g)?.finish() ?? null;
+  const below = stopBelow(run, id, g);
+  if (!own && !below.length) die(`task ${shownName(task)} is not running`);
+  process.stdout.write(`${own ? own.text : `task ${shownName(task)} is not running`}${below.length ? `\n${belowText(below)}` : ""}\n`);
 }
 
 // Stop the named tasks (or, with --all, every task of the run) if they are still running, and mark
@@ -203,13 +254,22 @@ export async function cmdClose(args) {
     refused: () => (rows || tasks.map((task) => describe(run, task))).map((r) => `${r.id} (${r.phase === "parked" ? "parked" : r.state})`),
   });
   const lines = [];
+  const stoppedBelow = [];
   for (const task of tasks) {
     // Reading a result or restoring its folder needs a fresh explicit close.
     const explicitlyClosed = task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) &&
       (task.pid ? (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt)) : isClosedPreparation(task));
+    // Closing a task that still runs (its relay, a park, or an interrupt's resume) stops it, and so
+    // stops the tasks below it too, after it; it closes only the tasks it was asked to close.
+    const ran = Boolean(task.pid) && (relayAlive(task.pid, task.startedAt, task.outDir) || isParked(run, task) || Boolean(interruptHeld(task)));
     lines.push(`${shownName(task)}: ${closeTask(run, task, explicitlyClosed ? {} : { closedBy: g.actor })}`);
     // The owner hears of a task that was open; one it had closed already changed nothing.
     if (!explicitlyClosed) recordChange(run, g, { task: task.id, attempt: task.attempt || null, action: "closed" });
+    const below = ran ? stopBelow(run, task.id, g) : [];
+    if (below.length) {
+      lines.push(`${shownName(task)}: ${belowText(below)}`);
+      stoppedBelow.push(...below.map((b) => ({ below: task.id, run: b.run, task: b.task })));
+    }
   }
   const allClosed = listTasks(run).every((r) => {
     const task = loadTask(run, r.id);
@@ -227,7 +287,7 @@ export async function cmdClose(args) {
     })));
   }
   if (cleanup) lines.push(collectionText(cleanup));
-  emit(args, { run: run.id, closed: ids, cleanup }, lines.join("\n"));
+  emit(args, { run: run.id, closed: ids, cleanup, ...(stoppedBelow.length ? { stoppedBelow } : {}) }, lines.join("\n"));
 }
 
 // Close one task: stop it if it still runs, and record closedAt, plus `extra` fields (closedBy, the

@@ -64,8 +64,10 @@ export function attentionOf(t, closed, now = Date.now()) {
     const reason = [firstLine(q.text, 140), q.options?.length ? `options: ${q.options.join(" | ")}` : null, q.recommend ? `recommends ${q.recommend}` : null, q.open > 1 ? `+${q.open - 1} more` : null];
     return { ...item("question", "question", reason.filter(Boolean).join(" · ")), sinceMs: Date.parse(q.time) || t.lastActiveMs || 0 };
   }
-  // A parked babysitter (park.mjs) waits for its pull request: nothing to review, decide or fix.
-  if (t.phase === "parked") return null;
+  // A parked babysitter (park.mjs) waits for its pull request: nothing to review, decide or fix. A
+  // task that a stop ended (`stopped`, runs.mjs) was ended on purpose: it did not fail, and whoever
+  // stopped it knows; `start` resumes it.
+  if (t.phase === "parked" || (t.state === "stopped" && !t.native)) return null;
   if (t.state === "needs-decision" || t.phase === "needs-decision") {
     const question = [t.decisions?.[0], t.report?.decisions?.[0]].map((d) => (typeof d === "string" ? d : d?.question)).find(Boolean);
     return item("needs-decision", "needs decision", firstLine(question, 140) || "read its final message");
@@ -105,35 +107,53 @@ export const byUrgency = (a, b) => a.rank - b.rank || a.sinceMs - b.sinceMs;
 // `agent` names the agent that must act ("task <run>/<task>" or "orchestrator session 425c2bc2"),
 // or is null when the item is the user's own; `agentTask` is that orch task, {run, task}, or null
 // for a session; `gone` says why that agent no longer takes it, when the item went to the user for
-// that reason. A task in a nested run reports to the orch task that started it, and one in a
-// top-level run to the session that launched the run (addressee.mjs), decisions it hands back
-// included. The user takes an item only when an agent passed it up (`ask --user`), when a usage
-// limit stopped the task, when the run was started from a terminal, or when the agent is gone: an
-// orch task that no longer runs, or a session whose process ended or that has had no live `wait`
-// on the run for the grace (agentGraceMs). `table` is the process table for that check, PID to
-// command line, so one board build runs `ps` once.
+// that reason; `passed` lists, nearest first, the orch tasks the item passed on its way up because
+// they were not running ("task <run>/<task> is not running"), and is empty when it passed none.
+//
+// A task in a nested run reports to the orch task that started it, and one in a top-level run to the
+// session that launched the run (addressee.mjs), decisions it hands back included. When that task is
+// not running (it stopped or ended) or its record is gone, the item goes on to whom that task itself
+// reports, and so on up the chain, to the first orch task that runs or to the session at the top.
+// The user takes an item only when an agent passed it up (`ask --user`), when a usage limit stopped
+// the task, when the chain ends at a run started from a terminal, or when the agent at its end is
+// gone: a run that is gone, or a session whose process ended or that has had no live `wait` on its
+// run for the grace (agentGraceMs). `table` is the process table for that check, PID to command
+// line, so one board build runs `ps` once.
 export function addresseeOf(run, record, row, item, now = Date.now(), table = undefined) {
-  const user = (agent = null, gone = null, agentTask = null) => ({ to: "user", agent, agentTask, gone });
+  const passed = [];
+  const user = (agent = null, gone = null, agentTask = null) => ({ to: "user", agent, agentTask, gone, passed });
   if (item.label === "usage limit") return user();
   if (item.kind === "question" && row.question?.to === "user") return user();
-  const parent = parentOf(run, record);
-  if (!parent) {
-    const session = mainSession(run);
-    if (!session || !run.dir) return user();
-    const agent = sessionLabel(session);
-    const gone = sessionGone(run, session, now, table);
-    return gone ? user(agent, gone) : { to: "agent", agent, agentTask: null, gone: null };
+  let r = run, rec = record, last = null; // `last`: the nearest task passed, for a terminal's run
+  for (let hops = 0; hops < 20; hops++) {
+    const parent = parentOf(r, rec);
+    if (!parent) {
+      const session = mainSession(r);
+      if (!session || !r.dir) return last ? user(last.agent, "it is not running", last.agentTask) : user();
+      const agent = sessionLabel(session);
+      const gone = sessionGone(r, session, now, table);
+      return gone ? user(agent, gone) : { to: "agent", agent, agentTask: null, gone: null, passed };
+    }
+    const agent = `task ${parent.run}/${parent.task}`;
+    const agentTask = { run: parent.run, task: parent.task };
+    const parentRun = runById(parent.run);
+    if (!parentRun) return user(agent, "its run is gone", agentTask);
+    const task = loadTask(parentRun, parent.task);
+    if (task && (relayAlive(task.pid, task.startedAt, task.outDir) || isParked(parentRun, task))) return { to: "agent", agent, agentTask, gone: null, passed };
+    passed.push(`${agent} ${task ? "is not running" : "is gone"}`);
+    last ??= { agent, agentTask };
+    [r, rec] = [parentRun, task];
   }
-  const agent = `task ${parent.run}/${parent.task}`;
-  const agentTask = { run: parent.run, task: parent.task };
-  const parentRun = runById(parent.run);
-  const task = parentRun && loadTask(parentRun, parent.task);
-  const gone = !parentRun ? "its run is gone" : !task ? "its task is gone"
-    : relayAlive(task.pid, task.startedAt, task.outDir) || isParked(parentRun, task) ? null : "it is not running";
-  return gone ? user(agent, gone, agentTask) : { to: "agent", agent, agentTask, gone: null };
+  return user();
 }
 
-const addressed = (run, record, row, item, now, table) => (item ? { ...item, ...addresseeOf(run, record, row, item, now, table) } : null);
+// An item with its addressee. One that passed agents on its way up says so in its reason too, which
+// the lane shows and the notice to its addressee quotes.
+const addressed = (run, record, row, item, now, table) => {
+  if (!item) return null;
+  const to = addresseeOf(run, record, row, item, now, table);
+  return { ...item, ...to, ...(to.passed.length ? { reason: `${item.reason} (passed on: ${to.passed.join("; ")})` } : {}) };
+};
 
 // The board's process table for addresseeOf, PID to command line, from the shared snapshot.
 function commandTable() {

@@ -14,8 +14,9 @@ import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { CLI_PATH, RUNS_DIR, WAIT_POLL_MS } from "../config.mjs";
+import { addresseeOf } from "../dashboard-state.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
-import { listRuns, listTasks, loadRun, loadTask, shownName } from "../runs.mjs";
+import { describe, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, shownName } from "../runs.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
 
@@ -205,6 +206,47 @@ function reviewsDue(run, tasks, now = Date.now()) {
   });
 }
 
+// The attention items that pass up through `roots`, tasks of `run` that are not running (stopped or
+// ended), to whom they report, usually the run's owner (addresseeOf, dashboard-state.mjs): the items
+// of the tasks in the runs such a task created, and, below each of those that is not running either,
+// of the runs it created, and so on down. A `wait` on the run shows them as it shows its own tasks'
+// items, so an item whose agent is not running reaches the agent above instead of waiting unseen.
+// Each item names its run, task and shown name, and its reason says whom it passed. Results awaiting
+// review count: nobody below reads them. Items for the user (a usage limit, `ask --user`, or an agent
+// at the top that is gone) are left out.
+function passedUp(run, roots) {
+  const below = new Map(); // "run/task" -> the runs that task created
+  for (const r of listRuns()) {
+    const o = r.orchestrator;
+    if (!o?.parentRun || !o.parentTask) continue;
+    const key = `${o.parentRun}/${o.parentTask}`;
+    below.set(key, [...(below.get(key) || []), r]);
+  }
+  const items = [];
+  const seen = new Set([run.id]);
+  const visit = (parentRun, id) => {
+    for (const nested of below.get(`${parentRun}/${id}`) || []) {
+      if (seen.has(nested.id)) continue;
+      seen.add(nested.id);
+      for (const record of listTaskRecords(nested)) {
+        if (!record.pid) continue;
+        const row = record.closedAt ? null : describe(nested, record);
+        const item = row && taskAttention(row, false, { review: true });
+        if (item) {
+          const to = addresseeOf(nested, record, row, item);
+          if (to.to === "agent" && to.passed.length) {
+            items.push({ ...item, run: nested.id, task: record.id, name: shownName(record), attempt: row.attempt, reason: `${item.reason} (passed on: ${to.passed.join("; ")})`, passed: to.passed });
+          }
+        }
+        const running = row ? row.state === "running" : relayAlive(record.pid, record.startedAt, record.outDir) || isParked(nested, record);
+        if (!running) visit(nested.id, record.id);
+      }
+    }
+  };
+  for (const t of roots) if (t.state !== "running") visit(run.id, t.id);
+  return items;
+}
+
 function remindText(run, t) {
   const cmd = (rest) => `node ${CLI_PATH} ${rest}`;
   const ways = t.mode === "read-only"
@@ -244,23 +286,26 @@ export async function cmdWait(args, resumed = null) {
     // relay changes the rows, so read them again.
     if (mine && reviveParked(run, rows).length) rows = listTasks(run);
     // The relay can write its result and exit between describe()'s result read and process
-    // check. Health then sees that file; reread this inconsistent snapshot before waking wait.
-    return rows.some((t) => t.state === "aborted" && !t.result && t.health === "ok") ? listTasks(run) : rows;
+    // check. Health then sees that file; reread this inconsistent snapshot before waking wait. A
+    // stopped task with no result yet may be such a relay, too.
+    return rows.some((t) => ["aborted", "stopped"].includes(t.state) && !t.result && t.health === "ok") ? listTasks(run) : rows;
   };
-  const attention = (tasks) => tasks.flatMap((t) => {
+  // This run's tasks' items, then those passed up to it from below its tasks that are not running.
+  const attention = (tasks) => [...tasks.flatMap((t) => {
     const item = taskAttention(t, Boolean(loadTask(run, t.id)?.closedAt));
     return item ? [{ task: t.id, attempt: t.attempt, ...item }] : [];
-  });
-  const key = (item) => JSON.stringify([item.task, item.attempt, item.kind]);
+  }), ...passedUp(run, tasks)];
+  const key = (item) => JSON.stringify([item.run ? `${item.run}/${item.task}` : item.task, item.attempt, item.kind]);
   let previous = resumed ? new Set(resumed.previous) : null;
   let polled = Boolean(resumed);
   // By default wait returns as soon as any watched task has an unread result: it finished, and
   // nobody has collected it with `result`, closed it, accepted it, or resolved its decision. That
   // includes a task that finished while no wait was running, for example while the orchestrator
   // reviewed an earlier one, so re-arming wait never strands it. --all keeps the old behavior:
-  // return only when every watched task has finished.
+  // return only when every watched task has finished. A task that a stop ended has no result to
+  // read: it counts as finished, so wait returns once nothing else runs, but it is never unread.
   const unread = (t) => {
-    if (["running", "prepared"].includes(t.state)) return false;
+    if (["running", "prepared", "stopped"].includes(t.state)) return false;
     const record = loadTask(run, t.id) || {};
     if (record.closedAt || acceptedNow(record) || record.decisionResolvedAttempt === t.attempt) return false;
     return t.state !== "needs-decision" || record.decisionSeenAttempt !== t.attempt;
@@ -305,13 +350,15 @@ export async function cmdWait(args, resumed = null) {
     if (wakes || done || message || noteWake || Date.now() >= deadline) {
       // A named task (`rename`) shows its name in place of its id; commands take either.
       const label = (id) => shownName(tasks.find((t) => t.id === id)) || id;
+      // An item passed up from a run below names that run too.
+      const itemLabel = (item) => (item.run ? `${item.run}/${item.name || item.task}` : label(item.task));
       const asking = tasks.filter((t) => t.state === "needs-decision").map(shownName);
       // Questions this wait does not own: for the user, or, in a wait that an orch task runs, any.
-      const questions = needing.filter((item) => item.kind === "question" && !asked.some((t) => t.id === item.task)).map((item) => label(item.task));
+      const questions = needing.filter((item) => item.kind === "question" && !item.run && !asked.some((t) => t.id === item.task)).map((item) => label(item.task));
       const limited = tasks.filter((t) => t.limitHit).map((t) => `${shownName(t)} (${t.agent})`);
       const hint =
         // A change someone else made shows in statusText(), once.
-        needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${label(item.task)}: ${item.label} — ${item.reason}`).join("") +
+        needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${itemLabel(item)}: ${item.label} — ${item.reason}`).join("") +
         (questions.length ? `\n${questions.join(", ")} asked ${main ? "the user" : "a question"} and ${questions.length > 1 ? "keep" : "keeps"} working: ${main ? "it waits on the dashboard for the user's answer" : `answer what your brief covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\``} (SKILL.md, "Decisions agents hand back"). Read ${questions.length > 1 ? "them" : "it"} in full with \`node ${CLI_PATH} questions ${run.id}\`` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
         (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +

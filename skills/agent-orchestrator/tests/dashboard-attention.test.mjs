@@ -145,7 +145,8 @@ test('attentionOf follows phase and health when the contract fields are present'
   const transient = kind({ state: 'failed', health: 'transient-error', result: { error: 'overloaded_error: try again\nretry-after: 30' } });
   assert.deepEqual([transient.label, transient.reason], ['transient error', 'overloaded_error: try again']);
   assert.equal(kind({ state: 'failed', health: 'transient-error', phase: 'failed', result: null, finalMessage: null, now: '' }).reason, '');
-  assert.equal(kind({ state: 'stopped' }).label, 'stopped', 'fallback: any unsuccessful end is a failure');
+  assert.equal(kind({ state: 'timeout' }).label, 'timeout', 'fallback: any unsuccessful end is a failure');
+  assert.equal(kind({ state: 'stopped', phase: 'failed', health: 'dead' }), null, 'a stop ended it on purpose: no failure');
 
   // Silent comes from health only: a quiet running task with health ok, or no health, is fine.
   const silent = kind({ state: 'running', phase: 'running', health: 'silent', quietMs: 963_000, now: 'quiet 16m03s · $ npm test' });
