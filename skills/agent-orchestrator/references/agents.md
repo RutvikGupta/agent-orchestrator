@@ -55,6 +55,33 @@ These are hard limits of the relays on this machine:
 - **Same-CLI delegation** is fine when you want parallel hands rather than a different
   perspective, for example Claude orchestrating three Claude implementers.
 
+## Stopping a task
+
+`stop <run> <task>` ends a task on purpose, for example to free memory.
+
+- **What it stops.** It stops the named task first and waits for its relay to exit, so that the
+  agent cannot start more sub-agents or react to theirs ending. Then it stops the tasks below it:
+  every running task of each run that the task created (a nested run), then every running task of
+  the runs those tasks created, and so on down, one level at a time. A run records the task that
+  created it, and `status` lists it under "nested runs".
+- **How each is stopped.** Each task is stopped as `stop` stops the named one: it is marked stopped
+  (`stoppedAt`, `stoppedBy`), its relay's process group gets SIGTERM, a parked babysitter's park
+  ends, and what a command task left running in its process group is ended.
+- **Output.** After the line about the named task, one line lists what else was stopped, by run and
+  task: `also stopped 3 tasks below it: <run>/a, <run>/b, <run>/c`. When the named task is not
+  running, `stop` still stops the tasks below it; with nothing to stop, it fails as before.
+- **Ownership.** Owning the named task's run is enough: the runs below it exist only through it.
+- **`close`.** Closing a task that still runs stops it, then stops the tasks below it the same way.
+  It closes only the tasks you named; the ones below are stopped, not closed. Closing a task that
+  has already finished stops nothing below it.
+- **What does not reach below.** An interrupt's resume (`send --steer`, `steer`), a park, a retry
+  and a handoff stop only the task's own relay. Its sub-agents keep running.
+- **How a stopped task reads.** A task whose current attempt a stop ended reads `stopped`, not
+  `aborted` (the state the relay records on SIGTERM), in `status`, `result`, `wait` and the
+  dashboard. It did not fail: it raises no attention item, counts as no failure, and is not a
+  result waiting to be read (`references/monitor.md`, "States, phases and health"). `start` resumes
+  it as before and clears the stop.
+
 ## Command tasks
 
 `start <run> <task> --agent command --why "<reason>" [--max-tier TIER] [--done "<marker>"]
@@ -101,7 +128,8 @@ brief.
   signals it. `leftover` counts those processes.
 - **Its lifecycle** is an agent task's: `status`, `wait`, `result`, `log`, `close`, the finish
   notice to the parent, and the ownership guard work the same way. `stop` sends SIGTERM to the
-  relay, which ends the command's process group and records `aborted`. When the relay has gone
+  relay, which ends the command's process group and records `aborted`; the task reads `stopped`
+  ("Stopping a task"). When the relay has gone
   without ending the group (it was killed), `stop` and `close` end the recorded group themselves,
   even after the command that led it has exited.
 - **No session.** `start` again runs the command again, as a new attempt: the same command, with

@@ -70,11 +70,18 @@ review, and silent, stuck or unreachable tasks (`references/monitor.md`).
 - An item for the agent that must act (the orch task that started the task, or the session that
   launched a top-level run) shows muted, "for <agent>", and never counts in the header's "N need
   attention".
-- The user's items are usage limits, `ask --user`, runs started from a terminal, and items whose
-  agent is gone.
-- An agent is gone when it is an orch task that no longer runs, or a session whose process ended, or
-  that has had no live `wait` on the run (parked ones count) for `AGENT_ORCH_AGENT_GRACE` (default
-  15m, at least twice `AGENT_ORCH_PARK_MAX`).
+- **An agent that is not running passes its items up.** When that orch task is not running (it
+  was stopped, it ended, or its record is gone), the item goes to whom that task itself reports:
+  the task that started it, or the session that launched the top run, and so on up the chain to
+  the first agent that runs. Its reason ends with whom it passed, such as "(passed on: task
+  <run>/<task> is not running)", and `/api/state` lists them in the item's `passed`. The session
+  sees such items in its `wait` (`references/monitor.md`, "What wakes `wait`").
+- The user's items are usage limits, `ask --user`, and items whose chain ends at a run started from
+  a terminal or at an agent that is gone.
+- An agent is gone when its run is gone, or when it is a session whose process ended, or that has
+  had no live `wait` on its run (parked ones count) for `AGENT_ORCH_AGENT_GRACE` (default 15m, at
+  least twice `AGENT_ORCH_PARK_MAX`).
+- A task that a stop ended reads `stopped` and has no item: it did not fail.
 - A decision handed back in a top-level run goes to its session first.
 - A babysitter never awaits review.
 - An `unreachable` item is a running task that ended its turn and waits on its own background
@@ -98,8 +105,9 @@ when that is shorter), goes to the user once. The check runs every tenth of the 
   item as JSON on stdin.
 
 An item for an orch task goes to that task instead, once, as an inbox message with what to do. One
-for a session sends nothing, since its `wait` wakes on it. Once that agent is gone, or cannot take
-the message, the item goes to the user and says so ("orchestrator session 425c2bc2 is gone (…);
+for a session sends nothing, since its `wait` wakes on it. An item passed up goes to the agent it
+reached, the same way. Once that agent is gone, or cannot take the message, the item goes to the
+user and says so ("orchestrator session 425c2bc2 is gone (…);
 review-me has waited 25m for review"). So review results as `wait` returns them, and handle
 attention as soon as `wait` exits 5.
 
