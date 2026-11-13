@@ -124,8 +124,9 @@ reason `interrupt`; the stopped attempt shows as `interrupted`, and it is neithe
 nor a rework round. The task stays `running` for `wait`, the parallel limit and the plan, also in the
 moment between the two relays. The stopped attempt sends its parent no finish notice when the
 resume succeeds; the resumed one reports to the same parent at the same depth. If the interrupt
-helper dies without saving a replacement attempt, the stopped attempt sends its finish notice
-after all. The resumed prompt says the session was
+helper dies without starting a replacement relay, the stopped attempt sends its finish notice
+after all. If it already started a relay, the notice stays suppressed until that relay is adopted
+and the adopted attempt ends. The resumed prompt says the session was
 interrupted to deliver a message, and that its background commands were stopped with it, so the
 agent can start again what it still needs. The messages follow as they were written: no text of a
 message is ever read as part of the brief.
@@ -164,9 +165,11 @@ the dashboard.
 
 ### Idle
 
-An idle agent waits on a background command of its own. A Claude agent can end its turn while a command it started in the background still runs (for
+An idle agent waits on background work. A Claude agent can end its turn while a command it started in the background still runs (for
 example `bash watch.sh`, started with `run_in_background`). Its process stays alive, but it reads no
-message until that command ends and its next turn starts. Such a task is **idle**:
+message until that command ends and its next turn starts. An open sub-agent call also counts as
+background work after the parent's turn ends, even without a background Bash command of the
+parent's own. Such a task is **idle**:
 
 - `status`, `wait` and the dashboard show it as running, with the activity "idle: ended its turn and
   waits on its own background command `<command>`". Its row has `idle`.

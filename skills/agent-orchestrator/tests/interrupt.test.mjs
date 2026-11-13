@@ -881,3 +881,103 @@ for (const publishing of [false, true]) {
     }
   });
 }
+
+// A parent that waits only for its background Task: no background Bash command makes it idle.
+const childOnlyEvents = () => [
+  { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'look around', run_in_background: true } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_task', content: 'Agent running in background.' }] } },
+  { type: 'result', subtype: 'success', result: 'Waiting for the agent.', session_id: 'fixture-claude' },
+];
+const childShell = (command, id = 'toolu_late') => ({ type: 'assistant', parent_tool_use_id: 'toolu_task', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
+const appendFresh = (task, events) => {
+  const file = path.join(task.outDir, 'events.jsonl');
+  fs.appendFileSync(file, events.map((e) => `${JSON.stringify(e)}\n`).join(''));
+  // Exclude the quiet-file grace period even on a loaded host: only the parent's turn and the
+  // child's open call may decide the state. No sleep is needed to arrange this interleaving.
+  const fresh = new Date(Date.now() + 60_000);
+  fs.utimesSync(file, fresh, fresh);
+};
+
+for (const lastLook of [false, true]) {
+  for (const publishing of [false, true]) {
+    test(`a background Task alone keeps its late child shell in the background at ${lastLook ? 'the helper last look' : 'the first plan'}${publishing ? ', protecting publishing' : ''}`, async (t) => {
+      const f = await fixture(t);
+      hookOn(f);
+      const run = await f.newRun();
+      const command = publishing ? 'sleep 61; git push origin topic' : 'sleep 61; echo done';
+      const task = await f.start(run, 'child-only', { config: { hold: true, shell: ['/bin/bash', '-c', command], extraEvents: childOnlyEvents() } });
+      await f.ready(task);
+      const shell = Number(fs.readFileSync(path.join(task.outDir, 'shell.pid'), 'utf8'));
+      await f.command(['send', run.id, 'child-only', 'Queued before the child call.']);
+      const hold = lastLook ? pauseAt(f, 'child-last-look', { script: 'steer\\.mjs$', sub: 'resume', file: 'interrupt-resume\\.md$' }) : null;
+      let sending, before, inbox;
+      if (lastLook) sending = f.json(['send', run.id, 'child-only', 'Handle this now.', '--steer'], { env: { ...HOLD, ...hold.env } });
+      try {
+        if (hold) await paused(hold.marker);
+        appendFresh(task, [childShell(command)]);
+        before = await rowOf(f, run, 'child-only');
+        inbox = await f.command(['inbox', run.id, 'child-only']);
+      } finally {
+        if (hold) go(hold.marker);
+      }
+      if (!sending) sending = f.json(['send', run.id, 'child-only', 'Handle this now.', '--steer'], { env: HOLD });
+      const sent = await sending;
+      assert.equal(before.shell, undefined, 'a child call cannot be the ended parent turn\'s foreground shell');
+      assert.ok(before.idle, 'an open child call is background work without a parent Bash command');
+      assert.equal(before.inbox.delivery.how, 'idle');
+      assert.doesNotMatch(inbox.stdout, /when its current shell command ends/);
+      assert.match(inbox.stdout, /ended its turn and waits on its own background work/);
+      assert.equal(sent.steer.stopped, undefined, 'stopping the child cannot deliver a message to its parent');
+      if (publishing) {
+        assert.match(sent.steer.waiting || sent.steer.failed, /not stopped part-way/);
+        assert.ok(alive(task.pid) && alive(shell));
+        assert.equal(readJson(f.taskFile(run, 'child-only')).attempt, 1);
+        await f.command(['stop', run.id, 'child-only']);
+      } else {
+        assert.equal(sent.steer.resumed, 2);
+        await ready(f, run, 'child-only', 2);
+        assert.ok(!alive(task.pid));
+        const brief = fs.readFileSync(path.join(attemptDir(run, 'child-only', 2), 'orch-brief.md'), 'utf8');
+        assert.match(brief, /Queued before the child call\.[\s\S]*Handle this now\./);
+        assert.deepEqual((await f.json(['inbox', run.id, 'child-only'])).messages, []);
+        f.release({ outDir: attemptDir(run, 'child-only', 2) });
+        await f.finished(run, 'child-only');
+      }
+    });
+  }
+}
+
+for (const wake of [
+  { type: 'assistant', message: { content: [{ type: 'text', text: 'Continuing.' }] } },
+  { type: 'user', message: { content: [{ type: 'text', text: 'Continue.' }] } },
+  { type: 'system', subtype: 'task_notification' },
+  { type: 'api-request' },
+]) {
+  test(`a background Task's new child call is foreground again after the parent's ${wake.subtype || wake.type}`, async (t) => {
+    const f = await fixture(t);
+    hookOn(f);
+    const run = await f.newRun();
+    const command = 'sleep 61; echo done';
+    const task = await f.start(run, 'new-turn', { config: { hold: true, shell: ['/bin/bash', '-c', command], extraEvents: childOnlyEvents() } });
+    await f.ready(task);
+    appendFresh(task, [childShell('sleep 62; echo old')]);
+    assert.equal((await rowOf(f, run, 'new-turn')).shell, undefined, 'the first child call belongs to the ended turn');
+    appendFresh(task, [wake, childShell(command, 'toolu_next')]);
+    await f.command(['send', run.id, 'new-turn', 'Handle this in the new turn.']);
+    const row = await rowOf(f, run, 'new-turn');
+    assert.equal(row.idle, undefined);
+    assert.equal(row.shell, command);
+    assert.equal(row.inbox.delivery.how, 'shell');
+    const sent = await f.json(['steer', run.id, 'new-turn']);
+    assert.equal(sent.steer.stopped, command, 'a new foreground call returns to an active parent turn');
+    assert.equal(readJson(f.taskFile(run, 'new-turn')).attempt, 1);
+    f.release(task);
+    await f.finished(run, 'new-turn');
+  });
+}
+
+test('the interrupt notice documentation distinguishes starting a replacement relay from saving its attempt', () => {
+  const doc = fs.readFileSync(new URL('../references/messages.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+  assert.match(doc, /helper dies without starting a replacement relay, the stopped attempt sends its finish notice after all/);
+  assert.match(doc, /If it already started a relay, the notice stays suppressed until that relay is adopted and the adopted attempt ends/);
+});

@@ -504,13 +504,14 @@ function interruptOf(task) {
 }
 
 // A Claude relay whose turn ended (claude.mjs, applyTurn) while its process lives on waits on a
-// background command of its own: it reads no message until that command ends and its next turn
-// starts. Right after a final turn the process may still be exiting, so without a pending
-// background command the state counts only once the session has been quiet this long.
+// background work: it reads no message until its next turn starts. Its own background command or
+// an open child call proves it is waiting. Otherwise the process may still be exiting, so the
+// state counts only once the session has been quiet this long.
 const IDLE_GRACE_MS = 5000;
-function idleOf(run, task, file, lastEventMs) {
+function idleOf(run, task, file, lastEventMs, summary) {
   const pending = commandRuns("claude", file).filter((r) => r.background && r.exitCode === null).at(-1);
-  if (!pending && !(Date.now() - (lastEventMs || Date.now()) >= IDLE_GRACE_MS)) return null;
+  const child = Object.values(summary.openTools || {}).some((tool) => tool.sub);
+  if (!pending && !child && !(Date.now() - (lastEventMs || Date.now()) >= IDLE_GRACE_MS)) return null;
   return {
     since: lastEventMs ? new Date(lastEventMs).toISOString() : null,
     background: pending ? shortText(pending.cmd, 200) : null,
@@ -754,7 +755,7 @@ export function describe(run, task) {
   // ({ since, background, steer }): it reads no message until that command ends.
   const agentNow = attemptAgent(task, task.attempt);
   const shell = running && !command ? shellNow(agentNow, current) : null;
-  const idle = running && agentNow === "claude" && current.turnEnded && task.outDir ? idleOf(run, task, path.join(task.outDir, "events.jsonl"), lastEventMs) : null;
+  const idle = running && agentNow === "claude" && current.turnEnded && task.outDir ? idleOf(run, task, path.join(task.outDir, "events.jsonl"), lastEventMs, current) : null;
   let now;
   const activity = command ? progress?.line || `$ ${shortText(commandText(task.command), 200)}` : current.activity || "starting";
   if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${idle ? idleText(idle) : activity}`;

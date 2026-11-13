@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
+import { claudeTurnEnded, subagentEvent } from "./claude.mjs";
 import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
 import { markRead, markSteered, readInbox, replyHint, senderLabel } from "./inbox.mjs";
@@ -60,18 +61,21 @@ export function pendingCodexCommands(eventsFile) {
 // seconds from its latest progress heartbeat, if any. A Bash call that runs in the background gets
 // its result at once. The session's `result` ends its turn, and every call of its own. A
 // sub-agent's call stays: a sub-agent in the background runs on after the turn, so its command is
-// kept, marked `ended` (the turn it started in is over).
+// kept, marked `ended` (the turn it started in is over). New child calls while the parent's turn
+// is over are marked the same way, until an event of the parent's next turn arrives.
 export function pendingCommands(eventsFile) {
   const open = new Map();
+  let turnEnded = false;
   for (const line of (readText(eventsFile) || "").split("\n")) {
-    if (!line.includes('"tool_use"') && !line.includes('"tool_result"') && !line.includes('"tool_progress"') && !line.includes("permission_denied") && !line.startsWith('{"type":"result"')) continue;
     let e;
     try {
       e = JSON.parse(line);
     } catch {
       continue;
     }
-    if (e.type === "result" && !e.parent_tool_use_id) {
+    const sub = subagentEvent(e);
+    turnEnded = claudeTurnEnded(turnEnded, e);
+    if (e.type === "result" && !sub) {
       for (const [id, call] of open) {
         if (call.sub) call.ended = true;
         else open.delete(id);
@@ -82,7 +86,7 @@ export function pendingCommands(eventsFile) {
     const content = e.message?.content;
     if (!Array.isArray(content)) continue;
     for (const c of content) {
-      if (c?.type === "tool_use" && c.name === "Bash" && !c.input?.run_in_background && c.input?.command) open.set(c.id, { id: c.id, command: String(c.input.command), seconds: null, ...(e.parent_tool_use_id ? { sub: true } : {}) });
+      if (c?.type === "tool_use" && c.name === "Bash" && !c.input?.run_in_background && c.input?.command) open.set(c.id, { id: c.id, command: String(c.input.command), seconds: null, ...(sub ? { sub: true, ...(turnEnded ? { ended: true } : {}) } : {}) });
       else if (c?.type === "tool_result") open.delete(c.tool_use_id);
     }
   }
@@ -244,7 +248,6 @@ export function planSteer(task, row = null) {
   const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
   const kept = all.find((p) => PROTECTED.test(p.command));
   if (kept) return { wait: `the agent is running \`${shorten(kept.command)}\`, which is not stopped part-way` };
-  if (row?.idle) return planResume(task, row);
   const pending = all.filter((p) => !p.ended);
   if (!pending.length) return planResume(task, row);
   const found = pending.map((p) => ({ p, tree: commandTree(task.pid, p.command) })).filter((x) => x.tree);

@@ -44,8 +44,17 @@ function applyLocalCommand(s, text) {
 // `openTools` holds every tool call without a result yet, the session's and its sub-agents', as
 // "#<id>" -> { name, command, background, sub }, oldest first. When the session's turn ends, its
 // own calls are over; a sub-agent's stays, marked `ended`, since a background sub-agent runs on.
+// A sub-agent's new calls while that turn is over are background work too.
 const OPEN_TOOLS = 32; // a call that never gets a result is dropped once this many are open
 export const subagentEvent = (e) => Boolean(e.parent_tool_use_id) || e.isSidechain === true;
+// The parent's turn boundary is shared by summaries and the steering command scan. Child events
+// never reopen the parent, even when they start a new tool call after the parent's result.
+export function claudeTurnEnded(ended, e) {
+  if (subagentEvent(e)) return ended;
+  if (e.type === "result") return true;
+  if (e.type === "assistant" || e.type === "user" || e.type === "api-request" || (e.type === "system" && e.subtype === "task_notification")) return false;
+  return ended;
+}
 function applyTurn(s, e) {
   const sub = subagentEvent(e);
   const content = Array.isArray(e.message?.content) ? e.message.content : [];
@@ -53,22 +62,19 @@ function applyTurn(s, e) {
   if (e.type === "assistant") {
     for (const b of content) {
       if (b?.type !== "tool_use" || !b.id) continue;
-      s.openTools[`#${b.id}`] = { name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background), sub };
+      s.openTools[`#${b.id}`] = { name: b.name || null, command: b.name === "Bash" ? String(b.input?.command ?? "") : null, background: Boolean(b.input?.run_in_background), sub, ...(sub && s.turnEnded ? { ended: true } : {}) };
       const ids = Object.keys(s.openTools);
       if (ids.length > OPEN_TOOLS) delete s.openTools[ids[0]];
     }
   } else if (e.type === "user") {
     for (const b of content) if (b?.type === "tool_result" && b.tool_use_id) delete s.openTools[`#${b.tool_use_id}`];
   }
-  if (sub) return;
-  if (e.type === "result") {
-    s.turnEnded = true;
+  s.turnEnded = claudeTurnEnded(s.turnEnded, e);
+  if (!sub && e.type === "result") {
     for (const [id, tool] of Object.entries(s.openTools)) {
       if (tool.sub) tool.ended = true;
       else delete s.openTools[id];
     }
-  } else if (e.type === "assistant" || e.type === "user" || e.type === "api-request" || (e.type === "system" && e.subtype === "task_notification")) {
-    s.turnEnded = false;
   }
 }
 

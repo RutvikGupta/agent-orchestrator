@@ -96,7 +96,7 @@ function readNewLines(entry, file, onLine) {
 // as long as it, and only when saved with this summary version (a summary from older code lacks
 // fields that a resumed parse would then miss).
 const PERSIST_MIN = 1 << 20;
-const SUMMARY_VERSION = 4;
+const SUMMARY_VERSION = 5;
 const summaryDir = () => path.join(STATE_ROOT, "cache", "summaries");
 const summaryPath = (file, kind) => path.join(summaryDir(), `${createHash("sha1").update(`${kind}:${file}`).digest("hex")}.json`);
 const toJson = (key, value) => (value instanceof Set ? { $set: [...value] } : value instanceof Map ? { $map: [...value] } : value);
