@@ -11,7 +11,8 @@ $ORCH dispatch <run> [--max N] [--dry-run] [--follow [--timeout DUR]]
 
 - It starts, in plan order, every planned task whose `dependsOn` tasks are all integrated (a
   read-only dependency counts once its result is collected), up to the free slots under the
-  parallel limit (`references/plan.md`, "Parallel limit"). `--max N` starts at most N.
+  per-run parallel limit (`references/plan.md`, "Parallel limit") and the machine-wide agent limit
+  (`references/memory.md`, "Agent admission"). `--max N` starts at most N.
 - Each task gets the plan's agent, tier, `why`, read-only mode and brief, and each write task a
   prepared worktree (`references/worktrees.md`).
 - A write task's worktree starts from the run's base commit. Once the task has prerequisites, it
@@ -24,6 +25,11 @@ $ORCH dispatch <run> [--max N] [--dry-run] [--follow [--timeout DUR]]
   entry has no valid tier. It starts the others and exits 1.
 - A ready task that shares an owned path or a resource with a running task waits. It is listed,
   not refused, and starts on a later `dispatch`.
+- A ready agent task that the machine cannot take now waits too: the machine-wide agent limit is
+  reached, available memory is low, or macOS memory pressure is critical. It is listed as
+  `ready, waiting <task>: <reason>`, never as a failure, and `dispatch` does not exit 1 for it. A
+  later `dispatch`, or `dispatch --follow`, starts it when there is room. Command tasks are not
+  checked.
 - It lists the tasks still blocked and what each waits on. It never starts a planned babysitter,
   which needs a pull request number: it lists the `start` command instead (`SKILL.md`, step 8).
 - `--dry-run` lists what it would start.
@@ -53,8 +59,10 @@ and repeats the call while it exits 3, as it does with `wait`.
   integrate a task while it runs, it starts that task's dependents without a restart.
 - Like `wait`, it retries transient failures (`references/monitor.md`, "Automatic retry") and
   restarts the watcher of a parked babysitter that has died.
+- It stays while ready tasks wait for the machine, even when none of the run's tasks runs, and
+  starts them as room appears. It prints the waiting reasons when they change.
 - `--max N` caps how many planned tasks run at once, a retried task included, instead of how many
-  one call starts. Other tasks still count against the parallel limit.
+  one call starts. Other tasks still count against the parallel limit and the machine limit.
 - A planned babysitter is listed and never interrupts it.
 - With `--dry-run`, `--follow` does nothing extra.
 
@@ -69,6 +77,8 @@ relay flags.
   `~/.claude/skills` and `~/.codex/skills`. `AGENT_ORCH_SKILLS_DIR` replaces that search path.
 - The task's artifacts go to `<run-dir>/tasks/<task-id>/attempt-<n>/`.
 - `--timeout` bounds the task (`references/agents.md`, "Cost and limits", gives sizes).
+- `start` also checks the machine for an agent task (below, "Machine limit"). `--wait [DUR]` waits
+  for room instead of failing.
 - Flags after `--` go to the relay unchanged; `relay.mjs --help` lists them. Common ones: Codex
   `--network-access` and `--web-search live`; Claude `--max-turns 60` and `--max-budget-usd 10`.
 
@@ -83,13 +93,30 @@ In a run with a plan, the first start of a task is checked against it. `start` r
 
 Pass `--force` to skip the first two checks. For the third, pass `--unplanned`, which records the
 task as an exception. `--force` does not imply it. A babysitter or a command task that the plan
-does not name needs `--unplanned` too.
+does not name needs `--unplanned` too. `--force` never skips the machine limit (below).
 
 - Later attempts of a task (a resume, a rework, a retry) skip these checks.
 - A babysitter reserves no owned paths, and a parked task or a command task reserves nothing.
 
+### Machine limit
+
+Besides the per-run parallel limit, `start` refuses a Claude or Codex agent when the machine is
+full. The details are in `references/memory.md`, "Agent admission".
+
+- The limit is `AGENT_ORCH_MAX_TOTAL` live agents across all runs (default 75% of RAM in GiB, at
+  least 4; `0` turns off the count only). Available memory must not be below
+  `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`), and macOS memory pressure must not be critical.
+- A refusal exits 7 and starts nothing. `--force` cannot bypass it. A command task is never checked.
+- A resume or a rework is checked like a new start. The replacement of an agent that ended (a parked
+  babysitter that its watcher resumes, a retry, an interrupt) skips the count limit but never starts
+  while memory is critically low.
+- `start --wait [DUR]` retries every few seconds, for 10 minutes by default. It starts the task as
+  soon as there is room, and exits 7 without starting it when `DUR` expires.
+- `$ORCH wait <run> <task-id>` waits for an existing task to finish, which frees a place.
+- `$ORCH agents` shows the running count, the limit and the available memory.
+
 ## Why never your host's own sub-agent tool
 
 Codex's `spawn_agent` and Claude Code's Agent tool skip the model policy, `--why`, the parallel
-limit, and worktree isolation. A Codex `spawn_agent` with `fork_turns: "all"` also copies your whole
-conversation into a session on your own model.
+limit, the machine-wide agent limit, and worktree isolation. A Codex `spawn_agent` with
+`fork_turns: "all"` also copies your whole conversation into a session on your own model.

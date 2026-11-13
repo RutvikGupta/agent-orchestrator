@@ -1,12 +1,14 @@
 # Tests, builds and memory
 
-Read this before you run, or brief an agent to run, test suites, builds or containers.
+Read this before you run, or brief an agent to run, test suites, builds or containers, and when
+`start` refuses an agent because the machine is full ("Agent admission", below).
 
 ## The heavy lane
 
 - Wrap Docker-based test suites, builds and container runs in `$ORCH heavy -- <command>`.
 - Use `--label "focused tests"` before `--` to name the work.
-- Only heavy commands wait; this lane never limits agents or sub-agents. No agent count is capped.
+- Only heavy commands wait in this lane; it never limits agents or sub-agents. The machine limit on
+  agents is a separate check ("Agent admission").
 - Waiters enter in arrival order. A new message returns exit 6.
 - `heavy` runs a program, not a shell function or alias. Run the script the function wraps, or
   `$ORCH heavy -- bash -ic '<function> <args>'`.
@@ -31,6 +33,52 @@ How it admits a command:
   command's cleanup, and never force-kills it.
 - Commands keep the caller's stdio but cannot open `/dev/tty`.
 - The dashboard's lane counts refresh at most every five seconds.
+
+## Agent admission
+
+`start` and `dispatch` check the whole machine before they launch a Claude or Codex agent. The
+per-run parallel limit (`references/plan.md`, "Parallel limit") still applies: a start must pass
+both.
+
+What it checks:
+
+- **Count.** Live Claude and Codex relays in every run under the state root count, not only your
+  run's. Command tasks do not count.
+- **The count limit** is `AGENT_ORCH_MAX_TOTAL`. Its default is 75% of the machine's RAM in GiB,
+  rounded, and at least 4: 12 on a 16 GiB machine, 24 on 32 GiB. Setting it to `0` turns off the
+  count check only; the memory checks stay.
+- **Memory.** Available memory must not be below `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`; set
+  bytes, MB or GiB, as for `AGENT_ORCH_HEAVY_MIN_FREE`), and macOS memory pressure must be below
+  critical (level 4). Available memory is read as the heavy lane reads it (above).
+
+The count is read from the live relays each time, not from a persistent counter, and the check and
+the start share one machine-wide lock, so two starts at the same moment cannot both take the last
+place.
+
+When a start does not pass:
+
+- `start` prints the reasons, starts nothing and exits 7.
+- `--force` does not bypass it. It skips plan checks only (`references/dispatch.md`).
+- A resume or a rework is a new start, so it is checked the same way.
+- The agent that takes the place of one that ended does not wait for the count. This covers a
+  parked babysitter that its watcher resumes, a task that `wait` retries, and one that an interrupt
+  restarts in its own session. Memory still applies: such a replacement never starts while
+  available memory is below the minimum or macOS pressure is critical.
+
+What to do:
+
+- `$ORCH wait <run> <task-id>` waits for an existing task to finish, which frees a place. Then start
+  again.
+- `start ... --wait [DUR]` retries every few seconds, prints the reason once, and starts the task
+  when there is room. `DUR` defaults to 10 minutes. When it expires, `start` exits 7 and has
+  started nothing. It blocks like `wait`: in Claude Code, run it in the background
+  (`SKILL.md`, "Setup"). A Codex orchestrator, whose shell calls time out, gives a `DUR` below the
+  timeout and repeats the call.
+- `dispatch` does not fail: it lists each ready task with the reason it waits. A later `dispatch`,
+  or `dispatch --follow`, starts it when there is room (`references/dispatch.md`).
+- `$ORCH agents` shows how many agents run, the count limit, and the available memory.
+- Do not start agents through your host's own sub-agent tool to get around a refusal
+  (`references/dispatch.md`, "Why never your host's own sub-agent tool").
 
 ## Keep test runs small
 
