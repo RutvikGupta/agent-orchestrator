@@ -611,6 +611,26 @@ test('a waiting message shows whole, and the board\'s own line on when it is rea
   assert.deepEqual(page.queue().hint, [], 'the board already says when the agent reads it');
 });
 
+test('the waiting list collapses to its heading and opens again, and the choice stays for the next agent', async () => {
+  const page = await openPage();
+  page.board.delivery = 'It reads them after its next tool call.';
+  page.board.add('alpha', { text: 'for alpha', from: 'orchestrator' });
+  page.board.add('beta', { text: 'for beta', from: 'orchestrator' });
+  await page.choose('alpha');
+  const box = page.el('compose-queue');
+  const shown = () => ({ rows: page.queue().rows.length, when: box.querySelectorAll('.qd').length, toggle: box.querySelector('.qt').className });
+  assert.deepEqual(shown(), { rows: 1, when: 1, toggle: 'qt open' });
+  await box.querySelector('.qt').click();
+  assert.deepEqual(shown(), { rows: 0, when: 0, toggle: 'qt shut' });
+  assert.match(page.queue().head, /Waiting for the agent \(1\)/, 'the heading and its count stay');
+  await page.poll();
+  assert.equal(shown().rows, 0, 'a redraw keeps it collapsed');
+  await page.choose('beta');
+  assert.deepEqual(shown(), { rows: 0, when: 0, toggle: 'qt shut' });
+  await page.el('compose-queue').querySelector('.qt').click();
+  assert.deepEqual(shown(), { rows: 1, when: 1, toggle: 'qt open' });
+});
+
 // The Interrupt option and Send now, under whatever time format the page's browser has. The status line
 // begins with the server's time, written by the browser's own formatter: its text is not the test's to
 // guess ("12.00 p. m." has periods of its own), so the expectation is built from the same formatter.

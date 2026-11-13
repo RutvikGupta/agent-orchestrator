@@ -23,6 +23,8 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
    rows, which scroll inside their own area so the box below stays in view. */
 #compose-queue{display:flex;flex-direction:column;gap:3px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:6px 8px}
 #compose-queue .qh{color:var(--fg);font-weight:600;display:flex;align-items:center;gap:8px}#compose-queue .now{margin-left:auto;padding:1px 8px;font-size:12px;font-weight:400}
+#compose-queue .qt{border:0;background:none;color:var(--muted);cursor:pointer;padding:0 2px;font-size:10px;line-height:1}#compose-queue .qt:hover{color:var(--fg)}
+#compose-queue .qt.open::before{content:"▼"}#compose-queue .qt.shut::before{content:"▶"}
 #compose-queue .ql{display:flex;flex-direction:column;gap:6px;min-height:0;max-height:30vh;overflow:auto}#compose-queue .q{display:flex;flex-direction:column;gap:1px;min-width:0}#compose-queue .q .t{color:var(--muted)}
 #compose-queue .q .x{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--fg)}
 #compose-files{display:flex;flex-wrap:wrap;gap:6px}#compose-files .f{position:relative;width:64px;height:64px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--card)}

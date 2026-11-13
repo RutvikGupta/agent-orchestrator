@@ -23,6 +23,8 @@
   too, even while one of them still runs; the row then reads "+N hidden · M running". A row opens
   by itself only for a running agent or a main session with a running row under it. Finished rows
   stay listed until they have been quiet for `AGENT_ORCH_ROW_IDLE`, whose default is now 30m (was 1h).
+- The waiting list above the message box collapses to its heading, with the count, and opens
+  again from the arrow beside it; the choice is kept in the browser for every agent.
 - The waiting list above the message box shows each message whole, on its own lines under who
   sent it and when; it cut the text to a few words. The older "mid-step" hint no longer shows
   under the board's own line on when the agent reads them, which it could contradict.

@@ -496,20 +496,27 @@ function showReply(t){const box=document.getElementById("compose-reply"),r=t?.in
 // queued one has waited unread for 30 seconds and the board gives no such line, one says how to interrupt; `hintDue` is when the one
 // waiting longest reaches that, and the one-second ticker redraws the box then.
 const HINT="the agent is mid-step; use steer to interrupt",HINT_MS=30000;let hintDue=null;
+// Whether the waiting list is collapsed to its heading. One choice for every agent, kept in this
+// browser, so a long queue does not push the log out of view each time a row is chosen.
+const queueShut=()=>{try{return localStorage.getItem("orchQueueShut")==="1"}catch{return false}};
+const setQueueShut=v=>{try{v?localStorage.setItem("orchQueueShut","1"):localStorage.removeItem("orchQueueShut")}catch{}};
 function queueRows(t,key){const rows=unreadList(t).map(m=>({sender:senderOf(m),time:m.time,text:m.text,images:m.images,status:"queued",since:Date.parse(m.time)}));
   for(const e of t&&key?shownLocal(key,t):[])if(e.status!=="failed")rows.push({sender:"you",time:e.at,text:e.text,images:e.images,status:e.status,since:e.status==="queued"?e.since:NaN});
   return rows}
 function showQueue(t,key){const box=document.getElementById("compose-queue"),rows=queueRows(t,key),queued=rows.filter(r=>r.status==="queued"),
     oldest=Math.min(...queued.map(r=>r.since).filter(Number.isFinite)),due=Number.isFinite(oldest)?oldest+HINT_MS:null,late=due!=null&&Date.now()>=due,when=t?.inbox?.delivery?.text;
   hintDue=due!=null&&!late?due:null;
-  box.replaceChildren(...(rows.length?[$("div",{class:"qh"},"Waiting for the agent ("+rows.length+")",
+  const shut=queueShut();
+  box.replaceChildren(...(rows.length?[$("div",{class:"qh"},
+      $("button",{type:"button",class:"qt "+(shut?"shut":"open"),"aria-expanded":String(!shut),"aria-label":shut?"Show the waiting messages":"Hide the waiting messages",title:shut?"Show the waiting messages":"Hide the waiting messages; the count stays",onclick:()=>{setQueueShut(!shut);showQueue(t,key)}}),
+      "Waiting for the agent ("+rows.length+")",
       queued.length?$("button",{type:"button",class:"now",title:"Stop the agent's current shell command so it reads these now (never a commit, push or other publishing command). Not in a shell command: its session is stopped and resumed with them.",onclick:()=>sendNow(t)},"Send now"):null),
-    ...(when?[$("p",{class:"muted qd"},when)]:[]),
-    ...(late&&!when?[$("p",{class:"muted qhint"},HINT)]:[]),
-    $("div",{class:"ql"},...rows.map(m=>{const at=new Date(m.time).getTime();
+    ...(when&&!shut?[$("p",{class:"muted qd"},when)]:[]),
+    ...(late&&!when&&!shut?[$("p",{class:"muted qhint"},HINT)]:[]),
+    ...(shut?[]:[$("div",{class:"ql"},...rows.map(m=>{const at=new Date(m.time).getTime();
       return $("div",{class:"q",title:m.text},$("span",{class:"t"},m.sender+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":" · "),
           ...(m.status==="sending"?[]:[$("span",{class:"waited","data-since":String(at)},"waited "+dur(Date.now()-at))])),
-        $("span",{class:"x"},m.text.trim()+(m.images?" ("+imageCount(m.images)+")":"")))}))]:[]));
+        $("span",{class:"x"},m.text.trim()+(m.images?" ("+imageCount(m.images)+")":"")))}))])]:[]));
   box.hidden=!rows.length}
 const taskAt=key=>{if(!key)return null;const[runId,taskKey]=key.split("/");return state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskKey)||null};
 function compose(){settle(); // every read of the board ends here, so what it lists settles the sends still in flight
