@@ -11,7 +11,7 @@ const from = app.indexOf('// The order rule for what the user dragged.');
 const until = app.indexOf('// The memories, kept in this browser', from);
 assert.ok(from >= 0 && until > from, 'the page holds the order rule');
 const context = vm.createContext({});
-vm.runInContext(`${app.slice(from, until)};this.rule={heldOrder,keptOrders,sectionOrder,treeRows,rowTarget,moveKey,dropMemo,listName};`, context);
+vm.runInContext(`${app.slice(from, until)};this.rule={heldOrder,validOrders,keptOrders,sectionOrder,treeRows,rowTarget,moveKey,dropMemo,listName};`, context);
 // Values from the vm context have its own Array prototype; JSON makes them comparable here.
 const plain = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 const rule = Object.fromEntries(Object.entries(context.rule).map(([name, fn]) => [name, (...args) => plain(fn(...args))]));
@@ -45,6 +45,20 @@ test('an item that moved, appeared or left in the automatic order drops the reme
   // A memory that is not a reordering of its own keys is never shown.
   assert.equal(rule.heldOrder(['x', 'y'], { auto: ['x', 'y'], order: ['x', 'x'] }).valid, false);
   assert.equal(rule.heldOrder(['x', 'y'], { auto: ['x', 'y'], order: 'yx' }).valid, false);
+});
+
+test('stored data that is not a well-formed memory is dropped and never throws', () => {
+  // A key that cannot become a string threw while the rule sorted it, and the board stayed blank.
+  const bad = { toString: null };
+  assert.deepEqual(context.rule.heldOrder(['s1', 's2'], { auto: ['s1', 's2'], order: [bad, 's2'] }).valid, false);
+  const ok = { auto: ['x', 'y'], order: ['y', 'x'] };
+  const stored = {
+    sections: { auto: ['s1', 's2'], order: [bad, 's2'] }, number: 5, empty: null, text: 'xy', list: ['x'],
+    notArrays: { auto: 'xy', order: ['x', 'y'] }, repeated: { auto: ['x', 'x'], order: ['x', 'x'] },
+    otherKeys: { auto: ['x', 'y'], order: ['x', 'z'] }, numbers: { auto: [1, 2], order: [2, 1] }, short: { auto: ['x', 'y'], order: ['y'] }, ok,
+  };
+  assert.deepEqual(plain(context.rule.validOrders(stored)), { ok });
+  for (const v of [null, undefined, 5, 'text', ['x'], true]) assert.deepEqual(plain(context.rule.validOrders(v)), {});
 });
 
 test('on a new board each list keeps or drops its own order: a change in one list leaves the others', () => {

@@ -38,7 +38,8 @@ act on. `SKILL.md` step 5 says when to open it.
   reordered (the sections, or the rows under one parent), the page remembers the automatic order at
   the drop. While that stays the same, your order shows. When it changes in any way (an item moved,
   appeared or left), the page forgets your order for that list only, and the list sorts itself again.
-- The orders are kept in this browser, so a reload keeps them, under the same rule.
+- The orders are kept in this browser, so a reload keeps them, under the same rule. When the
+  browser cannot store them, they still hold until the page reloads.
 
 ## Messages to a task
 

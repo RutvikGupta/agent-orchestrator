@@ -26,9 +26,17 @@ const olderShown=new Set();
 // while the automatic order still has the same keys in the same order; any change there (an item
 // moved, appeared or left) makes the memory invalid, and the list shows the automatic order again.
 const sameOrder=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((k,i)=>k===b[i]);
+// Keys are distinct strings; anything else in a memory (it comes from storage) is never sorted or shown.
+const isKeys=a=>Array.isArray(a)&&a.every(k=>typeof k==="string")&&new Set(a).size===a.length;
+const sameKeys=(a,b)=>isKeys(a)&&isKeys(b)&&sameOrder([...a].sort(),[...b].sort());
 function heldOrder(auto,memo){const order=memo?.order;
-  const valid=sameOrder(auto,memo?.auto)&&Array.isArray(order)&&sameOrder([...order].sort(),[...auto].sort());
+  const valid=sameOrder(auto,memo?.auto)&&sameKeys(order,auto);
   return{keys:[...(valid?order:auto)],valid}}
+// The well-formed memories in what storage held: an object of lists, each with `auto` and `order`
+// holding the same distinct string keys. Everything else is dropped, so stored data never breaks a draw.
+function validOrders(v){const out={};if(!v||typeof v!=="object"||Array.isArray(v))return out;
+  for(const[n,m]of Object.entries(v))if(m&&typeof m==="object"&&sameKeys(m.auto,m.order))out[n]={auto:[...m.auto],order:[...m.order]};
+  return out}
 // A list's name: "sections", or the section's id and the parent's key ("" for the top level).
 const listName=(runId,parentKey)=>JSON.stringify([runId,parentKey||""]);
 const sameParent=(a,b)=>(a.parentKey||"")===(b.parentKey||"");
@@ -56,12 +64,13 @@ const moveKey=(keys,key,target,after)=>{const rest=keys.filter(k=>k!==key),at=re
 // when the drop changes nothing, null (forget) when it gives back the automatic order, else a memo.
 function dropMemo(auto,shown,key,target,after){const next=moveKey(shown,key,target,after);
   return sameOrder(next,shown)?undefined:sameOrder(next,auto)?null:{auto:[...auto],order:next}}
-// The memories, kept in this browser so a redraw and a reload keep them. Read on every use, so tabs
-// of the dashboard share them.
-const readOrders=()=>{try{const v=JSON.parse(localStorage.getItem("orchOrder")||"{}");return v&&typeof v==="object"&&!Array.isArray(v)?v:{}}catch{return{}}};
-const writeOrders=v=>{try{Object.keys(v).length?localStorage.setItem("orchOrder",JSON.stringify(v)):localStorage.removeItem("orchOrder")}catch{}};
+// The memories, kept in this browser so a redraw and a reload keep them. Every draw reads them from
+// memory; they load from storage once, at startup, and each change is written back when storage
+// takes it, so a full or blocked storage leaves dragging working until the page reloads.
+let orders=(()=>{try{return validOrders(JSON.parse(localStorage.getItem("orchOrder")||"{}"))}catch{return{}}})();
+const saveOrders=()=>{try{Object.keys(orders).length?localStorage.setItem("orchOrder",JSON.stringify(orders)):localStorage.removeItem("orchOrder")}catch{}};
 // On every new board: forget the lists whose automatic order changed, and give back the rest.
-function boardOrders(){const all=readOrders(),kept=keptOrders(state,all);if(Object.keys(kept).length!==Object.keys(all).length)writeOrders(kept);return kept}
+function boardOrders(){const kept=keptOrders(state,orders);if(Object.keys(kept).length!==Object.keys(orders).length){orders=kept;saveOrders()}return orders}
 // Rows are rebuilt when data changes; starting every pulse at the page timeline's origin keeps
 // rebuilt dots in step instead of restarting their beat.
 // Rows that changed place glide from their old position to the new one (rising or dropping), and
@@ -193,7 +202,7 @@ function sectionView(run){
   const chosen=new Set();if(sel?.startsWith(run.id+"/"))for(let k=sel.slice(run.id.length+1);k;k=byKey.get(k)?.parentKey)chosen.add(k);
   const older=new Set(run.tasks.filter(t=>t.older&&!chosen.has(t.key))),showOlder=olderShown.has(run.id);
   // Rows in their held order (treeRows), each with a grip while another row under its parent is listed.
-  const listed=treeRows(run,readOrders()).filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map(),tops=listed.filter(t=>!t.parentKey).length;
+  const listed=treeRows(run,orders).filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map(),tops=listed.filter(t=>!t.parentKey).length;
   for(const t of listed){if(t.parentKey)kids.set(t.parentKey,(kids.get(t.parentKey)||0)+1);for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey){below.set(p,(below.get(p)||0)+1);if(t.state==="running")busy.set(p,(busy.get(p)||0)+1)}}
   const hiddenBy=t=>{for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)if(!isOpen(run.id+"/"+p))return true;return false};
   const rows=listed.filter(t=>!hiddenBy(t)).map(t=>{
@@ -656,11 +665,11 @@ function dropAt(e){const d=dragged,el=e.target?.closest?.(d?.kind==="section"?".
   const sec=el.closest(".run[data-run]"),mark=at.after?blockEnd(sec,run,at.target):sec.querySelector('tbody.session[data-key="'+CSS.escape(run.id+"/"+at.target)+'"]');
   return mark?{mark,...at}:null}
 // Remember what a drop changed for its list; true when it changed the order shown.
-function dropOrder(d,at){const all=readOrders();let name="sections",memo;
+function dropOrder(d,at){const all={...orders};let name="sections",memo;
   if(d.kind==="section")memo=dropMemo(state.map(r=>r.id),sectionOrder(state,all).map(r=>r.id),d.run,at.target,at.after);
   else{const run=state.find(r=>r.id===d.run),t=run?.tasks.find(x=>x.key===d.key);if(!t)return false;name=listName(d.run,t.parentKey);
     const same=x=>sameParent(x,t);memo=dropMemo(run.tasks.filter(same).map(x=>x.key),treeRows(run,all).filter(same).map(x=>x.key),d.key,at.target,at.after)}
-  if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];writeOrders(all);return true}
+  if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];orders=all;saveOrders();return true}
 function endDrag(changed){markDrop(null);for(const el of document.getElementById("runs").querySelectorAll(".dragging"))el.classList.remove("dragging");
   dragged=null;pressed=null;if(changed){behind=true;lastState=""}setTimeout(()=>catchUp(),0)}
 (()=>{const root=document.getElementById("runs");

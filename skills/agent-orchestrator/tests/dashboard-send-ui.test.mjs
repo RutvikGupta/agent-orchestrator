@@ -1023,3 +1023,39 @@ test('a row dragged by its grip keeps its place across redraws and a reload, unt
   await box.dispatch('drop', { dataTransfer: files });
   assert.equal(again.el('compose-files').querySelectorAll('.f').length, 1);
 });
+
+// A browser's storage for a page: what it holds at load, and the keys whose writes it refuses, as a
+// full storage does.
+function browserStorage(held = {}, refused = []) {
+  const kept = new Map(Object.entries(held));
+  return { getItem: (k) => (kept.has(k) ? kept.get(k) : null), removeItem: (k) => { kept.delete(k); },
+    setItem: (k, v) => { if (refused.includes(k)) throw Object.assign(new Error('The quota has been exceeded.'), { name: 'QuotaExceededError' }); kept.set(k, String(v)); } };
+}
+const rowOrder = (page) => page.el('runs').querySelectorAll('tbody.session').map((b) => b.dataset.key.split('/')[1]);
+
+test('a stored order that is not well formed is dropped at load, and the board still draws', async () => {
+  // The sections' memory has a key that cannot become a string (sorting two keys converts them); the
+  // rows' memory is good and still holds.
+  const orchOrder = JSON.stringify({ sections: { auto: [RUN], order: [{ toString: null }, RUN] }, junk: 5,
+    [JSON.stringify([RUN, ''])]: { auto: ['alpha', 'beta', 'gamma'], order: ['gamma', 'alpha', 'beta'] } });
+  const page = await openPage({ tasks: ['alpha', 'beta', 'gamma'], local: browserStorage({ orchOrder }) });
+  assert.deepEqual(rowOrder(page), ['gamma', 'alpha', 'beta']);
+  page.board.add('beta', { text: 'news', from: 'orchestrator' });
+  await page.poll();
+  assert.deepEqual(rowOrder(page), ['gamma', 'alpha', 'beta']);
+});
+
+test('a drop holds while the page is open even when storage refuses to keep it', async () => {
+  const local = browserStorage({}, ['orchOrder']);
+  const page = await openPage({ tasks: ['alpha', 'beta', 'gamma'], local });
+  const runs = page.el('runs'), row = (task) => runs.querySelector(`tbody.session[data-key="${RUN}/${task}"]`), data = dragData();
+  await runs.dispatch('dragstart', { target: row('gamma').querySelector('.grip'), dataTransfer: data });
+  await runs.dispatch('drop', { target: row('alpha'), dataTransfer: data, clientY: 0 });
+  await page.poll();
+  assert.deepEqual(rowOrder(page), ['gamma', 'alpha', 'beta']);
+  assert.equal(local.getItem('orchOrder'), null, 'nothing was stored');
+  // The order is in the page's memory: new activity that leaves the automatic order alone keeps it.
+  page.board.add('beta', { text: 'news', from: 'orchestrator' });
+  await page.poll();
+  assert.deepEqual(rowOrder(page), ['gamma', 'alpha', 'beta']);
+});
