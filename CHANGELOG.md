@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.0 (2026-11-12)
+
+- An interrupt reaches a running agent in every state. `send --steer`, `steer` and the dashboard's
+  Interrupt stop the agent's shell command, as before; when it is not in one, they stop its session
+  and resume it in the same session with the unread messages, as a new `interrupt` attempt that
+  keeps the task's relay options and counts as no failure. It did nothing outside a shell command.
+- A task that ended its turn and waits on a background command or sub-agent of its own reads as
+  idle. With a message unread it is flagged `unreachable` at once, a plain `send` says the message
+  will not be read until that wait ends, and a message from the dashboard's box interrupts it.
+- An interrupt is refused, with the reason, for a babysitter or parked task, a command task, a
+  session not known yet, and while a publishing command such as `git push` runs.
+- The dashboard lists every message that waits for the agent above the message box, with who sent
+  it and when the agent will read it, and each row with waiting messages shows "✉ N waiting".
+  `inbox RUN TASK` prints the same delivery line.
+- One claim covers every way a task is resumed (`start`, retry, rework, escalation, the park
+  watcher, an interrupt), so two of them cannot start the next attempt together, and `stop` and
+  `close` cancel a resume that is between its two relays.
+- Known gap: the delivery line and the attention item still suggest an interrupt while a
+  publishing command blocks it; `steer` then refuses and says why.
+
 ## 2.1.1 (2026-11-12)
 
 - A Claude session's row shows a `/model` or `/effort` change as soon as the command runs. The
