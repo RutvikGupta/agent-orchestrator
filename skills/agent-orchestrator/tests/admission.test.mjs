@@ -39,7 +39,7 @@ if(process.argv[2]===${JSON.stringify(command)})global.setTimeout=(fn,ms,...args
 
 test('default machine limit follows physical RAM, rounds and has a floor', async () => {
   const { totalLimit } = await import('../scripts/lib/admission.mjs');
-  for (const [gb, limit] of [[16, 12], [32, 24], [2, 4], [10, 8]]) assert.equal(totalLimit(undefined, gb * 1024 ** 3), limit);
+  for (const [gb, limit] of [[16, 12], [32, 24], [2, 4], [10, 8]]) assert.equal(totalLimit('', gb * 1024 ** 3), limit);
   assert.equal(totalLimit('0'), 0);
   assert.throws(() => totalLimit('-1'), /AGENT_ORCH_MAX_TOTAL/);
 });

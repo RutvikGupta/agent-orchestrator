@@ -75,7 +75,7 @@ export async function fixture(t) {
     PATH: process.env.PATH, HOME: home, TMPDIR: path.join(root, 'tmp'),
     LANG: 'C', LC_ALL: 'C', TZ: 'UTC',
     AGENT_ORCH_HOME: state, AGENT_ORCH_SKILLS_DIR: skills,
-    AGENT_ORCH_WAIT_POLL_MS: '100',
+    AGENT_ORCH_WAIT_POLL_MS: '100', AGENT_ORCH_MAX_TOTAL: '0',
     AGENT_ORCH_HEAVY_FREE_BYTES: '9999999999', AGENT_ORCH_HEAVY_PRESSURE_LEVEL: '0',
     CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
