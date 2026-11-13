@@ -65,7 +65,7 @@ test('a run leaves the board after 2 hours with nothing running, or after AGENT_
   assert.deepEqual(await shown(board), ['fresh', 'recent', 'old']);
 });
 
-test('rows quiet for an hour are flagged older, whole subtrees at a time; running, attention, and main rows never are', async (t) => {
+test('rows quiet for half an hour are flagged older, whole subtrees at a time; running, attention, and main rows never are', async (t) => {
   const f = await fixture(t);
   f.env.AGENT_ORCH_NOTIFY = 'off';
   // Run A, launched by a Claude session with native sub-agents. Run B hangs under A's task `lead`,
@@ -79,7 +79,7 @@ test('rows quiet for an hour are flagged older, whole subtrees at a time; runnin
   editRun(c, { orchestrator: { agent: 'delegated-agent', sessionId: null, parentRun: a.id, parentTask: 'lead-quiet' } });
   for (const id of ['fresh', 'lead', 'lead-quiet']) await finish(f, a, id, { collect: true, env: owner });
   await finish(f, a, 'old-review', { config: { finalMessage: 'Parser fixed.' } }); // awaits review
-  await finish(f, b, 'child-fresh', { config: { finalMessage: 'Child done.' }, env: owner }); // awaits review
+  await finish(f, b, 'child-fresh', { collect: true, env: owner });
   await finish(f, b, 'child-old', { collect: true, env: owner });
   await finish(f, c, 'grandchild', { collect: true, env: owner });
   for (const [run, id] of [[a, 'lead'], [a, 'lead-quiet'], [a, 'old-review'], [b, 'child-old'], [c, 'grandchild']]) backdate(run, id, 90 * MIN);
@@ -113,17 +113,14 @@ test('rows quiet for an hour are flagged older, whole subtrees at a time; runnin
   await t.test('quiet rows, orch.mjs and native alike, are older; recent ones are not', () => {
     for (const id of ['lead-quiet', 'grandchild', 'child-old']) assert.equal(row(id).older, true, id);
     for (const id of ['completed', 'stopped']) assert.equal(row(id, true).older, true, `native ${id}`);
-    // A finished row whose result was collected has nothing left for anyone: it folds at once.
-    assert.equal(row('fresh').older, true, 'fresh');
-    assert.equal(row('fresh').closed, true);
-    assert.equal(row('child-fresh').older, false, 'child-fresh awaits review');
+    for (const id of ['fresh', 'child-fresh']) assert.equal(row(id).older, false, id);
     for (const id of ['running', 'needs-decision']) assert.equal(row(id, true).older, false, `native ${id}`);
     assert.ok(section.tasks.every((r) => typeof r.older === 'boolean'), 'every row carries the flag');
     assert.ok(section.tasks.every((r) => !('activeMs' in r)), 'the internal activity stamp stays off the board');
   });
 
   await t.test('a parent stays while any row under it stays, and folds with its whole subtree', () => {
-    assert.equal(row('lead').older, false, 'lead is finished and quiet, but child-fresh under it awaits review');
+    assert.equal(row('lead').older, false, 'lead is quiet, but child-fresh under it is not');
     assert.equal(row('child-fresh').parentKey, row('lead').key);
     assert.equal(row('child-old').parentKey, row('lead').key);
     assert.equal(row('grandchild').parentKey, row('lead-quiet').key);
@@ -150,9 +147,9 @@ test('rows quiet for an hour are flagged older, whole subtrees at a time; runnin
 
   await t.test('the older rows stay in the state, so the page can show them without a new request', () => {
     const older = section.tasks.filter((r) => r.older).map((r) => `${r.native ? 'native ' : ''}${r.id}`).sort();
-    assert.deepEqual(older, ['child-old', 'fresh', 'grandchild', 'lead-quiet', 'native completed', 'native stopped']);
+    assert.deepEqual(older, ['child-old', 'grandchild', 'lead-quiet', 'native completed', 'native stopped']);
     for (const r of section.tasks.filter((r) => r.older)) assert.ok(r.key && 'parentKey' in r, r.id);
-    assert.deepEqual(section.attention.map((x) => x.id).sort(), ['child-fresh', 'old-review'], 'the lane is unchanged by folding');
+    assert.deepEqual(section.attention.map((x) => x.id), ['old-review'], 'the lane is unchanged by folding');
   });
 
   await t.test('the page folds older rows per section and follows the log', async () => {
@@ -172,12 +169,10 @@ test('rows quiet for an hour are flagged older, whole subtrees at a time; runnin
   });
 
   await t.test('AGENT_ORCH_ROW_IDLE sets the age', async () => {
-    // The age is for a row that is not finished: the stopped sub-agent, quiet for 3 hours, now
-    // stays. A finished row with nothing left for anyone folds whatever the age.
-    f.env.AGENT_ORCH_ROW_IDLE = '4h';
+    f.env.AGENT_ORCH_ROW_IDLE = '2h';
     const later = sectionOf(await (await restart(f, board)).json('/api/state'), a);
     const flagged = later.tasks.filter((r) => r.older).map((r) => `${r.native ? 'native ' : ''}${r.id}`).sort();
-    assert.deepEqual(flagged, ['child-old', 'fresh', 'grandchild', 'lead-quiet', 'native completed']);
+    assert.deepEqual(flagged, ['native completed', 'native stopped'], 'rows quiet for 90 minutes stay');
   });
 });
 

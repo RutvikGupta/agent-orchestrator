@@ -19,6 +19,10 @@
   `close` cancel a resume that is between its two relays.
 - While a publishing command holds an interrupt back, the delivery line, the attention item, a
   plain `send` and `inbox` say that an interrupt waits for that command too, and offer none.
+- On the dashboard, a finished agent's sub-agents stay closed under its row, on every page load
+  too, even while one of them still runs; the row then reads "+N hidden · M running". A row opens
+  by itself only for a running agent or a main session with a running row under it. Finished rows
+  stay listed until they have been quiet for `AGENT_ORCH_ROW_IDLE`, whose default is now 30m (was 1h).
 - The waiting list above the message box shows each message whole, on its own lines under who
   sent it and when; it cut the text to a few words. The older "mid-step" hint no longer shows
   under the board's own line on when the agent reads them, which it could contradict.
@@ -55,9 +59,6 @@
 - `pr-watch` counts only the latest run of each check on the head commit. A run that was
   cancelled when a newer run of the same check replaced it was counted as a failed check, so a
   babysitter saw red CI on a pull request whose checks had all passed.
-- The dashboard folds a finished row behind "show N older" at once when nothing is left to do
-  with it (its result was read, accepted or closed). It waited `AGENT_ORCH_ROW_IDLE`, which now
-  applies only to a row that is not finished: prepared, parked, idle or stopped.
 
 ## 2.1.0 (2026-11-11)
 

@@ -451,3 +451,21 @@ test('a press holds the board until it ends, so the click lands on the element p
   await page.refresh();
   assert.ok(!root.contains(before));
 });
+
+test('a row opens by itself only for a running agent or a main session with a running row under it', () => {
+  const app = fs.readFileSync(new URL('../scripts/dashboard/app.js', import.meta.url), 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(`${app.slice(app.indexOf('const autoOpen='), app.indexOf('const isOpen='))};this.autoOpen=autoOpen;`, context);
+  const open = (tasks) => [...context.autoOpen(tasks)].sort();
+  const row = (key, state, parentKey = null, extra = {}) => ({ key, state, parentKey, ...extra });
+  // A running agent over a running sub-agent opens; so does a main session, running or idle.
+  assert.deepEqual(open([row('main', 'idle', null, { main: true }), row('lead', 'running', 'main'), row('child', 'running', 'lead')]), ['lead', 'main']);
+  // A finished agent stays closed, though a sub-agent under it still runs, and so does its own parent's view of it.
+  assert.deepEqual(open([row('main', 'running', null, { main: true }), row('done', 'completed', 'main'), row('late', 'running', 'done')]), ['main']);
+  assert.deepEqual(open([row('done', 'completed'), row('late', 'running', 'done')]), []);
+  for (const state of ['closed', 'failed', 'stopped', 'parked', 'needs-decision']) assert.deepEqual(open([row('p', state), row('c', 'running', 'p')]), [], state);
+  // Nothing runs below: nothing opens.
+  assert.deepEqual(open([row('lead', 'running'), row('child', 'completed', 'lead')]), []);
+  // The count a closed row shows names the hidden rows that still run.
+  assert.ok(app.includes('" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")'));
+});

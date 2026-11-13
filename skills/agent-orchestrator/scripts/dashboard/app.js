@@ -10,6 +10,12 @@ let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
 // A row with sub-agents opens while any agent under it runs and closes once none do; clicking its
 // arrow, or the row itself, overrides that until the running state under it changes.
 const manual=new Map(),live=new Map();
+// The rows that are open without a click: a running agent, or a main session, with a running row
+// somewhere under it. A finished agent's sub-agents stay closed, on every load too, even while one
+// of them still runs: its row then says how many rows are hidden and how many of those run.
+const autoOpen=tasks=>{const byKey=new Map(tasks.map(t=>[t.key,t])),open=new Set();
+  for(const t of tasks)if(t.state==="running")for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey){const up=byKey.get(p);if(up&&(up.main||up.state==="running"))open.add(p)}
+  return open};
 const isOpen=k=>{const a=!!live.get(k),m=manual.get(k);if(m&&m.auto===a)return m.open;manual.delete(k);return a};
 // Sections whose older rows (finished and quiet a while; the server flags them) are shown, until
 // "hide older" is clicked or the page reloads.
@@ -137,15 +143,14 @@ function staleNote(r,body){const age=r.headers.get("x-orch-stale"),head=r.header
 function sectionView(run){
   const by=run.orchestrator?.agent?("launched by "+run.orchestrator.agent+(run.orchestrator.sessionId?" session "+run.orchestrator.sessionId.slice(0,8):"")):"";
   // One <tbody> per session, so its row and its activity line hover and select as one item.
-  const byKey=new Map(run.tasks.map(t=>[t.key,t]));
-  for(const t of run.tasks)live.set(run.id+"/"+t.key,false);
-  for(const t of run.tasks)if(t.state==="running")for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)live.set(run.id+"/"+p,true);
+  const byKey=new Map(run.tasks.map(t=>[t.key,t])),open=autoOpen(run.tasks);
+  for(const t of run.tasks)live.set(run.id+"/"+t.key,open.has(t.key));
   // Older rows stay folded away unless the section shows them; the chosen session and the rows
   // above it always show. Arrows and "+N hidden" count only the rows listed.
   const chosen=new Set();if(sel?.startsWith(run.id+"/"))for(let k=sel.slice(run.id.length+1);k;k=byKey.get(k)?.parentKey)chosen.add(k);
   const older=new Set(run.tasks.filter(t=>t.older&&!chosen.has(t.key))),showOlder=olderShown.has(run.id);
-  const listed=run.tasks.filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map();
-  for(const t of listed){if(t.parentKey)kids.set(t.parentKey,(kids.get(t.parentKey)||0)+1);for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)below.set(p,(below.get(p)||0)+1)}
+  const listed=run.tasks.filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map();
+  for(const t of listed){if(t.parentKey)kids.set(t.parentKey,(kids.get(t.parentKey)||0)+1);for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey){below.set(p,(below.get(p)||0)+1);if(t.state==="running")busy.set(p,(busy.get(p)||0)+1)}}
   const hiddenBy=t=>{for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)if(!isOpen(run.id+"/"+p))return true;return false};
   const rows=listed.filter(t=>!hiddenBy(t)).map(t=>{
     const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
@@ -156,7 +161,7 @@ function sectionView(run){
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+senderOf(m)+": "+m.text).join("\n")},"✉ "+t.inbox.unread+" waiting"):null,
-        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
+        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
       $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")+(t.attempt>1?" · "+t.attempt+" attempts":"")+(startedIn(t,byKey.get(t.parentKey))?" · attempt "+startedIn(t,byKey.get(t.parentKey)):"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),

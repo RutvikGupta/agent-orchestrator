@@ -163,8 +163,10 @@ where the script or sub-agent names that model, and change it.
 ## Idle runs
 
 A run or session leaves the dashboard once nothing in it has run for `AGENT_ORCH_BOARD_IDLE`
-(default 2h); `status` and `result` still read it. A finished row with nothing left for anyone (its
-result was read, accepted or closed) folds behind "show N older" at once. A row that is not
-finished and not running (prepared, parked, idle or stopped) folds once it has been quiet for
-`AGENT_ORCH_ROW_IDLE` (default 1h). A row that runs or needs attention never folds, and a row stays
-while a row under it stays. The page folds them again each time it loads.
+(default 2h); `status` and `result` still read it. Rows quiet for `AGENT_ORCH_ROW_IDLE` (default 30m)
+fold behind "show N older".
+
+A row with sub-agents opens by itself only when it is a running agent, or a main session, with a
+running row somewhere under it. A finished agent's sub-agents stay closed under its row, on every
+page load too, even while one of them still runs: the row then reads "+N hidden · M running".
+Click the row or its arrow to open it.
