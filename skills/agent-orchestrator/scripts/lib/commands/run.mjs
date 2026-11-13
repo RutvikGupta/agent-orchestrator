@@ -1,6 +1,6 @@
 // `new`, `worktree`, `runs`, and `cleanup`: create a run and its worktrees, list runs, and clean up.
 
-import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
+import { collectWorktrees, collectionText, ensureDisk } from "../worktree-gc.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
@@ -69,6 +69,10 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   if (!from) die(`--from is not a commit in ${run.repo}: ${start}`);
   const wt = path.resolve(worktreePath || (retainedHead && previous.path) || path.join(run.dir, "worktrees", id));
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);
+  // Every worktree (`worktree`, `dispatch`, a restore) is created here, after the disk check: on a
+  // disk below AGENT_ORCH_MIN_FREE_DISK it collects unused worktrees, then refuses if that was not
+  // enough, before anything is created.
+  await ensureDisk(path.dirname(wt));
   fs.mkdirSync(path.dirname(wt), { recursive: true });
   git(run.repo, retainedHead ? ["worktree", "add", "-q", wt, branch] : ["worktree", "add", "-q", "-b", branch, wt, from]);
   const createdAt = new Date().toISOString();

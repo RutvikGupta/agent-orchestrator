@@ -312,15 +312,19 @@ Usage: node orch.mjs <command> [args] [--json]
                                   clean worktrees; only untracked gate caches are ignored.
                                   Commits stay on kept branches; running or parked users protect
                                   their worktrees across all runs. Never deletes branches.
-  gc [--dry-run] [--older-than DUR] [--json]
-                                  Collect owned runs with no running task and no activity for
-                                  24h (override with --older-than, e.g. 7d). Any closed task qualifies
+  gc [--dry-run] [--older-than DUR] [--auto] [--json]
+                                  Collect owned runs, and runs whose session has ended, with no
+                                  running task and no activity for 24h (override with
+                                  --older-than, e.g. 7d). Any closed task qualifies
                                   for gc, including collected results and older closures.
                                   Dry runs change nothing.
                                   Unread, unaccepted finished tasks expire after AGENT_ORCH_EXPIRE
                                   (default 7d); dead relays expire from their latest attempt activity.
                                   Reports removed/kept worktrees, teardown failures and disk freed.
                                   close cleans after the last open task; integrate cleans its task.
+                                  --auto: what the dashboard runs every 5 minutes (off with
+                                  AGENT_ORCH_AUTO_GC=off): skips live sessions' runs, and collects
+                                  after 1h while the disk is low (AGENT_ORCH_MIN_FREE_DISK).
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d),
                                   with input tokens per accepted task (all the group's input over
@@ -384,7 +388,7 @@ const specs = {
   stop: { bool: ["adopt"] },
   close: { bool: ["all", "adopt"] },
   rename: { value: ["to"], bool: ["adopt"] },
-  gc: { value: ["older-than"], bool: ["dry-run"] },
+  gc: { value: ["older-than"], bool: ["dry-run", "auto"] },
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },

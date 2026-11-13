@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { CACHE_PATH, CLI_PATH } from './config.mjs';
+import { diskRefusal, diskSize, diskState } from './disk.mjs';
 import { reclaimTask, runningDirectories } from './reclaim.mjs';
 import { acceptedNow, isClosedPreparation } from './lifecycle.mjs';
-import { guard, recordChange } from './ownership.mjs';
-import { isParked, loadTask, relayAlive, saveTask } from './runs.mjs';
-import { readJson } from './util.mjs';
+import { AUTO_COLLECTOR, guard, ownerText, ownershipOf, recordChange, sessionsEnded } from './ownership.mjs';
+import { isParked, listRuns, loadTask, relayAlive, saveTask } from './runs.mjs';
+import { die, parseDuration, readJson } from './util.mjs';
 import { teardownWorktree } from './worktree-prep.mjs';
 
 const git = (cwd, args) => spawnSync('git', ['-C', cwd, ...args], {
@@ -120,8 +121,9 @@ function diskBytes(wt) {
 
 // `reclaimKept`: `cleanup` also stops the build daemons a finished task left in a worktree that is
 // kept, as `result` and `accept` do; a worktree whose task still runs, or that another task uses,
-// is left alone.
-export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false } = {}) {
+// is left alone. `actor` is what each removal records, and the notice to the run's owner names it.
+// `ended`: the caller may act on the run because its launching sessions have ended (gc).
+export async function collectWorktrees(run, { dryRun = false, tasks = null, actor = null, expired = new Set(), allowReadClosed = false, reclaimKept = false, ended = false } = {}) {
   const report = { run: run.id, removed: [], kept: [], bytesFreed: 0 };
   for (const id of tasks || gcTasks(run).map((r) => r.id)) {
     let task = loadTask(run, id);
@@ -135,7 +137,7 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
     }
     let g;
     if (!dryRun) {
-      g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id] });
+      g = guard(run, `remove worktrees from run ${run.id}`, { refused: [id], ended });
       if (fs.existsSync(entry.path)) {
         reclaimTask(run, task);
         const teardown = await teardownWorktree(run, task);
@@ -159,12 +161,120 @@ export async function collectWorktrees(run, { dryRun = false, tasks = null, acto
       delete task.worktree;
       task.worktreeRemovedBy = actor || g.actor;
       saveTask(run, task);
-      recordChange(run, g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
+      recordChange(run, actor ? { ...g, actor } : g, { task: id, attempt: task.attempt || null, action: 'worktree removed' });
     }
     report.removed.push({ ...entry, bytes, dryRun, missing, recreateCommand: `node ${CLI_PATH} worktree ${run.id} ${id}` });
     report.bytesFreed += bytes || 0;
   }
   return report;
+}
+
+// The existing duration parser accepts hours; GC also accepts days for its longer defaults.
+export const duration = (s) => /^\d+(?:\.\d+)?d$/.test(String(s)) ? Number.parseFloat(s) * 86400000 : parseDuration(s);
+const time = (s) => Date.parse(s || '') || 0;
+
+// A run's latest activity: its creation, its owner's last use, its plan and notices, and each
+// task's own times and files.
+function activity(run, rows) {
+  let latest = Math.max(time(run.createdAt), time(run.orchestrator?.lastSeenAt));
+  const stat = (file) => { try { return fs.statSync(file).mtimeMs; } catch { return 0; } };
+  latest = Math.max(latest, stat(path.join(run.dir, 'plan.json')), stat(path.join(run.dir, 'owner-notices.jsonl')));
+  for (const row of rows) {
+    const task = loadTask(run, row.id);
+    latest = Math.max(latest, row.lastActiveMs || 0, ...['createdAt', 'startedAt', 'closedAt', 'acceptedAt', 'integratedAt', 'resultReadAt'].map((k) => time(task[k])));
+    const dir = path.join(run.dir, 'tasks', row.id);
+    for (const name of ['task.json', 'inbox.jsonl', 'reviews.jsonl', 'verifications.jsonl']) latest = Math.max(latest, stat(path.join(dir, name)));
+  }
+  return latest;
+}
+
+// gc over every run: expire unread finished tasks, then collect worktrees, in each run the caller
+// may collect that has no running task and no activity for `olderThan`. The caller may collect its
+// own runs; at a terminal, any run (not in `auto` mode, which leaves a live session's runs to it);
+// and any caller, a run whose launching sessions have all ended (sessionsEnded). A caller whose
+// identity cannot be read collects nothing. `auto` records the automatic collector as the actor.
+export async function collectRuns({ dryRun = false, olderThan, expireAfter = duration(process.env.AGENT_ORCH_EXPIRE ?? '7d'), auto = false, now = Date.now() } = {}) {
+  const reports = [];
+  for (const run of listRuns()) {
+    const own = ownershipOf(run);
+    const rows = gcTasks(run);
+    const report = { run: run.id, removed: [], kept: [], expired: [], bytesFreed: 0 };
+    const known = own.caller.kind !== 'unknown';
+    const allowed = (known && own.mine) || (!auto && own.caller.kind === 'user');
+    const ended = !allowed && known && sessionsEnded(own).ended;
+    // A dry run uses the same ownership decision, without invoking any mutating guard path.
+    const reason = !(allowed || ended) ? 'ownership refused' : rows.some((r) => r.state === 'running' || r.phase === 'parked') ? 'run has running tasks' : now - activity(run, rows) < olderThan ? 'run is too recent' : null;
+    if (reason) {
+      report.reason = reason;
+      // Whose run it is, so that a refused caller knows whom to ask.
+      if (reason === 'ownership refused') report.owner = ownerText(own);
+      for (const row of rows) {
+        const wt = loadTask(run, row.id)?.worktree;
+        if (wt) report.kept.push({ task: row.id, path: wt.path, branch: wt.branch, reason });
+      }
+      reports.push(report);
+      continue;
+    }
+    if (ended) report.sessionEnded = sessionsEnded(own).why;
+    const g = dryRun ? null : guard(run, `garbage collect run ${run.id}`, { ended });
+    const change = g && auto ? { ...g, actor: AUTO_COLLECTOR } : g;
+    const expired = new Set();
+    for (const row of rows) {
+      const task = loadTask(run, row.id);
+      const finished = time(row.result?.finishedAt) || (row.state === 'aborted' ? row.lastActiveMs : 0);
+      if (!finished || now - finished < expireAfter || task.closedAt || task.acceptedAt || task.resultReadAt || task.readAt || row.readAt || (task.decisionSeenAttempt != null && task.decisionSeenAttempt === row.attempt) || ['running', 'prepared'].includes(row.state)) continue;
+      expired.add(row.id);
+      report.expired.push(row.id);
+      if (!dryRun) {
+        saveTask(run, { ...task, closedAt: new Date(now).toISOString(), closedBy: 'expired', closedExplicitlyAttempt: task.attempt || 0 });
+        recordChange(run, change, { task: row.id, attempt: task.attempt || null, action: 'expired' });
+      }
+    }
+    const collected = await collectWorktrees(run, { dryRun, expired, allowReadClosed: true, ended, ...(auto ? { actor: AUTO_COLLECTOR } : {}) });
+    reports.push({ ...report, ...collected });
+  }
+  return reports;
+}
+
+// Automatic collection collects runs idle this long, or LOW_DISK_AGE while the disk is low.
+export const AUTO_AGE = '24h';
+export const LOW_DISK_AGE = '1h';
+
+// Automatic collection: collectRuns in `auto` mode, with AUTO_AGE, or LOW_DISK_AGE while `disk` is
+// low (twice the minimum free space or less). Returns { olderThan, reports }.
+export async function autoCollect({ disk = diskState(), olderThan = null, dryRun = false } = {}) {
+  const age = olderThan ?? duration(disk.low ? LOW_DISK_AGE : AUTO_AGE);
+  return { olderThan: age, reports: await collectRuns({ dryRun, olderThan: age, auto: true }) };
+}
+
+// The log of an automatic collection: one line per worktree removed and per task expired, then
+// what it freed. Nothing when it changed nothing.
+export function autoCollectionLines(reports, dryRun = false) {
+  const removed = reports.flatMap((r) => r.removed.map((w) => ({ ...w, run: r.run })));
+  const lines = [
+    ...reports.flatMap((r) => r.expired.map((id) => `auto gc ${dryRun ? 'would expire' : 'expired'} task ${id} of run ${r.run} (its result went unread for AGENT_ORCH_EXPIRE)`)),
+    ...removed.map((w) => `auto gc ${dryRun ? 'would remove' : 'removed'} worktree ${w.path} (run ${w.run}, task ${w.task}, ${w.bytes == null ? 'size unknown' : sizeText(w.bytes)}; branch kept: ${w.branch || '(none)'})`),
+  ];
+  if (removed.length) lines.push(`auto gc ${dryRun ? 'would free' : 'freed'} ${sizeText(removed.reduce((n, w) => n + (w.bytes || 0), 0))} from ${removed.length} worktree${removed.length === 1 ? '' : 's'}`);
+  return lines;
+}
+
+// Every path that creates a worktree goes through this check first. When the volume that holds
+// `dir` has less free space than AGENT_ORCH_MIN_FREE_DISK, it collects automatically (as the
+// dashboard does while the disk is low), reads the disk again, and refuses when it is still below
+// the minimum: nothing is created. No option bypasses it; only the setting changes it.
+export async function ensureDisk(dir, what = 'create a worktree') {
+  let disk;
+  try { disk = diskState(dir); } catch (error) { die(error.message, 2); }
+  if (!disk.critical) return disk;
+  process.stderr.write(`orch: only ${diskSize(disk.freeBytes)} of disk is free, below the minimum of ${diskSize(disk.minBytes)} (AGENT_ORCH_MIN_FREE_DISK): collecting unused worktrees first\n`);
+  const { reports } = await autoCollect({ disk });
+  const lines = autoCollectionLines(reports);
+  if (lines.length) process.stderr.write(lines.map((line) => `orch: ${line}\n`).join(''));
+  const after = diskState(dir);
+  if (!after.critical) return after;
+  const removed = reports.reduce((n, r) => n + r.removed.length, 0);
+  die(diskRefusal(after, { what, collected: { removed, bytesFreed: reports.reduce((n, r) => n + r.bytesFreed, 0) } }));
 }
 
 // A size a person reads: "1.2 GB", "310 MB", "4 KB".

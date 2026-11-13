@@ -92,8 +92,13 @@ export function actorOf(caller) {
   return { agent: r.agent, sessionId: r.sessionId || null, pid: r.pid || null, ...(caller.kind === "unknown" ? { unidentified: true } : {}) };
 }
 
+// The actor that automatic worktree collection records (`gc --auto`, and worktree creation on a
+// full disk): nobody asked for that change, so a notice names it rather than the caller.
+export const AUTO_COLLECTOR = Object.freeze({ agent: "orch", auto: "automatic worktree collection" });
+
 export function actorLabel(actor) {
   if (typeof actor === "string") return actor;
+  if (actor?.auto) return actor.auto;
   if (actor?.agent === "delegated-agent") return `task ${actor.task} of run ${actor.run}`;
   return launcherLabel(actor);
 }
@@ -152,6 +157,32 @@ function sessionGone(o) {
   return { gone: false };
 }
 
+// Whether the launcher of link `i` is gone: a session's host process, or an orch task's relay.
+function launcherGone(links, i, broken) {
+  const o = links[i].launcher;
+  if (o?.agent !== "delegated-agent") return sessionGone(o);
+  const parent = links[i + 1]?.run || null;
+  const task = parent ? loadTask(parent, o.parentTask) : null;
+  if (!parent) return { gone: true, why: `its parent run ${broken} is gone` };
+  return !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
+}
+
+// Whether every launcher up the run's chain has ended (its process is gone), however recently it
+// used the run: { ended, why }. `gc` collects such a run's worktrees for anyone, under its own
+// safety rules, since no session is left to do it. A run launched from a terminal never has ended,
+// and neither has a session whose PID was not recorded: neither is known to be gone.
+const endedCache = new WeakMap();
+export function sessionsEnded(own) {
+  if (endedCache.has(own)) return endedCache.get(own);
+  let state = { ended: false, why: null };
+  if (!own.mine && !own.userOwned) {
+    const states = own.links.map((_, i) => launcherGone(own.links, i, own.broken));
+    if (states.every((s) => s.gone)) state = { ended: true, why: states.at(-1).why };
+  }
+  endedCache.set(own, state);
+  return state;
+}
+
 // Whether every owner up the chain has gone: each link's launcher (a session's host process, an
 // orch task's relay) is gone, and has not used the run for AGENT_ORCH_ADOPT_AFTER. `recent` is set
 // when the run's own launcher is gone but used it lately, as a session resumed elsewhere does.
@@ -159,14 +190,7 @@ function orphanState(links, broken) {
   const after = adoptAfter();
   const states = links.map((link, i) => {
     const o = link.launcher;
-    let gone;
-    if (o?.agent === "delegated-agent") {
-      const parent = links[i + 1]?.run || null;
-      const task = parent ? loadTask(parent, o.parentTask) : null;
-      gone = !parent
-        ? { gone: true, why: `its parent run ${broken} is gone` }
-        : !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
-    } else gone = sessionGone(o);
+    const gone = launcherGone(links, i, broken);
     const seen = Date.parse(o?.lastSeenAt || link.run.createdAt) || 0;
     return { ...gone, seenAt: seen ? new Date(seen).toISOString() : null, stale: Date.now() - seen > after };
   });
@@ -203,7 +227,7 @@ export function ownershipOf(run, caller = callerIdentity()) {
   const matched = links.find((l) => (me && sameLauncher(l.launcher, me)) || userRun(l.launcher)) || null;
   const top = links.at(-1).launcher;
   const userOwned = !broken && top?.agent !== "delegated-agent" && !AGENT_HOSTS.has(top?.agent);
-  const own = { run: run.id, caller, links, matched, mine: Boolean(matched), direct: links[0].launcher, top, userOwned };
+  const own = { run: run.id, caller, links, matched, mine: Boolean(matched), direct: links[0].launcher, top, userOwned, broken };
   let state = null;
   const lazy = () => (state ??= own.mine || userOwned ? { orphaned: false, why: null, recent: null } : orphanState(links, broken));
   for (const key of ["orphaned", "why", "recent"]) Object.defineProperty(own, key, { get: () => lazy()[key], enumerable: true });
@@ -284,9 +308,10 @@ function refusalText(run, own, what, refused) {
 // tasks of run R"), and `refused` (a list, or a function that builds it) names what a refusal
 // leaves alone. Returns { actor, owned, own, adopted }: the actor to record, and whether the caller
 // owns the run (a change by anyone else leaves the owner a notice: recordChange). A refusal exits 4.
+// `ended`: also allow a run whose launching sessions have all ended (sessionsEnded), as `gc` does.
 // The command's own caller is checked once per run: a later call returns the same answer.
 const decisions = new Map();
-export function guard(run, what, { adopt = false, refused = [], caller = null } = {}) {
+export function guard(run, what, { adopt = false, refused = [], caller = null, ended = false } = {}) {
   const ours = !caller;
   if (ours && decisions.has(run.dir)) return decisions.get(run.dir);
   caller ??= callerIdentity();
@@ -295,7 +320,7 @@ export function guard(run, what, { adopt = false, refused = [], caller = null } 
   let g;
   if (own.mine) g = { actor, owned: true, own, adopted: false };
   else if (adopt) g = adoptRun(run, own, actor, what);
-  else if (mayAct(own)) g = { actor, owned: false, own, adopted: false };
+  else if (mayAct(own) || (ended && sessionsEnded(own).ended)) g = { actor, owned: false, own, adopted: false };
   else die(refusalText(run, own, what, typeof refused === "function" ? refused() : refused), REFUSED);
   if (ours) decisions.set(run.dir, g);
   return g;

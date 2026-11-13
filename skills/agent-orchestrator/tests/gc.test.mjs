@@ -592,3 +592,89 @@ test('a refused run names its owner, and a main session collects the runs its ow
   assert.deepEqual(mine.runs.find((r) => r.run === nested.id).removed.map((r) => r.task), ['kid']);
   assert.equal(fs.existsSync(wt.path), false);
 });
+
+// Who launched a run, as gc finds it: a session whose PID names no process (it has ended), or this
+// test's own process, which shows as a live `codex` host (helpers.mjs sets its title).
+function launchedBy(run, { live = false } = {}) {
+  const file = path.join(run.dir, 'run.json');
+  const record = readJson(file);
+  writeJson(file, { ...record, orchestrator: { ...record.orchestrator, agent: live ? 'codex' : 'claude', sessionId: live ? 'live-session' : 'ended-session', pid: live ? process.pid : 99999999 } });
+}
+const notices = (run) => fs.readFileSync(path.join(run.dir, 'owner-notices.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+
+test('gc collects a run whose launching session has ended, for another session and under every safety rule; a live session keeps its run', async (t) => {
+  const f = await fixture(t);
+  const ended = await f.newRun('ended');
+  const clean = await worktree(f, ended, 'clean', { closedAt: daysAgo(3) });
+  const dirty = await worktree(f, ended, 'dirty', { closedAt: daysAgo(3) });
+  fs.writeFileSync(path.join(dirty.path, 'precious'), 'Uncommitted work');
+  const open = await worktree(f, ended, 'open');
+  launchedBy(ended);
+  idleRun(f, ended);
+  const live = await f.newRun('live');
+  const kept = await worktree(f, live, 'closed', { closedAt: daysAgo(3) });
+  launchedBy(live, { live: true });
+  idleRun(f, live);
+  const B = { CLAUDE_CODE_SESSION_ID: 'session-b', CODEX_THREAD_ID: 'session-b' };
+
+  const preview = await f.command(['gc', '--dry-run'], { env: B });
+  assert.match(preview.stdout, new RegExp(`${ended.id}: its session has ended \\(its process \\(pid 99999999\\) is gone\\)\\n  would expire|${ended.id}: its session has ended \\(its process \\(pid 99999999\\) is gone\\)\\nwould remove`));
+  assert.match(preview.stdout, new RegExp(`${live.id}: ownership refused \\(belongs to codex session live-session`));
+  assert.equal(fs.existsSync(clean.path), true);
+
+  const report = await f.json(['gc'], { env: B });
+  const collected = report.runs.find((r) => r.run === ended.id);
+  assert.deepEqual(collected.removed.map((r) => r.task), ['clean']);
+  assert.deepEqual(Object.fromEntries(collected.kept.map((r) => [r.task, r.reason])), { dirty: 'uncommitted changes', open: 'task is not closed or accepted and integrated' });
+  assert.equal(collected.sessionEnded, 'its process (pid 99999999) is gone');
+  assert.equal(report.runs.find((r) => r.run === live.id).reason, 'ownership refused');
+  assert.equal(fs.existsSync(clean.path), false);
+  assert.ok(await f.git(['branch', '--list', clean.branch]), 'the collected worktree lost its branch');
+  for (const wt of [dirty, open, kept]) assert.equal(fs.existsSync(wt.path), true);
+  // The run's owner, should its session come back, learns who removed the worktree.
+  assert.deepEqual(notices(ended).map((n) => n.action), ['worktree removed']);
+  assert.match(notices(ended)[0].byLabel, /session session-b/);
+  // Only gc widens: other commands still refuse such a run until --adopt takes it over.
+  const refused = await f.command(['cleanup', ended.id], { code: 4, env: B });
+  assert.match(refused.stderr, /refusing to clean up run/);
+  assert.equal(fs.existsSync(dirty.path), true);
+});
+
+test('gc --auto collects the caller\'s own and ended sessions\' idle runs, never a live session\'s, after 24 hours or 1 hour on a low disk, and logs only what it changed', async (t) => {
+  const f = await fixture(t);
+  const own = await f.newRun('own');
+  const ownWt = await worktree(f, own, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, own, 3 / 24);
+  const ended = await f.newRun('ended');
+  const endedWt = await worktree(f, ended, 'old', { closedAt: daysAgo(3) });
+  launchedBy(ended);
+  idleRun(f, ended, 3 / 24);
+  const live = await f.newRun('live');
+  const liveWt = await worktree(f, live, 'old', { closedAt: daysAgo(3) });
+  launchedBy(live, { live: true });
+  idleRun(f, live, 3);
+  const plenty = { AGENT_ORCH_DISK_FREE_BYTES: '100GB' }, low = { AGENT_ORCH_DISK_FREE_BYTES: '20GB' };
+
+  // With space to spare, three hours of rest is too recent, and the live session's run is its own.
+  assert.equal((await f.command(['gc', '--auto'], { env: plenty })).stdout, '', 'a collection that changed nothing printed something');
+  const quiet = await f.json(['gc', '--auto', '--dry-run'], { env: plenty });
+  assert.equal(quiet.olderThan, 24 * 3600000);
+  assert.deepEqual(quiet.disk.low, false);
+  assert.deepEqual(Object.fromEntries(quiet.runs.map((r) => [r.run, r.reason])), { [own.id]: 'run is too recent', [ended.id]: 'run is too recent', [live.id]: 'ownership refused' });
+
+  // On a low disk the age is one hour.
+  assert.equal((await f.json(['gc', '--auto', '--dry-run'], { env: low })).olderThan, 3600000);
+  const run = await f.command(['gc', '--auto'], { env: low });
+  const lines = run.stdout.trim().split('\n');
+  assert.equal(lines.length, 3, run.stdout);
+  for (const [r, wt] of [[own, ownWt], [ended, endedWt]]) {
+    assert.ok(lines.some((line) => line.startsWith(`orch: auto gc removed worktree ${wt.path} (run ${r.id}, task old, `) && line.endsWith(`; branch kept: ${wt.branch})`)), run.stdout);
+    assert.equal(fs.existsSync(wt.path), false);
+  }
+  assert.match(lines[2], /^orch: auto gc freed \S+ \S+ from 2 worktrees; disk 20 GB free$/);
+  assert.equal(fs.existsSync(liveWt.path), true, 'automatic collection took a live session\'s worktree');
+  assert.deepEqual(notices(ended).map((n) => [n.action, n.byLabel]), [['worktree removed', 'automatic worktree collection']]);
+  assert.equal(fs.existsSync(path.join(own.dir, 'owner-notices.jsonl')), false, 'the caller\'s own run got a notice');
+  // An explicit gc from a terminal still collects any run, the live session's too.
+  assert.deepEqual((await f.json(['gc'])).runs.find((r) => r.run === live.id).removed.map((r) => r.task), ['old']);
+});
