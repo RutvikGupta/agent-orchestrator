@@ -142,7 +142,8 @@ class Board {
       return { key: id, id, run: RUN, agent: 'claude', model: 'm', modelLabel: 'm', mode: 'write', state: 'running', phase: 'running', health: 'ok', attempt: 1, elapsed: '1m', steps: 3,
         tokensIn: 1, tokensOut: 1, tokensExact: true, depth: 0, closed: false,
         ...(listed.length ? { inbox: { unread: unread.length, read: listed.length - unread.length, lastSentAt: listed.at(-1).time,
-          unreadMessages: unread.map(({ id: mid, time, text }) => ({ id: mid, time, text })), messages: listed.slice(-20).map((m) => ({ ...m })) } } : {}) };
+          unreadMessages: unread.map(({ id: mid, time, text }) => ({ id: mid, time, text })), messages: listed.slice(-20).map((m) => ({ ...m })),
+          ...(this.delivery && unread.length ? { delivery: { how: 'idle', text: this.delivery } } : {}) } } : {}) };
     });
     return [{ id: RUN, goal: 'demo run', createdAt: new Date(this.clock.now).toISOString(), running: true, activeMs: this.clock.now, runs: [], attention: [],
       totals: { tokensIn: 1, tokensOut: 1, running: 1, finished: 0, exact: true }, tasks }];
@@ -595,6 +596,19 @@ test('an unread message already on the board gets the hint by its own time, and 
   page.clock.now += 60_000;
   page.tick();
   assert.deepEqual(page.queue().hint, [], 'beta has nothing queued');
+});
+
+test('a waiting message shows whole, and the board\'s own line on when it is read replaces the hint', async () => {
+  const page = await openPage();
+  const text = 'First line of a long message that must not be cut short.\nSecond line, after a line break.';
+  page.board.delivery = 'It ended its turn and waits on its own background command: it will not read them until that ends.';
+  page.board.add('alpha', { text, from: 'orchestrator' });
+  page.clock.now += 45_000;
+  await page.choose('alpha');
+  const box = page.el('compose-queue');
+  assert.equal(box.querySelector('.q .x').textContent, text, 'the whole text, line break kept');
+  assert.deepEqual(box.querySelectorAll('.qd').map((p) => p.textContent), [page.board.delivery]);
+  assert.deepEqual(page.queue().hint, [], 'the board already says when the agent reads it');
 });
 
 // The Interrupt option and Send now, under whatever time format the page's browser has. The status line

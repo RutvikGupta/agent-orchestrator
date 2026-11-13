@@ -488,7 +488,7 @@ function showReply(t){const box=document.getElementById("compose-reply"),r=t?.in
 // The messages that wait for the agent, above the message box: every unread message on the board, oldest
 // first, then those sent from this page that the board does not list yet ("sending" until the server
 // answers). A line under the heading says when the agent will read them (the board's `delivery`). Once a
-// queued one has waited unread for 30 seconds, a line says how to interrupt; `hintDue` is when the one
+// queued one has waited unread for 30 seconds and the board gives no such line, one says how to interrupt; `hintDue` is when the one
 // waiting longest reaches that, and the one-second ticker redraws the box then.
 const HINT="the agent is mid-step; use steer to interrupt",HINT_MS=30000;let hintDue=null;
 function queueRows(t,key){const rows=unreadList(t).map(m=>({sender:senderOf(m),time:m.time,text:m.text,images:m.images,status:"queued",since:Date.parse(m.time)}));
@@ -500,11 +500,11 @@ function showQueue(t,key){const box=document.getElementById("compose-queue"),row
   box.replaceChildren(...(rows.length?[$("div",{class:"qh"},"Waiting for the agent ("+rows.length+")",
       queued.length?$("button",{type:"button",class:"now",title:"Stop the agent's current shell command so it reads these now (never a commit, push or other publishing command). Not in a shell command: its session is stopped and resumed with them.",onclick:()=>sendNow(t)},"Send now"):null),
     ...(when?[$("p",{class:"muted qd"},when)]:[]),
-    ...(late?[$("p",{class:"muted qhint"},HINT)]:[]),
+    ...(late&&!when?[$("p",{class:"muted qhint"},HINT)]:[]),
     $("div",{class:"ql"},...rows.map(m=>{const at=new Date(m.time).getTime();
       return $("div",{class:"q",title:m.text},$("span",{class:"t"},m.sender+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":" · "),
           ...(m.status==="sending"?[]:[$("span",{class:"waited","data-since":String(at)},"waited "+dur(Date.now()-at))])),
-        $("span",{class:"x"},m.text.replace(/\s+/g," ")+(m.images?" ("+imageCount(m.images)+")":"")))}))]:[]));
+        $("span",{class:"x"},m.text.trim()+(m.images?" ("+imageCount(m.images)+")":"")))}))]:[]));
   box.hidden=!rows.length}
 const taskAt=key=>{if(!key)return null;const[runId,taskKey]=key.split("/");return state.find(r=>r.id===runId)?.tasks.find(x=>x.key===taskKey)||null};
 function compose(){settle(); // every read of the board ends here, so what it lists settles the sends still in flight

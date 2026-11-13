@@ -23,8 +23,8 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
    rows, which scroll inside their own area so the box below stays in view. */
 #compose-queue{display:flex;flex-direction:column;gap:3px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:6px 8px}
 #compose-queue .qh{color:var(--fg);font-weight:600;display:flex;align-items:center;gap:8px}#compose-queue .now{margin-left:auto;padding:1px 8px;font-size:12px;font-weight:400}
-#compose-queue .ql{display:flex;flex-direction:column;gap:3px;min-height:0;max-height:18vh;overflow:auto}#compose-queue .q{display:flex;gap:8px;min-width:0}#compose-queue .q .t{color:var(--muted);flex:none}
-#compose-queue .q .x{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
+#compose-queue .ql{display:flex;flex-direction:column;gap:6px;min-height:0;max-height:30vh;overflow:auto}#compose-queue .q{display:flex;flex-direction:column;gap:1px;min-width:0}#compose-queue .q .t{color:var(--muted)}
+#compose-queue .q .x{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--fg)}
 #compose-files{display:flex;flex-wrap:wrap;gap:6px}#compose-files .f{position:relative;width:64px;height:64px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--card)}
 #compose-files img{width:100%;height:100%;object-fit:cover}#compose-files .f button{position:absolute;top:2px;right:2px;width:18px;height:18px;padding:0;border-radius:50%;font-size:12px;line-height:1}
 #compose.drop textarea{outline:2px dashed var(--ask)}

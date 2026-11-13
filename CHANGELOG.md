@@ -19,6 +19,9 @@
   `close` cancel a resume that is between its two relays.
 - While a publishing command holds an interrupt back, the delivery line, the attention item, a
   plain `send` and `inbox` say that an interrupt waits for that command too, and offer none.
+- The waiting list above the message box shows each message whole, on its own lines under who
+  sent it and when; it cut the text to a few words. The older "mid-step" hint no longer shows
+  under the board's own line on when the agent reads them, which it could contradict.
 
 ## 2.1.1 (2026-11-12)
 
