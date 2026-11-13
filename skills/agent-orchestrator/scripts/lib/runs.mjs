@@ -504,13 +504,13 @@ function interruptOf(task) {
 }
 
 // A Claude relay whose turn ended (claude.mjs, applyTurn) while its process lives on waits on a
-// background work: it reads no message until its next turn starts. Its own background command or
-// an open child call proves it is waiting. Otherwise the process may still be exiting, so the
+// background work: it reads no message until its next turn starts. Its own background command, an
+// open child call, or any sub-agent event since the turn ended proves it is waiting. Otherwise the process may still be exiting, so the
 // state counts only once the session has been quiet this long.
 const IDLE_GRACE_MS = 5000;
 function idleOf(run, task, file, lastEventMs, summary) {
   const pending = commandRuns("claude", file).filter((r) => r.background && r.exitCode === null).at(-1);
-  const child = Object.values(summary.openTools || {}).some((tool) => tool.sub);
+  const child = Boolean(summary.childAfterTurn) || Object.values(summary.openTools || {}).some((tool) => tool.sub);
   if (!pending && !child && !(Date.now() - (lastEventMs || Date.now()) >= IDLE_GRACE_MS)) return null;
   return {
     since: lastEventMs ? new Date(lastEventMs).toISOString() : null,

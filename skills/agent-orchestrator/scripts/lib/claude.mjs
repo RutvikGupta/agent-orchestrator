@@ -70,6 +70,10 @@ function applyTurn(s, e) {
     for (const b of content) if (b?.type === "tool_result" && b.tool_use_id) delete s.openTools[`#${b.tool_use_id}`];
   }
   s.turnEnded = claudeTurnEnded(s.turnEnded, e);
+  // A sub-agent that works on after the session's turn ended is background work the session
+  // waits on, also between two of its calls, when none is open.
+  if (!s.turnEnded) s.childAfterTurn = false;
+  else if (sub) s.childAfterTurn = true;
   if (!sub && e.type === "result") {
     for (const [id, tool] of Object.entries(s.openTools)) {
       if (tool.sub) tool.ended = true;

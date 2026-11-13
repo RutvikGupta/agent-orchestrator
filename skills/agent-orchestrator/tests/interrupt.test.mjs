@@ -898,6 +898,24 @@ const appendFresh = (task, events) => {
   fs.utimesSync(file, fresh, fresh);
 };
 
+test('a parent idle on a background sub-agent stays idle between two of the sub-agent\'s calls', async (t) => {
+  const f = await fixture(t);
+  hookOn(f);
+  const run = await f.newRun();
+  const task = await f.start(run, 'between-calls', { config: { hold: true, extraEvents: childOnlyEvents() } });
+  await f.ready(task);
+  // The sub-agent ran a Read and got its result: no call is open, and the log was just written.
+  appendFresh(task, [
+    { type: 'assistant', parent_tool_use_id: 'toolu_task', message: { content: [{ type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: 'a.txt' } }] } },
+    { type: 'user', parent_tool_use_id: 'toolu_task', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_read', content: 'ok' }] } },
+  ]);
+  assert.ok((await rowOf(f, run, 'between-calls')).idle, 'idle though no child call is open');
+  const sent = await f.command(['send', run.id, 'between-calls', 'Read this.']);
+  assert.doesNotMatch(sent.stdout, /after its next tool call/);
+  assert.match(sent.stdout, /--steer/);
+  await f.command(['stop', run.id, 'between-calls']);
+});
+
 for (const lastLook of [false, true]) {
   for (const publishing of [false, true]) {
     test(`a background Task alone keeps its late child shell in the background at ${lastLook ? 'the helper last look' : 'the first plan'}${publishing ? ', protecting publishing' : ''}`, async (t) => {
