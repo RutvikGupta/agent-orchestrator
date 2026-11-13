@@ -19,6 +19,7 @@ import { retryTask } from "../retry.mjs";
 import { reviveParked } from "../park.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { inboxWake } from "../inbox.mjs";
+import { admissionReason, machineStatus } from "../admission.mjs";
 import { StartRefused, startTask } from "./start.mjs";
 
 const CLI = `node ${CLI_PATH}`;
@@ -217,6 +218,8 @@ function dispatchWave(args) {
   const failed = [];
   const waiting = [];
   const conflicts = [];
+  const machineWaiting = [];
+  let projectedAgents = 0;
   const reserved = rows.filter((r) => r.state === "running" && r.phase !== "parked").map((r) => {
     const task = loadTask(run, r.id);
     const current = plan.tasks.find((t) => t.id === r.id);
@@ -243,9 +246,14 @@ function dispatchWave(args) {
         lines.push(`waiting ${entry.id}: conflicts with running tasks ${overlap.map((c) => c.b).join(", ")}`);
         continue;
       }
+      const machine = entry.agent === "command" ? null : machineStatus();
+      if (machine && dryRun) machine.running += projectedAgents;
+      const machineReason = machine && admissionReason(machine);
+      if (machineReason) throw new StartRefused(machineReason, 7);
       const how = prepare(run, entry, dryRun);
       if (dryRun) {
         started.push({ id: entry.id, where: how.where });
+        if (entry.agent !== "command") projectedAgents++;
         reserved.push(entry);
         lines.push(`would start ${entry.id} → ${entry.agent}${entry.tier ? ` (${entry.tier} tier)` : ""}, ${how.where}`);
         continue;
@@ -268,6 +276,11 @@ function dispatchWave(args) {
       lines.push(text.split("\n").filter((l) => !l.startsWith("next:")).join("\n"));
     } catch (error) {
       if (!(error instanceof StartRefused)) throw error;
+      if (error.code === 7) {
+        machineWaiting.push({ id: entry.id, reason: error.message });
+        lines.push(`ready, waiting ${entry.id}: ${error.message}`);
+        continue;
+      }
       failed.push({ id: entry.id, error: error.message });
       lines.push(`could not start ${entry.id}: ${error.message}`);
     }
@@ -286,7 +299,7 @@ function dispatchWave(args) {
     data: {
       run: run.id, dryRun, limit, running,
       [dryRun ? "wouldStart" : "started"]: started,
-      failed, waitingForSlot: waiting, waitingForConflict: conflicts,
+      failed, waitingForSlot: waiting, waitingForConflict: conflicts, waitingForMachine: machineWaiting,
       blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
       manual: progress.manual.map((t) => t.id),
     },
@@ -341,6 +354,7 @@ export async function cmdDispatch(args) {
   };
   const attentionKey = (item) => JSON.stringify([item.id, item.attempt, item.phase]);
   let previous;
+  let machineNotice = null;
   if (follow) {
     guard(run, `dispatch run ${run.id}`, { adopt: args.adopt });
     const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
@@ -357,6 +371,9 @@ export async function cmdDispatch(args) {
       if (wave.data.failed.length) process.exitCode = 1;
       return;
     }
+    const notice = JSON.stringify(wave.data.waitingForMachine);
+    if (wave.data.waitingForMachine.length && notice !== machineNotice && !args.json && !wave.data.started.length) process.stdout.write(`${wave.text}\n`);
+    machineNotice = notice;
     started.push(...wave.data.started);
     if (wave.data.started.length && !args.json) process.stdout.write(`${wave.text}\n`);
     const plan = readPlan(run.dir);
@@ -368,7 +385,7 @@ export async function cmdDispatch(args) {
     previous = new Set(attention.map(attentionKey));
     const message = wake.check((m) => m.kind === "finished" && m.about?.run === run.id);
     const active = rows.some((row) => row.state === "running" && row.phase !== "parked");
-    if (complete || newAttention || message || wave.data.failed.length || !active) {
+    if (complete || newAttention || message || wave.data.failed.length || (!active && !wave.data.waitingForMachine.length)) {
       const reason = complete ? "complete" : message ? "message" : attention.length ? "attention" : wave.data.failed.length ? "failed" : "blocked";
       const text = [wave.data.started.length ? null : wave.text,
         complete ? "plan complete: every task is integrated" : `dispatch stopped: ${reason}`,

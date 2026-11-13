@@ -1,4 +1,4 @@
-// A machine-wide memory lane. Only heavy commands queue; agent counts are irrelevant.
+// A machine-wide lane for heavy commands, and shared memory readings for agent admission.
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -70,7 +70,7 @@ export function sameProcess(current, recorded, at) {
 // For each PID: its state, "running", "stopped" (state T: suspended by job control, SIGSTOP or a
 // debugger) or "gone" (dead or a zombie), and its start time. A stopped process keeps its place
 // but blocks no one. ps lists only these PIDs, and nothing is ever signaled from its output.
-function processInfo(pids) {
+export function processInfo(pids) {
   const info = new Map(), live = [];
   for (const pid of new Set(pids)) {
     if (alive(pid)) { info.set(pid, { state: "running", start: null }); live.push(pid); } else info.set(pid, { state: "gone", start: null });
@@ -167,9 +167,9 @@ export function memoryPressure(read = sysctl, env = process.env, platform = proc
   return Number(read("kern.memorystatus_vm_pressure_level")) || 0;
 }
 
-export function memoryThreshold(value = process.env.AGENT_ORCH_HEAVY_MIN_FREE || "2.5GB") {
+export function memoryThreshold(value = process.env.AGENT_ORCH_HEAVY_MIN_FREE || "2.5GB", setting = "AGENT_ORCH_HEAVY_MIN_FREE") {
   const m = /^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|KiB|MiB|GiB)?$/i.exec(value);
-  if (!m) throw new Error("AGENT_ORCH_HEAVY_MIN_FREE needs bytes or a size such as 2.5GB");
+  if (!m) throw new Error(`${setting} needs bytes or a size such as 2.5GB`);
   const unit = (m[2] || "B").toUpperCase();
   return Number(m[1]) * (unit.includes("I") ? 1024 : 1000) ** ({ B: 0, KB: 1, MB: 2, GB: 3, KIB: 1, MIB: 2, GIB: 3 }[unit]);
 }

@@ -1,5 +1,6 @@
 // `agents`: installed agent CLIs, their relays and login state, the model policy, and usage limits.
 
+import { machineStatus } from "../admission.mjs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { AGENTS, HOME, POLICY_PATH, SKILL_ROOTS, STATE_ROOT, USAGE_CACHE } from "../config.mjs";
@@ -70,10 +71,11 @@ export function cmdAgents(args) {
   const networkReady = relayHasNetworkPatch(claudeRelay);
   const githubNote =
     claudeRelay && !networkReady ? `\n\nnote: Claude tasks run without network until references/claude-delegate-network.patch is re-applied to ${claudeRelay}` : "";
+  const machine = machineStatus();
   emit(
     args,
-    { agents: rows, policy, policyPath: POLICY_PATH, tierEvidence: evidence, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },
-    `${table(rows, ["key", "vendor", "version", "auth", "ready"])}\n\nmodels (${POLICY_PATH}):\n  ${lines.join("\n  ")}` +
+    { agents: rows, machine, policy, policyPath: POLICY_PATH, tierEvidence: evidence, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },
+    `machine: ${machine.running} agent tasks running; limit ${machine.limit || "off"}; available memory ${(machine.availableBytes / 1e9).toFixed(2)}GB\n\n${table(rows, ["key", "vendor", "version", "auth", "ready"])}\n\nmodels (${POLICY_PATH}):\n  ${lines.join("\n  ")}` +
       `\n\nusage limits (share of each rolling window used; for information only: do not weigh them when choosing an agent; even 100% is not a reached limit, only a task stopped by a usage-limit error is):\n  ${usageLines.join("\n  ")}${githubNote}`,
   );
 }

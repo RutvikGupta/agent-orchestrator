@@ -78,8 +78,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   overwrite it without --force
   start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
-        [--max-parallel N] [--force] [--unplanned] [--babysit --pr N] [-- RELAY_ARGS...]
+        [--max-parallel N] [--wait [DUR]] [--force] [--unplanned] [--babysit --pr N] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
+                                  Machine agent count or critical memory refuses with exit 7.
+                                  --wait [DUR] waits for room (default 10m), then starts or exits 7.
+                                  AGENT_ORCH_MAX_TOTAL caps live agent tasks across runs; --force
+                                  does not bypass it or AGENT_ORCH_MIN_FREE_AGENT (default 1.5GB).
                                   Tasks run outside the agents' sandboxes by default, with full
                                   network and user access, and a write task may commit, push
                                   without force, and write to GitHub. --no-publish (when the user
@@ -374,7 +378,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done", "max-tier"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "no-escalate", "unplanned", "adopt"] },
+  start: { value: ["wait", "agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done", "max-tier"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "no-escalate", "unplanned", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
@@ -470,7 +474,10 @@ if (command === "wait" && rest.includes("--help")) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
   // A task's name (`rename`) becomes its id before anything reads the arguments, ownership included.
-  const args = resolveTaskNames(command, parseArgs(rest, specs[command]));
+  // --wait alone has a default; keep the shared argument parser's required-value rules.
+  const words = command === "start" ? rest.flatMap((word, i) =>
+    (rest.indexOf("--") < 0 || i < rest.indexOf("--")) && word === "--wait" && (rest[i + 1] === undefined || rest[i + 1].startsWith("--")) ? ["--wait=10m"] : [word]) : rest;
+  const args = resolveTaskNames(command, parseArgs(words, specs[command]));
   // Every command but the open ones runs only for the run's owner (lib/ownership.mjs).
   gateCommand(command, args);
   if (VERDICT_SYNC.has(command)) {

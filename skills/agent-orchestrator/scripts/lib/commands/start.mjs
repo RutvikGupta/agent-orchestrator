@@ -1,5 +1,6 @@
 // `start`: launch a task's relay in the background, with the policy's model and the task's permissions.
 
+import { admissionReason, withAdmissionLock } from "../admission.mjs";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,7 +19,7 @@ import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
 import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
-import { die, emit, findRelay } from "../util.mjs";
+import { die, emit, findRelay, parseDuration } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
 export class StartRefused extends Error {
@@ -34,18 +35,32 @@ function refuse(message, code) {
 
 // `start` from the command line, where only the run's owner may start or resume its tasks; the park
 // watcher and `wait`'s retries resume a task through startTask() itself.
-export function cmdStart(args) {
-  try {
-    const run = loadRun(args._[0]);
-    const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
-    const resume = Boolean(prev?.attempt);
-    const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
-    const { task, text } = startTask(args, resume ? { resumedBy: g.actor } : {});
-    if (resume) recordChange(run, g, { task: task.id, attempt: task.attempt, action: "resumed" });
-    emit(args, task, text);
-  } catch (error) {
-    if (error instanceof StartRefused) die(error.message, error.code);
-    throw error;
+export async function cmdStart(args) {
+  const duration = args.wait === undefined ? null : parseDuration(args.wait);
+  const until = duration === null ? null : Date.now() + duration;
+  let reported = false;
+  let lastRefusal = null;
+  for (;;) {
+    if (lastRefusal && Date.now() >= until) die(lastRefusal.message, 7);
+    try {
+      const run = loadRun(args._[0]);
+      const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
+      const resume = Boolean(prev?.attempt);
+      const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
+      const { task, text } = startTask(args, resume ? { resumedBy: g.actor } : {});
+      if (resume) recordChange(run, g, { task: task.id, attempt: task.attempt, action: "resumed" });
+      emit(args, task, text);
+      return;
+    } catch (error) {
+      if (error instanceof StartRefused && error.code === 7 && until !== null && Date.now() < until) {
+        lastRefusal = error;
+        if (!reported) { process.stderr.write(`waiting: ${error.message}\n`); reported = true; }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(3000, until - Date.now())));
+        continue;
+      }
+      if (error instanceof StartRefused) die(error.message, error.code);
+      throw error;
+    }
   }
 }
 
@@ -162,6 +177,21 @@ function missingDirectory(run, id, prev, cd) {
 // as messages, which is never checked for template markers; `check`, which runs every check of a
 // start without starting anything, also while the task's relay still runs (the caller stops it).
 export function startTask(args, extra = {}) {
+  if (args.agent === COMMAND_AGENT) return startUnchecked(args, extra);
+  return withAdmissionLock(() => {
+    const run = loadRun(args._[0]);
+    const previous = loadTask(run, validTask(args._[1]));
+    // Only internal replacements inherit a place. --force and an ordinary follow-up do not.
+    // Their attempt claims still serialize resumes; no separate reservation is counted.
+    const replacement = Boolean(previous?.attempt && previous.agent !== COMMAND_AGENT &&
+      (args.parkClaim || extra.attemptReason === "retry"));
+    const reason = admissionReason(undefined, { replacement });
+    if (reason) refuse(reason, 7);
+    return startUnchecked(args, extra);
+  });
+}
+
+function startUnchecked(args, extra = {}) {
   if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
     refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
   }
