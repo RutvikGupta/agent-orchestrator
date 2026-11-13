@@ -1,6 +1,6 @@
 // `start`: launch a task's relay in the background, with the policy's model and the task's permissions.
 
-import { admissionReason, admissionEnabled, AdmissionRevoked, withAdmissionLock } from "../admission.mjs";
+import { admissionReason, admissionEnabled, admissionSettingsError, AdmissionRevoked, withAdmissionLock } from "../admission.mjs";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -34,25 +34,36 @@ function refuse(message, code) {
 }
 
 // `start` from the command line, where only the run's owner may start or resume its tasks; the park
-// watcher and `wait`'s retries resume a task through startTask() itself.
+// watcher and `wait`'s retries resume a task through startTask() itself. It validates the request
+// once; `--wait` then repeats only the machine admission and the launch.
 export async function cmdStart(args) {
+  if (args.agent !== COMMAND_AGENT) {
+    const bad = admissionSettingsError();
+    if (bad) die(bad, 2);
+  }
   const duration = args.wait === undefined ? null : parseDuration(args.wait);
   const until = duration === null ? null : Date.now() + duration;
   let reported = false;
   const wake = until === null ? null : inboxWake();
   const cancel = () => { const message = wake?.check(); if (message) refuse(message.hint, 6); };
+  let prepared = null;
   for (;;) {
     try {
       cancel();
-      const run = loadRun(args._[0]);
-      const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
-      const resume = Boolean(prev?.attempt);
-      const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
-      const { task, text } = startTask({ ...args, admissionDeadline: until, admissionCancel: cancel }, resume ? { resumedBy: g.actor } : {});
-      if (resume) recordChange(run, g, { task: task.id, attempt: task.attempt, action: "resumed" });
+      if (!prepared) {
+        const run = loadRun(args._[0]);
+        const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
+        const resume = Boolean(prev?.attempt);
+        const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
+        prepared = { run, g, resume, launch: prepareStart({ ...args, admissionDeadline: until, admissionCancel: cancel }, resume ? { resumedBy: g.actor } : {}) };
+      }
+      const { task, text } = prepared.launch();
+      if (prepared.resume) recordChange(prepared.run, prepared.g, { task: task.id, attempt: task.attempt, action: "resumed" });
       emit(args, task, text);
       return;
     } catch (error) {
+      // A start stopped while it held the machine lock lost it: validate again, as startTask does.
+      if (error instanceof AdmissionRevoked) { prepared = null; continue; }
       if (error instanceof StartRefused && error.code === 7 && until !== null && Date.now() < until) {
         if (!reported) { process.stderr.write(`waiting: ${error.message}\n`); reported = true; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(3000, until - Date.now())));
@@ -178,12 +189,15 @@ function missingDirectory(run, id, prev, cd) {
 // start without starting anything, also while the task's relay still runs (the caller stops it).
 export function startTask(args, extra = {}) {
   for (;;) {
-    try { return startValidated(args, extra); }
+    try { return prepareStart(args, extra)(); }
     catch (error) { if (!(error instanceof AdmissionRevoked)) throw error; }
   }
 }
 
-function startValidated(args, extra = {}) {
+// Every check of a start that does not depend on the machine, done once. Returns the function that
+// takes the machine lock, checks admission and launches; `start --wait` calls it again while the
+// machine is full, so a slow check such as the pull-request read runs only once.
+function prepareStart(args, extra = {}) {
   if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
     refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
   }
@@ -222,7 +236,7 @@ function startValidated(args, extra = {}) {
     process.stderr.write(`note: this run is reaching its third task without a plan; use node ${CLI_PATH} plan ${run.id} FILE to coordinate dependencies and owned paths\n`);
   }
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
-  if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
+  if (key === COMMAND_AGENT) return () => startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
   if (args["max-tier"] !== undefined) refuse("--max-tier applies to --agent command only", 2);
   if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
@@ -322,14 +336,19 @@ function startValidated(args, extra = {}) {
     }
   }
 
+  // The agent this start replaces already held a place: a parked babysitter's watcher, a retry and an
+  // interrupt bring their claim on its attempt or retry it. They skip the count, and only they may run
+  // without the machine lock when it stays busy.
+  const replacement = Boolean(prev.attempt && prev.agent !== COMMAND_AGENT && (args.parkClaim || extra.attemptReason === "retry"));
   // Validate before acquiring the machine lock, including any slow pull-request lookup.
   const launch = (owner = () => {}, locked = false) => {
     // Other starts may have changed the run while this one waited for the machine lock.
     const current = loadTask(run, id) || prev;
     if (!args.check && relayAlive(current.pid, current.startedAt, current.outDir)) refuse(`task ${id} is already running`);
+    // Another start that began and ended meanwhile: this one was validated against the attempt before.
+    if ((current.attempt || 0) !== (prev.attempt || 0)) refuse(`task ${id} was started meanwhile, in attempt ${current.attempt}, so this start started nothing; run \`status\` to see it`);
     checkSlots(run, id, args, cd, { writes: !args["read-only"] });
     if (admissionEnabled()) {
-      const replacement = Boolean(prev.attempt && prev.agent !== COMMAND_AGENT && (args.parkClaim || extra.attemptReason === "retry"));
       const reason = admissionReason(undefined, { replacement: replacement || !locked });
       owner();
       if (reason) refuse(reason, 7);
@@ -343,6 +362,9 @@ function startValidated(args, extra = {}) {
     // Any other resume claims the attempt it replaces, for the same reason.
     const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(run, prev, extra.attemptReason === "retry" ? "retry" : "start");
     if (parkClaim?.refused) refuse(parkClaim.refused);
+    // A claim the caller brought stays the caller's: it releases it when the start fails, and a start
+    // whose admission was revoked runs again with it. Only a claim taken here is given back here.
+    const giveBack = () => { if (parkClaim !== args.parkClaim) parkClaim?.release(); };
 
     const attempt = (prev.attempt || 0) + 1;
     // Why this attempt starts: `retry` comes from retry.mjs; a `changes` verdict on the previous
@@ -377,7 +399,7 @@ function startValidated(args, extra = {}) {
       // Files the brief points to, such as the messages a parked task's watcher delivers in full.
       for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
     } catch (error) {
-      parkClaim?.release();
+      giveBack();
       throw error;
     }
 
@@ -448,7 +470,7 @@ function startValidated(args, extra = {}) {
     if (parkClaim) {
       const ended = endedSince(since, loadTask(run, id));
       if (ended) {
-        parkClaim.release();
+        giveBack();
         fs.rmSync(outDir, { recursive: true, force: true });
         refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
       }
@@ -458,7 +480,7 @@ function startValidated(args, extra = {}) {
       owner();
       child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
     } catch (error) {
-      parkClaim?.release();
+      giveBack();
       throw error;
     }
     task.pid = child.pid;
@@ -478,9 +500,17 @@ function startValidated(args, extra = {}) {
       text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${child.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
     };
   };
-  return admissionEnabled() ? withAdmissionLock(launch, {
-    deadline: Math.min(Date.now() + 3000, args.admissionDeadline ?? Infinity), cancel: args.admissionCancel,
-  }) : launch();
+  // A new start never runs uncounted because another start holds the lock: it waits up to 30 seconds,
+  // or with --wait until its deadline (trying once more there), then refuses with exit 7. A
+  // replacement waits three seconds and then starts without the lock.
+  const busy = (reason) => {
+    const error = new StartRefused(reason, 7);
+    error.admissionKinds = ["lock"];
+    throw error;
+  };
+  return () => admissionEnabled() ? withAdmissionLock(launch, replacement
+    ? { deadline: Date.now() + 3000, cancel: args.admissionCancel }
+    : { deadline: args.admissionDeadline ?? Date.now() + 30_000, cancel: args.admissionCancel, busy }) : launch();
 }
 
 // Refuse a start when the run has no free slot, or when `writes` and another task already writes

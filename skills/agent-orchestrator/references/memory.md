@@ -57,14 +57,27 @@ The count is read from the live relays each time, not from a persistent counter,
 the start share one machine-wide lock, so two starts at the same moment cannot both take the last
 place. During an interrupt, a live claim keeps one place between the old relay stopping and its
 replacement starting; the claim and relay never count twice. Dead holders release the lock.
-A stopped holder is revoked and must check again when it continues. Lock waits last at most three
-seconds (or the remaining `--wait` duration). If the lock cannot be used, or the process start time
-cannot be read, one note is printed and the start skips the count check. Memory still applies.
+A stopped holder is revoked and must check again when it continues.
+
+- A new start waits up to 30 seconds for the lock; with `--wait`, until the `--wait` deadline, and
+  it tries once more there. If another start still holds the lock, it refuses with exit 7 and names
+  the busy lock as the reason, so `--wait` retries and `dispatch` lists the task as waiting. It
+  never starts uncounted because the lock was busy.
+- The replacement of an agent that held a place (below) waits three seconds for the lock, then
+  starts without it.
+- If the lock cannot be read or written, or the process start time cannot be read, one note is
+  printed and the start skips the count check. Memory still applies.
+
+A malformed setting (`AGENT_ORCH_MAX_TOTAL` that is not a whole number, or
+`AGENT_ORCH_MIN_FREE_AGENT` that is not a size) is a usage error: `start`, `dispatch` and `agents`
+print one line and exit 2. A resume in the background (a retry from `wait`, a park watcher's)
+prints one note and uses the default.
 
 When a start does not pass:
 
 - `start` validates the request first. A bad request keeps its usual error and exit code.
   A valid request refused by admission prints the reasons, starts nothing and exits 7.
+  `--wait` validates once, including any pull-request read, then repeats only the admission.
 - `--force` does not bypass it. It skips plan checks only (`references/dispatch.md`).
 - A resume or a rework is a new start, so it is checked the same way.
 - The agent that takes the place of one that ended does not wait for the count. This covers a

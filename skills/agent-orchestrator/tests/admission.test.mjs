@@ -327,13 +327,29 @@ function heldCount(f, name) {
   return { env, ready: () => eventually(() => fs.existsSync(entered)), release: () => fs.writeFileSync(release, '') };
 }
 
+// A clock the test sets for one child: its Date.now() reads the file, so a lock deadline passes only
+// when the test moves it. `seen` waits until the child has read a value.
+function testClock(f, name) {
+  const file = path.join(f.root, `${name}-clock`), seen = `${file}.seen`, epoch = Date.now();
+  const set = (ms) => { fs.writeFileSync(`${file}.tmp`, String(epoch + ms)); fs.renameSync(`${file}.tmp`, file); };
+  set(0);
+  const env = preload(f, `${name}-clock`, `const fs=require('fs');let last=null;Date.now=()=>{const now=Number(fs.readFileSync(${JSON.stringify(file)},'utf8'));if(now!==last){last=now;fs.writeFileSync(${JSON.stringify(seen)},String(now))}return now};`);
+  const seenAt = (ms) => eventually(() => { try { return Number(fs.readFileSync(seen, 'utf8')) === epoch + ms; } catch { return false; } }, `the child did not read the clock at +${ms}ms`);
+  return { env, set, seen: seenAt };
+}
+const tickets = (f) => fs.readdirSync(path.join(f.state, 'admission/locks')).filter((n) => !n.includes('.')).length;
+
 test('review: overlapping starts publish two tickets and only one takes the last place', async (t) => {
   const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
   const hold = heldCount(f, 'overlap'); const one = child(t, f, argsFor(f, a, 'one'), hold.env); await hold.ready();
-  const two = child(t, f, argsFor(f, b, 'two'));
-  await eventually(() => fs.readdirSync(path.join(f.state, 'admission/locks')).filter((n) => !n.includes('.')).length === 2);
+  // Two's clock stands still, so its wait for the lock outlasts however long one takes to spawn.
+  const clock = testClock(f, 'overlap');
+  const two = child(t, f, argsFor(f, b, 'two'), clock.env);
+  await eventually(() => tickets(f) === 2);
   assert.equal(fs.existsSync(f.taskFile(b, 'two')), false); hold.release();
-  assert.equal((await one.done).code, 0); assert.equal((await two.done).code, 7);
+  assert.equal((await one.done).code, 0);
+  const second = await two.done; assert.equal(second.code, 7, second.stderr);
+  assert.match(second.stderr, /1 agent tasks run on this machine; the limit is 1/);
 });
 
 test('review: a stopped holder is revoked and rechecks capacity when continued', async (t) => {
@@ -347,14 +363,111 @@ test('review: a stopped holder is revoked and rechecks capacity when continued',
   assert.equal((await one.done).code, 7);
 });
 
-test('review: a lock deadline falls back once rather than hanging a start', async (t) => {
-  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
+test('review: a busy machine lock refuses a new start with 7 instead of starting it uncounted', async (t) => {
+  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(), c = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
+  await planned(f, c);
   const hold = heldCount(f, 'deadline'); const one = child(t, f, argsFor(f, a, 'one'), hold.env); await hold.ready();
+  const busy = /machine-wide admission lock .* stayed busy/;
   try {
-    const result = await f.command(argsFor(f, b, 'two', ['--wait', '0']));
-    assert.match(result.stderr, /lock wait timed out.*starting without/);
+    // --wait's final check at its deadline tries the lock once, then refuses.
+    const now = await f.command(argsFor(f, b, 'now', ['--wait', '0']), { code: 7 });
+    assert.match(now.stderr, busy);
+    assert.equal(fs.existsSync(f.taskFile(b, 'now')), false);
+    // A plain start and a dispatch still wait after three seconds, and refuse after thirty.
+    const clock = testClock(f, 'deadline');
+    const plain = child(t, f, argsFor(f, b, 'plain'), clock.env);
+    const wave = child(t, f, ['dispatch', c.id, '--json'], clock.env);
+    await eventually(() => tickets(f) === 3);
+    clock.set(3500); await clock.seen(3500);
+    clock.set(31_000);
+    const refused = await plain.done; assert.equal(refused.code, 7, refused.stderr);
+    assert.match(refused.stderr, busy);
+    const listed = await wave.done; assert.equal(listed.code, 0, listed.stderr);
+    const result = JSON.parse(listed.stdout);
+    assert.deepEqual(result.failed, []); assert.deepEqual(result.started, []);
+    assert.equal(result.waitingForMachine[0].id, 'planned'); assert.match(result.waitingForMachine[0].reason, busy);
+    for (const [run, id] of [[b, 'plain'], [c, 'planned']]) assert.equal(fs.existsSync(f.taskFile(run, id)), false);
   } finally { hold.release(); }
+  // The holder that kept the lock counted and started; nothing ran beside it uncounted.
+  assert.equal((await one.done).code, 0);
+  assert.equal((await f.json(['agents'])).machine.running, 1);
+});
+
+test('review: a retry still starts without a busy machine lock, since it replaces a place', async (t) => {
+  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
+  await f.start(a, 'retry', { flags: ['--read-only'], config: { status: 'failed', error: 'HTTP 503 provider unavailable' } });
+  await f.finished(a, 'retry');
+  const hold = heldCount(f, 'busy-retry'); const one = child(t, f, argsFor(f, b, 'one'), hold.env); await hold.ready();
+  try {
+    const waited = await f.command(['wait', a.id, '--timeout', '1ms'], { code: 3, env: { FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }) } });
+    assert.match(waited.stderr, /machine lock wait timed out; starting without the machine count check/);
+    const replacement = readJson(f.taskFile(a, 'retry')); await f.ready(replacement);
+    assert.equal(replacement.attempt, 2);
+  } finally { hold.release(); }
+  // The retry took the only place, so the new start that held the lock counts it and refuses.
   assert.equal((await one.done).code, 7);
+});
+
+test('review: a revoked admission keeps the claim an interrupt brought, so no other resume takes the attempt', async (t) => {
+  const f = await fixture(t), run = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '4';
+  const worker = await f.start(run, 'worker', { config: { hold: true } }); await f.ready(worker);
+  const locks = path.join(f.state, 'admission', 'locks'), entered = path.join(f.root, 'revoked'), release = `${entered}.release`;
+  // In the interrupt helper: revoke its admission once the new attempt's folder exists (after its
+  // claim), then hold its next lock attempt, after the revoked start has cleaned up.
+  const env = preload(f, 'revoke-claimed', `if(process.argv[1].endsWith('/steer.mjs')){const fs=require('fs'),path=require('path'),mkdir=fs.mkdirSync,link=fs.symlinkSync;let revoked=false,held=false;
+fs.mkdirSync=function(dir,...rest){const result=mkdir.call(this,dir,...rest);if(!revoked&&String(dir).endsWith('/attempt-2')){revoked=true;for(const name of fs.readdirSync(${JSON.stringify(locks)}))if(name.startsWith(process.pid+'-')&&!name.includes('.'))fs.writeFileSync(path.join(${JSON.stringify(locks)},name+'.revoked'),'')}return result};
+fs.symlinkSync=function(target,...rest){if(revoked&&!held&&target==='choosing'){held=true;fs.writeFileSync(${JSON.stringify(entered)},'');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}return link.call(this,target,...rest)}}`);
+  const sender = child(t, f, ['send', run.id, 'worker', 'Resume with this message.', '--steer'], { ...env, FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }) });
+  await eventually(() => fs.existsSync(entered), 'the interrupt was not revoked');
+  try {
+    const manual = await f.command(['start', run.id, 'worker', '--agent', 'claude', '--no-escalate', '--why', 'Manual resume', '--brief', f.brief('manual', { hold: true })], { code: 1 });
+    assert.match(manual.stderr, /being resumed right now \(an interrupt is delivering a message\)/);
+  } finally { fs.writeFileSync(release, ''); }
+  assert.equal((await sender.done).code, 0);
+  const resumed = readJson(f.taskFile(run, 'worker')); await f.ready(resumed);
+  assert.equal(resumed.attempt, 2);
+  assert.equal((await f.json(['agents'])).machine.running, 1);
+});
+
+test('review: a malformed admission setting is a usage error in start, dispatch and agents; a retry uses the default', async (t) => {
+  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); await planned(f, b);
+  for (const [env, pattern] of [[{ AGENT_ORCH_MAX_TOTAL: ' 8' }, /AGENT_ORCH_MAX_TOTAL needs a whole number/], [{ AGENT_ORCH_MIN_FREE_AGENT: '1.5G' }, /AGENT_ORCH_MIN_FREE_AGENT needs bytes or a size/]]) {
+    for (const args of [argsFor(f, a, 'bad'), ['dispatch', b.id], ['agents']]) {
+      const result = await f.command(args, { code: 2, env });
+      assert.match(result.stderr, pattern);
+      assert.equal(result.stderr.trim().split('\n').length, 1, result.stderr);
+    }
+  }
+  assert.equal(fs.existsSync(f.taskFile(a, 'bad')), false); assert.equal(fs.existsSync(f.taskFile(b, 'planned')), false);
+  await f.start(a, 'retry', { flags: ['--read-only'], config: { status: 'failed', error: 'HTTP 503 provider unavailable' } });
+  await f.finished(a, 'retry');
+  const env = { AGENT_ORCH_MAX_TOTAL: ' 8', AGENT_ORCH_MIN_FREE_AGENT: '1.5G', FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }) };
+  const waited = await f.command(['wait', a.id, '--timeout', '1ms'], { code: 3, env });
+  assert.match(waited.stderr, /agent admission: AGENT_ORCH_MAX_TOTAL needs a whole number .*; using the default \d+/);
+  assert.match(waited.stderr, /agent admission: AGENT_ORCH_MIN_FREE_AGENT needs bytes .*; using the default 1\.5GB/);
+  assert.doesNotMatch(waited.stderr, /\n\s+at /);
+  const replacement = readJson(f.taskFile(a, 'retry')); await f.ready(replacement);
+  assert.equal(replacement.attempt, 2);
+});
+
+test('review: start --babysit --wait reads the pull request once while it waits for room', async (t) => {
+  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
+  const calls = path.join(f.root, 'gh-calls');
+  fs.writeFileSync(path.join(f.root, 'bin/gh'), `#!${process.execPath}\nrequire('fs').appendFileSync(${JSON.stringify(calls)},'call\\n');console.log(JSON.stringify({number:42,url:'https://github.com/example/repo/pull/42',state:'OPEN',isDraft:false}));`, { mode: 0o755 });
+  const held = await f.start(b, 'held', { config: { hold: true } }); await f.ready(held);
+  // Let start's first two polls pass at once, then hold the third until the test releases it.
+  const polled = path.join(f.root, 'polled'), release = `${polled}.release`;
+  const env = preload(f, 'fast-polls', `if(process.argv[2]==='start'){const fs=require('fs'),original=setTimeout;let n=0;global.setTimeout=(fn,ms,...args)=>{if(++n<3)return original(fn,0,...args);fs.writeFileSync(${JSON.stringify(polled)},'');return original(function check(){if(!fs.existsSync(${JSON.stringify(release)}))return original(check,10);fn(...args)},10)}}`);
+  const sitter = child(t, f, ['start', a.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture babysitter', '--brief', f.brief('sit', { hold: true }), '--wait', '10m', '--json'], env);
+  await eventually(() => fs.existsSync(polled), 'start did not poll three times');
+  try {
+    assert.match(sitter.output(), /waiting:.*limit is 1/);
+    assert.equal(fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).length, 1);
+    f.release(held); await f.finished(b, 'held');
+  } finally { fs.writeFileSync(release, ''); }
+  const result = await sitter.done; assert.equal(result.code, 0, result.stderr);
+  const task = JSON.parse(result.stdout); await f.ready(task);
+  assert.equal(task.pr.number, 42);
 });
 
 test('review: slow pull-request validation holds no machine lock', async (t) => {

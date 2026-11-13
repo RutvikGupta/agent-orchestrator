@@ -9,8 +9,39 @@ import { listRuns, listTaskRecords, relayAlive, resumeClaim, parkClaim, interrup
 
 export function totalLimit(value = process.env.AGENT_ORCH_MAX_TOTAL, bytes = os.totalmem()) {
   if (value === undefined || value === "") return Math.max(4, Math.round(0.75 * bytes / 1024 ** 3));
-  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error("AGENT_ORCH_MAX_TOTAL needs a whole number (0 turns the limit off)");
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`AGENT_ORCH_MAX_TOTAL needs a whole number (0 turns the limit off), not ${JSON.stringify(value)}`);
   return Number(value);
+}
+
+const MIN_FREE_DEFAULT = "1.5GB";
+const minFree = (value) => memoryThreshold(value, "AGENT_ORCH_MIN_FREE_AGENT");
+
+// What is wrong with the admission settings, as one line, or null. `start`, `dispatch` and `agents`
+// refuse a malformed setting as a usage error before they read anything else.
+export function admissionSettingsError(env = process.env) {
+  const problems = [];
+  try { totalLimit(env.AGENT_ORCH_MAX_TOTAL); } catch (error) { problems.push(error.message); }
+  try { if (env.AGENT_ORCH_MIN_FREE_AGENT) minFree(env.AGENT_ORCH_MIN_FREE_AGENT); }
+  catch (error) { problems.push(`${error.message}, not ${JSON.stringify(env.AGENT_ORCH_MIN_FREE_AGENT)}`); }
+  return problems.length ? problems.join("; ") : null;
+}
+
+// The settings as admission uses them. A malformed one never throws here: a background resume (a
+// retry from `wait`, a park watcher's) prints one note and uses the default.
+function limitSetting() {
+  try { return totalLimit(); } catch (error) {
+    const fallback = totalLimit("");
+    admissionNote(`${error.message}; using the default ${fallback}`);
+    return fallback;
+  }
+}
+function minFreeSetting(limit) {
+  const value = process.env.AGENT_ORCH_MIN_FREE_AGENT;
+  if (limit === 0 && !value) return null;
+  try { return minFree(value || MIN_FREE_DEFAULT); } catch (error) {
+    admissionNote(`${error.message}, not ${JSON.stringify(value)}; using the default ${MIN_FREE_DEFAULT}`);
+    return minFree(MIN_FREE_DEFAULT);
+  }
 }
 
 export function machineStatus() {
@@ -33,10 +64,9 @@ export function machineStatus() {
       if (!live && ["claude", "codex"].includes(task.agent) && interruptHeld(task)?.state === "live") interrupted++;
     }
   }
-  const limit = totalLimit();
+  const limit = limitSetting();
   return { running: pids.size + interrupted, limit, availableBytes: availableMemory(),
-    minFreeBytes: limit === 0 && !process.env.AGENT_ORCH_MIN_FREE_AGENT ? null : memoryThreshold(process.env.AGENT_ORCH_MIN_FREE_AGENT || "1.5GB", "AGENT_ORCH_MIN_FREE_AGENT"),
-    pressure: memoryPressure() };
+    minFreeBytes: minFreeSetting(limit), pressure: memoryPressure() };
 }
 
 const gb = (bytes) => bytes === null ? "unknown" : `${(bytes / 1e9).toFixed(2)}GB`;
@@ -44,7 +74,7 @@ const notes = new Set();
 function admissionNote(message) {
   if (!notes.has(message)) { notes.add(message); process.stderr.write(`agent admission: ${message}\n`); }
 }
-export const admissionEnabled = () => totalLimit() !== 0 || Boolean(process.env.AGENT_ORCH_MIN_FREE_AGENT);
+export const admissionEnabled = () => limitSetting() !== 0 || Boolean(process.env.AGENT_ORCH_MIN_FREE_AGENT);
 export function admissionKinds(status, { replacement = false } = {}) {
   return [!replacement && status.limit && status.running >= status.limit && "count",
     status.minFreeBytes !== null && status.availableBytes !== null && status.availableBytes < status.minFreeBytes && "memory",
@@ -93,7 +123,11 @@ function tickets(self) {
   });
 }
 
-export function withAdmissionLock(fn, { deadline = Date.now() + 3000, cancel = () => {} } = {}) {
+// Run `fn(owner, locked)` under the machine-wide lock. When the lock stays busy until `deadline`
+// (tried at least once), `busy(reason)` decides: a new start refuses, so it never runs uncounted.
+// Without `busy` (the replacement of an agent that held a place), `fn` runs without the lock.
+// A lock that cannot be read or written, or an unknown process start time, always runs `fn` unlocked.
+export function withAdmissionLock(fn, { deadline = Date.now() + 3000, cancel = () => {}, busy = null } = {}) {
   let file, tmp, mark;
   const unlocked = (why) => {
     admissionNote(`${why}; starting without the machine count check`);
@@ -111,7 +145,7 @@ export function withAdmissionLock(fn, { deadline = Date.now() + 3000, cancel = (
       cancel();
       if (fs.existsSync(mark)) throw new AdmissionRevoked("admission was revoked while stopped");
     };
-    let acquired = false, failed = null;
+    let acquired = false, failed = null, timedOut = false;
     try {
       fs.symlinkSync("choosing", file);
       const ticket = Math.max(0, ...tickets(name).map((row) => row.ticket || 0)) + 1;
@@ -120,14 +154,18 @@ export function withAdmissionLock(fn, { deadline = Date.now() + 3000, cancel = (
       for (;;) {
         owner();
         if (!tickets(name).some((row) => row.ticket === null || row.ticket < ticket || (row.ticket === ticket && row.name < name))) { acquired = true; break; }
-        if (Date.now() >= deadline) { failed = "machine lock wait timed out"; break; }
+        if (Date.now() >= deadline) { failed = "machine lock wait timed out"; timedOut = true; break; }
         pause();
       }
     } catch (error) {
       if (error instanceof AdmissionRevoked || error.code === 6) throw error;
       failed = `machine lock unavailable (${error.code || error.message})`;
     }
-    if (!acquired) { quietRm(file); quietRm(tmp); quietRm(mark); return unlocked(failed); }
+    if (!acquired) {
+      quietRm(file); quietRm(tmp); quietRm(mark);
+      if (timedOut && busy) return busy(`the machine-wide admission lock (${folder}) stayed busy: another start held it until this start's deadline, so the running agents could not be counted. Start again, or use start --wait [DUR]; a holder that ends releases the lock.`);
+      return unlocked(failed);
+    }
     owner();
     return fn(owner, true);
   } finally {

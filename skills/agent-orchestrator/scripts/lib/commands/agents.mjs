@@ -1,6 +1,6 @@
 // `agents`: installed agent CLIs, their relays and login state, the model policy, and usage limits.
 
-import { machineStatus } from "../admission.mjs";
+import { admissionSettingsError, machineStatus } from "../admission.mjs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { AGENTS, HOME, POLICY_PATH, SKILL_ROOTS, STATE_ROOT, USAGE_CACHE } from "../config.mjs";
@@ -9,9 +9,11 @@ import { codexLimits, limitsText, probeClaudeLimits } from "../limits.mjs";
 import { relayHasNetworkPatch } from "../permissions.mjs";
 import { loadPolicy } from "../policy.mjs";
 import { evidenceNote, tierEvidence } from "../stats.mjs";
-import { emit, findRelay, readJson, which } from "../util.mjs";
+import { die, emit, findRelay, readJson, which } from "../util.mjs";
 
 export function cmdAgents(args) {
+  const badSetting = admissionSettingsError();
+  if (badSetting) die(badSetting, 2);
   const rows = [];
   for (const [key, meta] of Object.entries(AGENTS)) {
     const binPath = which(meta.bin);

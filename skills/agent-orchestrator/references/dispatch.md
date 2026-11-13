@@ -104,9 +104,13 @@ Besides the per-run parallel limit, `start` refuses a Claude or Codex agent when
 full. The details are in `references/memory.md`, "Agent admission".
 
 - The limit is `AGENT_ORCH_MAX_TOTAL` live agents across all runs (default 75% of RAM in GiB, at
-  least 4; `0` turns off the count only). Available memory must not be below
-  `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`), and macOS memory pressure must not be critical.
+  least 4). Available memory must not be below `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`), and
+  macOS memory pressure must not be critical.
+- `AGENT_ORCH_MAX_TOTAL=0` turns off the count, and the memory checks too unless
+  `AGENT_ORCH_MIN_FREE_AGENT` is set. Set it to keep the memory checks with the count off.
 - A refusal exits 7 and starts nothing. `--force` cannot bypass it. A command task is never checked.
+- A malformed `AGENT_ORCH_MAX_TOTAL` or `AGENT_ORCH_MIN_FREE_AGENT` is a usage error: `start`,
+  `dispatch` and `agents` exit 2.
 - A resume or a rework is checked like a new start. The replacement of an agent that ended (a parked
   babysitter that its watcher resumes, a retry, an interrupt) skips the count limit but never starts
   while memory is critically low.

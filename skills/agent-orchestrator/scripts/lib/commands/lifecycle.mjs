@@ -19,7 +19,7 @@ import { retryTask } from "../retry.mjs";
 import { reviveParked } from "../park.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { inboxWake } from "../inbox.mjs";
-import { admissionReason, admissionKinds, machineStatus } from "../admission.mjs";
+import { admissionReason, admissionKinds, admissionSettingsError, machineStatus } from "../admission.mjs";
 import { StartRefused, startTask } from "./start.mjs";
 
 const CLI = `node ${CLI_PATH}`;
@@ -317,6 +317,8 @@ function dispatchWave(args) {
 export async function cmdDispatch(args) {
   // Before anything revives a watcher, retries a task or writes state: a bad --max changes nothing.
   if (args.max !== undefined && !/^\d+$/.test(args.max)) die(`--max needs a whole number, not "${args.max}"`, 2);
+  const badSetting = admissionSettingsError();
+  if (badSetting) die(badSetting, 2);
   const follow = Boolean(args.follow && !args["dry-run"]);
   // With --follow, --timeout bounds the stay, as for `wait`: 0 or none stays until something needs
   // the orchestrator; past it, the command exits 3 and is safe to run again.
