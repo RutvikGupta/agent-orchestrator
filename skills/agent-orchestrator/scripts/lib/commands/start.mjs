@@ -1,5 +1,6 @@
 // `start`: launch a task's relay in the background, with the policy's model and the task's permissions.
 
+import { admissionReason, admissionEnabled, admissionSettingsError, AdmissionRevoked, withAdmissionLock } from "../admission.mjs";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -7,7 +8,7 @@ import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
 import { decisionNote, handoffNote, nestingNote, publishHoldNote } from "../briefs.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
-import { inboxNote } from "../inbox.mjs";
+import { inboxNote, inboxWake } from "../inbox.mjs";
 import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, reviveParked } from "../park.mjs";
 import { resumeLock } from "../steer.mjs";
 import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
@@ -18,7 +19,7 @@ import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
 import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
-import { die, emit, findRelay } from "../util.mjs";
+import { die, emit, findRelay, parseDuration } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
 export class StartRefused extends Error {
@@ -33,19 +34,44 @@ function refuse(message, code) {
 }
 
 // `start` from the command line, where only the run's owner may start or resume its tasks; the park
-// watcher and `wait`'s retries resume a task through startTask() itself.
-export function cmdStart(args) {
-  try {
-    const run = loadRun(args._[0]);
-    const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
-    const resume = Boolean(prev?.attempt);
-    const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
-    const { task, text } = startTask(args, resume ? { resumedBy: g.actor } : {});
-    if (resume) recordChange(run, g, { task: task.id, attempt: task.attempt, action: "resumed" });
-    emit(args, task, text);
-  } catch (error) {
-    if (error instanceof StartRefused) die(error.message, error.code);
-    throw error;
+// watcher and `wait`'s retries resume a task through startTask() itself. It validates the request
+// once; `--wait` then repeats only the machine admission and the launch.
+export async function cmdStart(args) {
+  if (args.agent !== COMMAND_AGENT) {
+    const bad = admissionSettingsError();
+    if (bad) die(bad, 2);
+  }
+  const duration = args.wait === undefined ? null : parseDuration(args.wait);
+  const until = duration === null ? null : Date.now() + duration;
+  let reported = false;
+  const wake = until === null ? null : inboxWake();
+  const cancel = () => { const message = wake?.check(); if (message) refuse(message.hint, 6); };
+  let prepared = null;
+  for (;;) {
+    try {
+      cancel();
+      if (!prepared) {
+        const run = loadRun(args._[0]);
+        const prev = args._[1] ? loadTask(run, validTask(args._[1])) : null;
+        const resume = Boolean(prev?.attempt);
+        const g = guard(run, resume ? `resume task ${prev.id} of run ${run.id}` : `start a task in run ${run.id}`, { adopt: args.adopt, refused: prev ? [prev.id] : [] });
+        prepared = { run, g, resume, launch: prepareStart({ ...args, admissionDeadline: until, admissionCancel: cancel }, resume ? { resumedBy: g.actor } : {}) };
+      }
+      const { task, text } = prepared.launch();
+      if (prepared.resume) recordChange(prepared.run, prepared.g, { task: task.id, attempt: task.attempt, action: "resumed" });
+      emit(args, task, text);
+      return;
+    } catch (error) {
+      // A start stopped while it held the machine lock lost it: validate again, as startTask does.
+      if (error instanceof AdmissionRevoked) { prepared = null; continue; }
+      if (error instanceof StartRefused && error.code === 7 && until !== null && Date.now() < until) {
+        if (!reported) { process.stderr.write(`waiting: ${error.message}\n`); reported = true; }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(3000, until - Date.now())));
+        continue;
+      }
+      if (error instanceof StartRefused) die(error.message, error.code);
+      throw error;
+    }
   }
 }
 
@@ -162,16 +188,22 @@ function missingDirectory(run, id, prev, cd) {
 // as messages, which is never checked for template markers; `check`, which runs every check of a
 // start without starting anything, also while the task's relay still runs (the caller stops it).
 export function startTask(args, extra = {}) {
-  if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
-    refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
+  for (;;) {
+    try { return prepareStart(args, extra)(); }
+    catch (error) { if (!(error instanceof AdmissionRevoked)) throw error; }
   }
-  const run = loadRun(args._[0]);
-  const id = validTask(args._[1]);
+}
+
+// The plan's checks on a task's first start, against the tasks that run now: it must be in the plan
+// (or --unplanned), its dependencies integrated, and it must not share an owned path or a resource
+// with a running task; --force skips the last two. Run when a start is validated and again at each
+// launch attempt, since a start that waits for the machine sees the run change meanwhile. Returns the
+// plan fields to record in the task.
+function planChecks(run, id, args, previous, { note = false } = {}) {
   const plan = readPlan(run.dir);
   const entry = plan?.tasks.find((task) => task.id === id);
-  const previous = loadTask(run, id);
-  const rows = listTasks(run);
   if (plan && !previous?.attempt) {
+    const rows = listTasks(run);
     if (!entry && !args.unplanned && !previous?.unplanned) {
       refuse(`task ${id} is not in the plan; add it with plan, or pass --unplanned to record the exception`);
     }
@@ -195,12 +227,27 @@ export function startTask(args, extra = {}) {
       ].filter(Boolean);
       refuse(`cannot start ${id}: ${reasons.join("; ")}; --force overrides the plan checks`);
     }
-    extra = { ...extra, ...(entry ? { plan: entry } : { unplanned: true, unplannedAt: previous?.unplannedAt || new Date().toISOString() }) };
-  } else if (!plan && !previous?.attempt && rows.filter((row) => row.attempt).length === 2) {
+    return entry ? { plan: entry } : { unplanned: true, unplannedAt: previous?.unplannedAt || new Date().toISOString() };
+  }
+  if (note && !plan && !previous?.attempt && listTasks(run).filter((row) => row.attempt).length === 2) {
     process.stderr.write(`note: this run is reaching its third task without a plan; use node ${CLI_PATH} plan ${run.id} FILE to coordinate dependencies and owned paths\n`);
   }
+  return {};
+}
+
+// Every check of a start that does not depend on the machine, done once. Returns the function that
+// takes the machine lock, checks admission and launches; `start --wait` calls it again while the
+// machine is full, so a slow check such as the pull-request read runs only once.
+function prepareStart(args, extra = {}) {
+  if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
+    refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
+  }
+  const run = loadRun(args._[0]);
+  const id = validTask(args._[1]);
+  const previous = loadTask(run, id);
+  extra = { ...extra, ...planChecks(run, id, args, previous, { note: true }) };
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
-  if (key === COMMAND_AGENT) return startCommand(run, id, args, extra);
+  if (key === COMMAND_AGENT) return () => startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
   if (args["max-tier"] !== undefined) refuse("--max-tier applies to --agent command only", 2);
   if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
@@ -300,146 +347,187 @@ export function startTask(args, extra = {}) {
     }
   }
 
-  // Every check has passed: a check run starts nothing.
-  if (args.check) return { task: null, text: `${id} can start` };
-
-  // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
-  // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
-  // Any other resume claims the attempt it replaces, for the same reason.
-  const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(run, prev, extra.attemptReason === "retry" ? "retry" : "start");
-  if (parkClaim?.refused) refuse(parkClaim.refused);
-
-  const attempt = (prev.attempt || 0) + 1;
-  // Why this attempt starts: `retry` comes from retry.mjs; a `changes` verdict on the previous
-  // attempt makes this one a rework.
-  const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
-  const attemptReason = extra.attemptReason
-    || (!prev.attempt ? "first" : lastRound?.verdict === "changes" && lastRound.attempt === prev.attempt ? "rework" : "resume");
-  const outDir = path.join(taskDir(run, id), `attempt-${attempt}`);
-  const brief = path.join(outDir, "orch-brief.md");
-  // A task that can start agents (it writes, reaches the network, and runs outside the sandbox) is
-  // told to hand slow side work to them. That includes babysitters, which run tests and fixes.
-  const childDepth = DEPTH + 1;
-  try {
-    fs.mkdirSync(outDir, { recursive: true });
-    fs.copyFileSync(briefSource, brief);
-    // Data the brief carries, such as messages, is passed on as it is: never checked for markers.
-    if (args.briefData) fs.appendFileSync(brief, `\n${String(args.briefData).trim()}\n`);
-    if (!args["read-only"] && !offline && !sandbox && childDepth < MAX_NEST_DEPTH) {
-      fs.appendFileSync(brief, nestingNote(childDepth));
+  // The agent this start replaces already held a place: a parked babysitter's watcher, a retry and an
+  // interrupt bring their claim on its attempt or retry it. They skip the count, and only they may run
+  // without the machine lock when it stays busy.
+  const replacement = Boolean(prev.attempt && prev.agent !== COMMAND_AGENT && (args.parkClaim || extra.attemptReason === "retry"));
+  // Validate before acquiring the machine lock, including any slow pull-request lookup.
+  const launch = (owner = () => {}, locked = false) => {
+    // Other starts may have changed the run while this one waited for the machine lock.
+    const current = loadTask(run, id) || prev;
+    if (!args.check && relayAlive(current.pid, current.startedAt, current.outDir)) refuse(`task ${id} is already running`);
+    // Another start that began and ended meanwhile: this one was validated against the attempt before.
+    if ((current.attempt || 0) !== (prev.attempt || 0)) refuse(`task ${id} was started meanwhile, in attempt ${current.attempt}, so this start started nothing; run \`status\` to see it`);
+    // The plan's constraints and the run's limits as they are now, not as validation saw them.
+    const fields = { ...extra, ...planChecks(run, id, args, previous) };
+    checkSlots(run, id, args, cd, { writes: !args["read-only"] });
+    if (admissionEnabled()) {
+      const reason = admissionReason(undefined, { replacement: replacement || !locked });
+      owner();
+      if (reason) refuse(reason, 7);
     }
-    if (noPublish && !args["read-only"]) fs.appendFileSync(brief, publishHoldNote());
-    if (babysit) {
-      fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
-      // Keep the brief a babysitter's session starts from, as it was given: a fresh session that
-      // takes over from a handoff note starts from it again. A brief that continues a babysitter's
-      // session, or the one the watcher composes for that fresh session, is not it. The brief that
-      // makes a finished task (its implementer) the babysitter, in that task's session, is.
-      if (!args.fromHandoff && (!args.passthrough.includes("--session") || !prev.babysit)) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
+    owner();
+    // Every check has passed: a check run starts nothing.
+    if (args.check) return { task: null, text: `${id} can start` };
+
+    // Resuming a parked babysitter ends its park, and exactly one resume (its watcher's, which brings
+    // its claim, or this one) may: claim it before writing anything, so a resume that loses changes nothing.
+    // Any other resume claims the attempt it replaces, for the same reason.
+    const parkClaim = args.parkClaim || claimParked(run, prev, "start") || resumeLock(run, prev, extra.attemptReason === "retry" ? "retry" : "start");
+    if (parkClaim?.refused) refuse(parkClaim.refused);
+    // A claim the caller brought stays the caller's: it releases it when the start fails, and a start
+    // whose admission was revoked runs again with it. Only a claim taken here is given back here.
+    const giveBack = () => { if (parkClaim !== args.parkClaim) parkClaim?.release(); };
+
+    const attempt = (prev.attempt || 0) + 1;
+    // Why this attempt starts: `retry` comes from retry.mjs; a `changes` verdict on the previous
+    // attempt makes this one a rework.
+    const lastRound = prev.attempt ? reviewRoundsOf(run, id).at(-1) : null;
+    const attemptReason = extra.attemptReason
+      || (!prev.attempt ? "first" : lastRound?.verdict === "changes" && lastRound.attempt === prev.attempt ? "rework" : "resume");
+    const outDir = path.join(taskDir(run, id), `attempt-${attempt}`);
+    const brief = path.join(outDir, "orch-brief.md");
+    // A task that can start agents (it writes, reaches the network, and runs outside the sandbox) is
+    // told to hand slow side work to them. That includes babysitters, which run tests and fixes.
+    const childDepth = DEPTH + 1;
+    try {
+      owner();
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.copyFileSync(briefSource, brief);
+      // Data the brief carries, such as messages, is passed on as it is: never checked for markers.
+      if (args.briefData) fs.appendFileSync(brief, `\n${String(args.briefData).trim()}\n`);
+      if (!args["read-only"] && !offline && !sandbox && childDepth < MAX_NEST_DEPTH) {
+        fs.appendFileSync(brief, nestingNote(childDepth));
+      }
+      if (noPublish && !args["read-only"]) fs.appendFileSync(brief, publishHoldNote());
+      if (babysit) {
+        fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
+        // Keep the brief a babysitter's session starts from, as it was given: a fresh session that
+        // takes over from a handoff note starts from it again. A brief that continues a babysitter's
+        // session, or the one the watcher composes for that fresh session, is not it. The brief that
+        // makes a finished task (its implementer) the babysitter, in that task's session, is.
+        if (!args.fromHandoff && (!args.passthrough.includes("--session") || !prev.babysit)) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
+      }
+      fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key));
+      // Files the brief points to, such as the messages a parked task's watcher delivers in full.
+      for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
+    } catch (error) {
+      giveBack();
+      throw error;
     }
-    fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key));
-    // Files the brief points to, such as the messages a parked task's watcher delivers in full.
-    for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
-  } catch (error) {
-    parkClaim?.release();
-    throw error;
-  }
 
-  const relayArgs = keep ? rebaseRelayArgs(args.relayFrom, brief, outDir) : ["--brief", brief, "--cd", cd, "--out-dir", outDir];
-  if (!keep) {
-    if (args["read-only"]) relayArgs.push("--read-only");
-    if (args.timeout || babysit) relayArgs.push("--timeout", args.timeout || "24h");
-    // A tier without an effort runs at the CLI's default for its model.
-    relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
-    relayArgs.push(...net.args);
-  }
-  if (automatic?.tier && !args.passthrough.some((arg) => arg === "--session" || arg.startsWith("--session=") || arg === "--resume-last")) {
-    const session = previousRow?.session;
-    if (session) relayArgs.push("--session", session);
-  }
-  relayArgs.push(...args.passthrough);
-  if (automatic?.tier) {
-    const sessionAt = relayArgs.indexOf("--session");
-    const hasSession = relayArgs.includes("--resume-last") || (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
-    escalation += hasSession ? "; continuing the same session" : "; this attempt starts a fresh session";
-  }
+    const relayArgs = keep ? rebaseRelayArgs(args.relayFrom, brief, outDir) : ["--brief", brief, "--cd", cd, "--out-dir", outDir];
+    if (!keep) {
+      if (args["read-only"]) relayArgs.push("--read-only");
+      if (args.timeout || babysit) relayArgs.push("--timeout", args.timeout || "24h");
+      // A tier without an effort runs at the CLI's default for its model.
+      relayArgs.push("--model", model, ...(effort ? ["--effort", effort] : []));
+      relayArgs.push(...net.args);
+    }
+    if (automatic?.tier && !args.passthrough.some((arg) => arg === "--session" || arg.startsWith("--session=") || arg === "--resume-last")) {
+      const session = previousRow?.session;
+      if (session) relayArgs.push("--session", session);
+    }
+    relayArgs.push(...args.passthrough);
+    if (automatic?.tier) {
+      const sessionAt = relayArgs.indexOf("--session");
+      const hasSession = relayArgs.includes("--resume-last") || (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
+      escalation += hasSession ? "; continuing the same session" : "; this attempt starts a fresh session";
+    }
 
-  // The orch task that runs this `start` is the parent this attempt reports to (finish-notice.mjs).
-  // The record is ready before the relay starts, so that a resume can record both at once.
-  const startedBy = startedByCaller(run, id);
-  const task = {
-    ...prev,
-    agent: key,
-    tier,
-    model,
-    effort,
-    why,
-    attemptAgents: { ...(prev.attemptAgents || {}), [attempt]: key },
-    attemptTiers: { ...Object.fromEntries(previousAttempts.map((a) => [a.n, a.tier])), [attempt]: tier },
-    attemptStops: { ...(prev.attemptStops || {}), ...(prev.stoppedAt ? { [prev.attempt]: prev.stoppedAt } : {}) },
-    automaticEscalations: { ...(prev.automaticEscalations || {}), ...(automatic?.tier ? { [attempt]: { from: prevTier, to: tier } } : {}) },
-    attemptReason,
-    attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
-    title: args.title ?? prev.title ?? null,
-    relay,
-    cd,
-    readOnly: Boolean(args["read-only"]),
-    offline,
-    babysit,
-    sandboxRequested: sandbox,
-    confine,
-    noPublish,
-    sandboxed: keep ? prev.sandboxed : net.sandboxed,
-    pr,
-    closedAt: null,
-    stoppedAt: null, // a start by hand opens a closed or stopped task again; a stop or close since its claim is kept below
-    network: keep ? prev.network : net.network,
-    attempt,
-    outDir,
-    pid: null, // set once the relay starts
-    argv: relayArgs,
-    startedAt: new Date().toISOString(),
-    startDepth: DEPTH,
-    startedBy,
-    // Each attempt reports to the task that started it, even after a later attempt starts.
-    attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
-    resumedBy: null, // who resumed this attempt by hand (cmdStart passes it), not a park or retry resume
-    ...extra,
+    // The orch task that runs this `start` is the parent this attempt reports to (finish-notice.mjs).
+    // The record is ready before the relay starts, so that a resume can record both at once.
+    const startedBy = startedByCaller(run, id);
+    const task = {
+      ...prev,
+      agent: key,
+      tier,
+      model,
+      effort,
+      why,
+      attemptAgents: { ...(prev.attemptAgents || {}), [attempt]: key },
+      attemptTiers: { ...Object.fromEntries(previousAttempts.map((a) => [a.n, a.tier])), [attempt]: tier },
+      attemptStops: { ...(prev.attemptStops || {}), ...(prev.stoppedAt ? { [prev.attempt]: prev.stoppedAt } : {}) },
+      automaticEscalations: { ...(prev.automaticEscalations || {}), ...(automatic?.tier ? { [attempt]: { from: prevTier, to: tier } } : {}) },
+      attemptReason,
+      attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
+      title: args.title ?? prev.title ?? null,
+      relay,
+      cd,
+      readOnly: Boolean(args["read-only"]),
+      offline,
+      babysit,
+      sandboxRequested: sandbox,
+      confine,
+      noPublish,
+      sandboxed: keep ? prev.sandboxed : net.sandboxed,
+      pr,
+      closedAt: null,
+      stoppedAt: null, // a start by hand opens a closed or stopped task again; a stop or close since its claim is kept below
+      network: keep ? prev.network : net.network,
+      attempt,
+      outDir,
+      pid: null, // set once the relay starts
+      argv: relayArgs,
+      startedAt: new Date().toISOString(),
+      startDepth: DEPTH,
+      startedBy,
+      // Each attempt reports to the task that started it, even after a later attempt starts.
+      attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
+      resumedBy: null, // who resumed this attempt by hand (cmdStart passes it), not a park or retry resume
+      ...fields,
+    };
+    // A close or stop that came while this resume was starting (since its claim's holder first saw
+    // the task) wins: start nothing.
+    const since = parkClaim?.since || prev;
+    if (parkClaim) {
+      const ended = endedSince(since, loadTask(run, id));
+      if (ended) {
+        giveBack();
+        fs.rmSync(outDir, { recursive: true, force: true });
+        refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
+      }
+    }
+    let child;
+    try {
+      // The last revocation check. A start that the system pauses after it and before the relay is
+      // spawned can be revoked by another start, which then takes the place, and still spawn when it
+      // continues: one agent over the limit. The limit controls load and is not a hard guarantee;
+      // waiting on a stopped holder instead would let one paused process block every start.
+      owner();
+      child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
+    } catch (error) {
+      giveBack();
+      throw error;
+    }
+    task.pid = child.pid;
+    // First of all, record the relay: a resume that dies now leaves it for the next claimant to adopt.
+    parkClaim?.spawned?.(task);
+    // A resume never clears a close or stop that came while it started.
+    if (parkClaim) Object.assign(task, endedSince(since, loadTask(run, id)) || {});
+    saveTask(run, task);
+    parkClaim?.done(task);
+    // Started once the record is saved, so the watcher always reads this attempt. A babysitter always
+    // gets one: when its attempt ends parked, the watcher starts its park watcher (park.mjs).
+    if (startedBy || babysit) watchForFinish(run, task);
+    const warn =
+      sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
+    return {
+      task,
+      text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${child.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
+    };
   };
-  // A close or stop that came while this resume was starting (since its claim's holder first saw
-  // the task) wins: start nothing.
-  const since = parkClaim?.since || prev;
-  if (parkClaim) {
-    const ended = endedSince(since, loadTask(run, id));
-    if (ended) {
-      parkClaim.release();
-      fs.rmSync(outDir, { recursive: true, force: true });
-      refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
-    }
-  }
-  let child;
-  try {
-    child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
-  } catch (error) {
-    parkClaim?.release();
+  // A new start never runs uncounted because another start holds the lock: it waits up to 30 seconds,
+  // or with --wait until its deadline (trying once more there), then refuses with exit 7. A
+  // replacement waits three seconds and then starts without the lock.
+  const busy = (reason) => {
+    const error = new StartRefused(reason, 7);
+    error.admissionKinds = ["lock"];
     throw error;
-  }
-  task.pid = child.pid;
-  // First of all, record the relay: a resume that dies now leaves it for the next claimant to adopt.
-  parkClaim?.spawned?.(task);
-  // A resume never clears a close or stop that came while it started.
-  if (parkClaim) Object.assign(task, endedSince(since, loadTask(run, id)) || {});
-  saveTask(run, task);
-  parkClaim?.done(task);
-  // Started once the record is saved, so the watcher always reads this attempt. A babysitter always
-  // gets one: when its attempt ends parked, the watcher starts its park watcher (park.mjs).
-  if (startedBy || babysit) watchForFinish(run, task);
-  const warn =
-    sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
-  return {
-    task,
-    text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${child.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
   };
+  return () => admissionEnabled() ? withAdmissionLock(launch, replacement
+    ? { deadline: Date.now() + 3000, cancel: args.admissionCancel }
+    : { deadline: args.admissionDeadline ?? Date.now() + 30_000, cancel: args.admissionCancel, busy }) : launch();
 }
 
 // Refuse a start when the run has no free slot, or when `writes` and another task already writes

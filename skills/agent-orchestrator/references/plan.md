@@ -42,10 +42,16 @@ starts.
 
 ## Parallel limit
 
-- At most 8 tasks run at once by default. `AGENT_ORCH_MAX_PARALLEL` overrides it.
+- At most 8 tasks run at once in a run by default. `AGENT_ORCH_MAX_PARALLEL` overrides it.
 - Runs that delegated agents start allow fewer: 6 at the second level, 4 at the third, and 2 at the
   fourth.
 - Agents below the fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
+- The machine has its own limit beside this per-run one. It counts the live Claude and Codex agents
+  of every run, and requires enough available memory: `AGENT_ORCH_MAX_TOTAL` (default 75% of RAM in
+  GiB, at least 4) and `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`). A start must pass both limits.
+  When the machine is full, `start` exits 7 (`start --wait [DUR]` waits for room), and `dispatch`
+  lists the ready tasks as waiting and starts them on a later call or with `--follow`
+  (`references/memory.md`, "Agent admission"; `references/dispatch.md`).
 
 ## Recording it
 
