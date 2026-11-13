@@ -75,7 +75,7 @@ export function cmdAgents(args) {
   emit(
     args,
     { agents: rows, machine, policy, policyPath: POLICY_PATH, tierEvidence: evidence, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },
-    `machine: ${machine.running} agent tasks running; limit ${machine.limit || "off"}; available memory ${(machine.availableBytes / 1e9).toFixed(2)}GB\n\n${table(rows, ["key", "vendor", "version", "auth", "ready"])}\n\nmodels (${POLICY_PATH}):\n  ${lines.join("\n  ")}` +
+    `machine: ${machine.running} agent tasks running; limit ${machine.limit || "off"}; available memory ${machine.availableBytes === null ? "unknown" : `${(machine.availableBytes / 1e9).toFixed(2)}GB`}\n\n${table(rows, ["key", "vendor", "version", "auth", "ready"])}\n\nmodels (${POLICY_PATH}):\n  ${lines.join("\n  ")}` +
       `\n\nusage limits (share of each rolling window used; for information only: do not weigh them when choosing an agent; even 100% is not a reached limit, only a task stopped by a usage-limit error is):\n  ${usageLines.join("\n  ")}${githubNote}`,
   );
 }

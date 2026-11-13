@@ -19,7 +19,7 @@ import { retryTask } from "../retry.mjs";
 import { reviveParked } from "../park.mjs";
 import { taskAttention } from "../escalate.mjs";
 import { inboxWake } from "../inbox.mjs";
-import { admissionReason, machineStatus } from "../admission.mjs";
+import { admissionReason, admissionKinds, machineStatus } from "../admission.mjs";
 import { StartRefused, startTask } from "./start.mjs";
 
 const CLI = `node ${CLI_PATH}`;
@@ -219,6 +219,7 @@ function dispatchWave(args) {
   const waiting = [];
   const conflicts = [];
   const machineWaiting = [];
+  const machineKinds = [];
   let projectedAgents = 0;
   const reserved = rows.filter((r) => r.state === "running" && r.phase !== "parked").map((r) => {
     const task = loadTask(run, r.id);
@@ -249,7 +250,11 @@ function dispatchWave(args) {
       const machine = entry.agent === "command" ? null : machineStatus();
       if (machine && dryRun) machine.running += projectedAgents;
       const machineReason = machine && admissionReason(machine);
-      if (machineReason) throw new StartRefused(machineReason, 7);
+      if (machineReason) {
+        const error = new StartRefused(machineReason, 7);
+        error.admissionKinds = admissionKinds(machine);
+        throw error;
+      }
       const how = prepare(run, entry, dryRun);
       if (dryRun) {
         started.push({ id: entry.id, where: how.where });
@@ -278,6 +283,7 @@ function dispatchWave(args) {
       if (!(error instanceof StartRefused)) throw error;
       if (error.code === 7) {
         machineWaiting.push({ id: entry.id, reason: error.message });
+        machineKinds.push([entry.id, error.admissionKinds || admissionKinds(machineStatus())]);
         lines.push(`ready, waiting ${entry.id}: ${error.message}`);
         continue;
       }
@@ -296,6 +302,7 @@ function dispatchWave(args) {
   if (!lines.length) lines.push(`nothing to dispatch: all ${plural(plan.tasks.length, "planned task")} have started`);
   if (started.length && !dryRun) lines.push(`next: ${CLI} wait ${run.id}`);
   return {
+    machineKinds,
     data: {
       run: run.id, dryRun, limit, running,
       [dryRun ? "wouldStart" : "started"]: started,
@@ -371,7 +378,7 @@ export async function cmdDispatch(args) {
       if (wave.data.failed.length) process.exitCode = 1;
       return;
     }
-    const notice = JSON.stringify(wave.data.waitingForMachine);
+    const notice = JSON.stringify(wave.machineKinds);
     if (wave.data.waitingForMachine.length && notice !== machineNotice && !args.json && !wave.data.started.length) process.stdout.write(`${wave.text}\n`);
     machineNotice = notice;
     started.push(...wave.data.started);

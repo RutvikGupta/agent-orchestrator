@@ -146,16 +146,27 @@ export function darwinAvailable(read = sysctl) {
   return percent <= 100 && bytes > 0 ? Math.floor((bytes * percent) / 100) : null;
 }
 
-export function freeMemory() {
-  if (process.env.AGENT_ORCH_HEAVY_FREE_BYTES !== undefined) return Math.max(0, Number(process.env.AGENT_ORCH_HEAVY_FREE_BYTES) || 0);
+// Null means the reading failed; a measured zero remains a valid low-memory reading.
+export function availableMemory() {
+  if (process.env.AGENT_ORCH_HEAVY_FREE_BYTES !== undefined) {
+    const value = Number(process.env.AGENT_ORCH_HEAVY_FREE_BYTES);
+    return Number.isFinite(value) ? Math.max(0, value) : null;
+  }
   if (process.platform === "darwin") {
     const available = darwinAvailable();
     if (available !== null) return available;
     const r = spawnSync("vm_stat", [], { encoding: "utf8", timeout: 3000 });
-    return r.status === 0 ? parseMemory(r.stdout, "darwin") : 0;
+    return r.status === 0 && /page size of \d+ bytes/.test(r.stdout) && /Pages free:\s+\d+/.test(r.stdout) && /Pages speculative:\s+\d+/.test(r.stdout)
+      ? parseMemory(r.stdout, "darwin") : null;
   }
-  try { return parseMemory(fs.readFileSync("/proc/meminfo", "utf8"), "linux"); } catch { return 0; }
+  try {
+    const text = fs.readFileSync("/proc/meminfo", "utf8");
+    return /^Mem(?:Available|Free):\s+\d+/m.test(text) ? parseMemory(text, "linux") : null;
+  } catch { return null; }
 }
+
+// Preserve the heavy lane's conservative fallback while admission can distinguish an error.
+export const freeMemory = () => availableMemory() ?? 0;
 
 // The kernel's memory pressure: 1 normal, 2 warning, 4 critical (macOS). Critical pressure holds
 // a command back while another one runs; an empty lane admits at any level, since waiting would

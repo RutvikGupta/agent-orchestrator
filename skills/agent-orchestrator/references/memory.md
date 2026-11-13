@@ -46,18 +46,25 @@ What it checks:
   run's. Command tasks do not count.
 - **The count limit** is `AGENT_ORCH_MAX_TOTAL`. Its default is 75% of the machine's RAM in GiB,
   rounded, and at least 4: 12 on a 16 GiB machine, 24 on 32 GiB. Setting it to `0` turns off the
-  count check only; the memory checks stay.
+  admission checks when `AGENT_ORCH_MIN_FREE_AGENT` is unset. Set that memory minimum explicitly
+  to keep the memory checks with the count off.
 - **Memory.** Available memory must not be below `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`; set
   bytes, MB or GiB, as for `AGENT_ORCH_HEAVY_MIN_FREE`), and macOS memory pressure must be below
-  critical (level 4). Available memory is read as the heavy lane reads it (above).
+  critical (level 4). Available memory is read as the heavy lane reads it (above). If the reading
+  fails, one note is printed and that check is skipped. A measured zero still refuses a start.
 
 The count is read from the live relays each time, not from a persistent counter, and the check and
 the start share one machine-wide lock, so two starts at the same moment cannot both take the last
-place.
+place. During an interrupt, a live claim keeps one place between the old relay stopping and its
+replacement starting; the claim and relay never count twice. Dead holders release the lock.
+A stopped holder is revoked and must check again when it continues. Lock waits last at most three
+seconds (or the remaining `--wait` duration). If the lock cannot be used, or the process start time
+cannot be read, one note is printed and the start skips the count check. Memory still applies.
 
 When a start does not pass:
 
-- `start` prints the reasons, starts nothing and exits 7.
+- `start` validates the request first. A bad request keeps its usual error and exit code.
+  A valid request refused by admission prints the reasons, starts nothing and exits 7.
 - `--force` does not bypass it. It skips plan checks only (`references/dispatch.md`).
 - A resume or a rework is a new start, so it is checked the same way.
 - The agent that takes the place of one that ended does not wait for the count. This covers a
@@ -70,12 +77,13 @@ What to do:
 - `$ORCH wait <run> <task-id>` waits for an existing task to finish, which frees a place. Then start
   again.
 - `start ... --wait [DUR]` retries every few seconds, prints the reason once, and starts the task
-  when there is room. `DUR` defaults to 10 minutes. When it expires, `start` exits 7 and has
-  started nothing. It blocks like `wait`: in Claude Code, run it in the background
+  when there is room. `DUR` defaults to 10 minutes. It checks once more at the deadline, then
+  exits 7 if still refused. A new message returns exit 6 without starting. It blocks like `wait`: in Claude Code, run it in the background
   (`SKILL.md`, "Setup"). A Codex orchestrator, whose shell calls time out, gives a `DUR` below the
   timeout and repeats the call.
 - `dispatch` does not fail: it lists each ready task with the reason it waits. A later `dispatch`,
-  or `dispatch --follow`, starts it when there is room (`references/dispatch.md`).
+  or `dispatch --follow`, starts it when there is room (`references/dispatch.md`). Follow prints
+  a new waiting notice only when the waiting tasks or the kind of limit change.
 - `$ORCH agents` shows how many agents run, the count limit, and the available memory.
 - Do not start agents through your host's own sub-agent tool to get around a refusal
   (`references/dispatch.md`, "Why never your host's own sub-agent tool").
