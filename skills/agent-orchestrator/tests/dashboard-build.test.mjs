@@ -661,7 +661,7 @@ test('a bad AGENT_ORCH_FIRST_BUILD_TIMEOUT stops startup with the usage code', a
   assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false);
 });
 
-test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT', async (t) => {
+test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT; the first limit is never the shorter', async (t) => {
   const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
   await eventually(() => b.exists('blocked'), 'the first build did not start');
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
@@ -683,14 +683,13 @@ test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lo
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000]);
   b.touch('release');
   await b.settled();
-});
 
-test('the first build\'s limit is never shorter than the later builds\' one', async (t) => {
-  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '10m' }, prepare: async (b) => b.touch('hang') });
-  await eventually(() => b.exists('blocked'), 'the first build did not start');
-  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [600_000]);
-  b.touch('release');
-  await b.settled();
+  // A later-build limit longer than the first-build default applies to the first build too.
+  const long = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '10m' }, prepare: async (b) => b.touch('hang') });
+  await eventually(() => long.exists('blocked'), 'the first build did not start');
+  assert.deepEqual(long.pending('overdueBuild').map((x) => x.ms), [600_000]);
+  long.touch('release');
+  await long.settled();
 });
 
 // A run whose launching session has ended (its PID names no process), idle for three hours, with a
@@ -707,7 +706,7 @@ async function idleRun(b, name, { live = false } = {}) {
   return { run, wt };
 }
 
-test('housekeeping collects unused worktrees as the user, whoever started the dashboard, and logs each one', async (t) => {
+test('housekeeping collects unused worktrees as the user, whoever started the dashboard, and logs each one; AGENT_ORCH_AUTO_GC=off with AGENT_ORCH_RECLAIM=off sets none', async (t) => {
   let ended, live;
   // The dashboard runs in a live session's environment; its collection must not take that
   // session's run for its own. The disk is low, so one hour of rest is enough.
@@ -716,17 +715,18 @@ test('housekeeping collects unused worktrees as the user, whoever started the da
     env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB', ...session },
     prepare: async (b) => { ended = await idleRun(b, 'ended'); live = await idleRun(b, 'live', { live: true }); },
   });
-  assert.ok(b.lines('intervals').includes('housekeeping'));
+  // The server sets its timers after it announces itself, and prints its address after them.
+  await eventually(() => b.output().includes('dashboard: http'), 'the dashboard did not finish starting');
+  assert.ok(b.lines('intervals').includes('housekeeping'), b.lines('intervals').join(', '));
   await b.control('housekeep');
   await eventually(() => b.output().includes('auto gc freed'), `the collection did not run:\n${b.output()}`);
   assert.ok(b.output().includes(`orch: auto gc removed worktree ${ended.wt.path} (run ${ended.run.id}, task old, `), b.output());
   assert.match(b.output(), /orch: auto gc freed \S+ \S+ from 1 worktree; disk 20 GB free\n/);
   assert.equal(fs.existsSync(ended.wt.path), false);
   assert.equal(fs.existsSync(live.wt.path), true, 'the collection took the live session\'s worktree');
-});
 
-test('with AGENT_ORCH_AUTO_GC=off and AGENT_ORCH_RECLAIM=off the dashboard sets no housekeeping', async (t) => {
-  const b = await setup(t, { env: { AGENT_ORCH_AUTO_GC: 'off' } });
-  await eventually(() => b.output().includes('dashboard: http'), 'the dashboard did not finish starting');
-  assert.ok(!b.lines('intervals').includes('housekeeping'), b.lines('intervals').join(', '));
+  // The setup turns reclaim off; with the collection off too, nothing is left to do.
+  const off = await setup(t, { env: { AGENT_ORCH_AUTO_GC: 'off' } });
+  await eventually(() => off.output().includes('dashboard: http'), 'the dashboard did not finish starting');
+  assert.ok(!off.lines('intervals').includes('housekeeping'), off.lines('intervals').join(', '));
 });

@@ -536,3 +536,49 @@ test('the user at a terminal and the dashboard may act on any run; each owner is
   assert.deepEqual([fromDashboard.steeredBy, fromDashboard.from], ['user (dashboard)', 'user']);
   assert.deepEqual((await f.json(['status', parent.id], { env: A })).changedByOthers.map((n) => [n.task, n.action, n.by]), [['two', 'steered', 'user (dashboard)']]);
 });
+
+test('a run counts as ended only when every launcher up its chain is gone; only gc acts on it, and nothing on a terminal run', async (t) => {
+  const f = await fixture(t);
+  const setLauncher = (run, orchestrator) => {
+    const file = path.join(run.dir, 'run.json');
+    writeJson(file, { ...readJson(file), orchestrator });
+  };
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+  const idle = (run, id) => {
+    const file = path.join(run.dir, 'tasks', id, 'task.json');
+    writeJson(file, { ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 });
+    fs.utimesSync(file, new Date(old), new Date(old));
+    const runFile = path.join(run.dir, 'run.json');
+    writeJson(runFile, { ...readJson(runFile), createdAt: old });
+  };
+  // A main session's run, with a task `lead` that is not running, and the nested run `lead` started.
+  const parent = await f.newRun('parent');
+  await f.json(['worktree', parent.id, 'lead', '--no-prep']);
+  const nested = await f.newRun('nested');
+  const wt = await f.json(['worktree', nested.id, 'kid', '--no-prep']);
+  idle(nested, 'kid');
+  setLauncher(nested, { agent: 'delegated-agent', parentRun: parent.id, parentTask: 'lead', lastSeenAt: old });
+  // A terminal run, idle and closed: the user's, never ended.
+  const terminal = await f.newRun('terminal');
+  const mine = await f.json(['worktree', terminal.id, 'own', '--no-prep']);
+  idle(terminal, 'own');
+  const reasons = async () => Object.fromEntries((await f.json(['gc', '--dry-run'], { env: B })).runs.map((r) => [r.run, r.reason ?? r.sessionEnded]));
+
+  // The parent's session lives (this test's process shows as a `codex` host): the nested run is
+  // still its, though its own launcher, task lead, is not running.
+  setLauncher(parent, { agent: 'codex', sessionId: 'session-a', pid: process.pid, lastSeenAt: old });
+  assert.equal((await reasons())[nested.id], 'ownership refused');
+  // The parent's session ended too: the whole chain is gone, so gc collects the nested run.
+  setLauncher(parent, { agent: 'claude', sessionId: 'session-a', pid: 99999999, lastSeenAt: old });
+  const all = await reasons();
+  assert.equal(all[nested.id], 'its process (pid 99999999) is gone');
+  assert.equal(all[terminal.id], 'ownership refused', 'a terminal run counted as ended');
+  // Guarded commands other than gc still refuse it, and adopting is what takes it over.
+  await f.command(['cleanup', nested.id], { code: 4, env: B });
+  await f.command(['close', nested.id, 'kid'], { code: 4, env: B });
+  assert.equal(fs.existsSync(wt.path), true);
+  const report = await f.json(['gc'], { env: B });
+  assert.deepEqual(report.runs.find((r) => r.run === nested.id).removed.map((r) => r.task), ['kid']);
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.equal(fs.existsSync(mine.path), true);
+});

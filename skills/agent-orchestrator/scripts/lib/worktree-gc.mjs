@@ -19,11 +19,14 @@ const samePath = (a, b) => {
   try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return false; }
 };
 
+const taskIds = (run) => {
+  const dir = path.join(run.dir, 'tasks');
+  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+};
+
 // Do not use describe/listTasks here: describing large event logs persists summary caches.
 export function gcTasks(run) {
-  const dir = path.join(run.dir, 'tasks');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).flatMap((id) => {
+  return taskIds(run).flatMap((id) => {
     const task = loadTask(run, id);
     if (!task) return [];
     const running = relayAlive(task.pid, task.startedAt, task.outDir) || isParked(run, task);
@@ -197,11 +200,13 @@ export async function collectRuns({ dryRun = false, olderThan, expireAfter = dur
   const reports = [];
   for (const run of listRuns()) {
     const own = ownershipOf(run);
-    const rows = gcTasks(run);
     const report = { run: run.id, removed: [], kept: [], expired: [], bytesFreed: 0 };
     const known = own.caller.kind !== 'unknown';
     const allowed = (known && own.mine) || (!auto && own.caller.kind === 'user');
     const ended = !allowed && known && sessionsEnded(own).ended;
+    // A refused run needs only its task ids, to list its kept worktrees: the automatic collection
+    // passes over every run every five minutes, and reading each task's attempts costs time.
+    const rows = allowed || ended ? gcTasks(run) : taskIds(run).map((id) => ({ id }));
     // A dry run uses the same ownership decision, without invoking any mutating guard path.
     const reason = !(allowed || ended) ? 'ownership refused' : rows.some((r) => r.state === 'running' || r.phase === 'parked') ? 'run has running tasks' : now - activity(run, rows) < olderThan ? 'run is too recent' : null;
     if (reason) {
