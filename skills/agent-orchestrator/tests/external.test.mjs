@@ -1121,7 +1121,7 @@ test('a task\'s agents fold with it as older rows, and stay while it stays', asy
 
   const state = (await withAgents(board, run, 'quiet')).state;
   const older = (id) => rowOf(state, run, id).older;
-  assert.deepEqual(['quiet', 'recent', 'long'].map(older), [true, false, false], 'only the task that has been quiet a while folds');
+  assert.deepEqual(['quiet', 'recent', 'long'].map(older), [true, true, false], 'finished tasks whose results were read fold at once; a running task stays');
   for (const id of ['quiet', 'recent', 'long']) {
     const [child] = agentsOf(state, rowOf(state, run, id));
     assert.equal(child.state, 'completed', id);
