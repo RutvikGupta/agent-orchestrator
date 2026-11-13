@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-- The dashboard's sections, and sub-agent rows among their siblings, can be dragged into another
-  order by a grip that shows on hover. The order is kept in the browser across reloads, until new
-  activity changes the automatic order of those items; then the board sorts itself again.
 - A babysitter parks when the `PARKED:` line is the last line of its final message, as well as
   when it is the first. An agent told to end with the line was recorded as completed, with no
   watcher on its pull request. `status` starts the watcher of an attempt that ended that way.

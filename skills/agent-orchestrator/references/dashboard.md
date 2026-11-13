@@ -26,21 +26,6 @@ act on. `SKILL.md` step 5 says when to open it.
   `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see threads another Codex
   process runs.
 
-## Moving sections and rows
-
-- **Dragging.** A grip (⠿) shows at the left of a section's header, and at the start of a row, while
-  the pointer is over it. Drag a section by its grip and drop it before or after another section.
-  Drag a row by its grip and drop it before or after another row under the same parent in the same
-  section; the rows under it move with it. The main session row does not move. A line marks where
-  the item would land.
-- **The rule.** The automatic order is the board's own: running sessions first, then by activity.
-  Your order holds until new activity changes the automatic order of those items. For each list you
-  reordered (the sections, or the rows under one parent), the page remembers the automatic order at
-  the drop. While that stays the same, your order shows. When it changes in any way (an item moved,
-  appeared or left), the page forgets your order for that list only, and the list sorts itself again.
-- The orders are kept in this browser, so a reload keeps them, under the same rule. When the
-  browser cannot store them, they still hold until the page reloads.
-
 ## Messages to a task
 
 The box under a task's details sends it a message (`references/messages.md`).
