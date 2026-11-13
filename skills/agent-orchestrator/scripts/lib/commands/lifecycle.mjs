@@ -194,7 +194,8 @@ function briefRefusal(run, entry) {
   return why && `${why}; write it (${CLI} brief ${run.id} ${entry.id} drafts it from the plan), then dispatch again`;
 }
 
-function dispatchWave(args) {
+// `until`: the deadline of `dispatch --follow`, which a wait for the machine lock never passes.
+function dispatchWave(args, until = null) {
   const run = loadRun(args._[0]);
   const dryRun = Boolean(args["dry-run"]);
   // A dry run changes nothing, so anyone may look.
@@ -221,6 +222,9 @@ function dispatchWave(args) {
   const machineWaiting = [];
   const machineKinds = [];
   let projectedAgents = 0;
+  // Once one start finds the machine lock busy, the wave's other agent tasks wait for the same
+  // reason without trying: each try would wait for the lock again.
+  let lockBusy = null;
   const reserved = rows.filter((r) => r.state === "running" && r.phase !== "parked").map((r) => {
     const task = loadTask(run, r.id);
     const current = plan.tasks.find((t) => t.id === r.id);
@@ -246,6 +250,11 @@ function dispatchWave(args) {
         conflicts.push({ id: entry.id, conflicts: overlap });
         lines.push(`waiting ${entry.id}: conflicts with running tasks ${overlap.map((c) => c.b).join(", ")}`);
         continue;
+      }
+      if (lockBusy && entry.agent !== "command") {
+        const error = new StartRefused(lockBusy, 7);
+        error.admissionKinds = ["lock"];
+        throw error;
       }
       const machine = entry.agent === "command" ? null : machineStatus();
       if (machine && dryRun) machine.running += projectedAgents;
@@ -273,6 +282,8 @@ function dispatchWave(args) {
           cd: how.cd,
           "read-only": Boolean(entry.readOnly),
           passthrough: [],
+          // Wait for the machine lock at most three seconds, and never past --follow's deadline.
+          admissionDeadline: Math.min(Date.now() + 3000, until ?? Infinity),
         },
         { plan: entry },
       );
@@ -282,6 +293,7 @@ function dispatchWave(args) {
     } catch (error) {
       if (!(error instanceof StartRefused)) throw error;
       if (error.code === 7) {
+        if (error.admissionKinds?.includes("lock")) lockBusy = error.message;
         machineWaiting.push({ id: entry.id, reason: error.message });
         machineKinds.push([entry.id, error.admissionKinds || admissionKinds(machineStatus())]);
         lines.push(`ready, waiting ${entry.id}: ${error.message}`);
@@ -374,7 +386,7 @@ export async function cmdDispatch(args) {
       guard(loadRun(run.dir), `dispatch run ${run.id}`, { adopt: args.adopt });
       maintain();
     }
-    const wave = dispatchWave(args);
+    const wave = dispatchWave(args, until);
     if (!follow) {
       emit(args, wave.data, wave.text);
       if (wave.data.failed.length) process.exitCode = 1;

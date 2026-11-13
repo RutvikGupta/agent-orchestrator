@@ -494,3 +494,68 @@ test('review: dispatch follow reports limit kinds rather than every memory fluct
   const task = readJson(f.taskFile(run, 'planned')); await f.ready(task); f.release(task);
   assert.equal((await following.done).code, 0);
 });
+
+test('review: a waiting start checks the plan again before each try, and reads the pull request once', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const calls = path.join(f.root, 'gh-calls');
+  fs.writeFileSync(path.join(f.root, 'bin/gh'), `#!${process.execPath}\nrequire('fs').appendFileSync(${JSON.stringify(calls)},'call\\n');console.log(JSON.stringify({number:42,url:'https://github.com/example/repo/pull/42',state:'OPEN',isDraft:false}));`, { mode: 0o755 });
+  const file = path.join(f.root, 'plan.json');
+  writeJson(file, { goal: 'Plan recheck', tasks: [
+    { id: 'dep', goal: 'Inspect', type: 'research', owns: [], dependsOn: [], agent: 'codex', tier: 'standard', why: 'Fixture', readOnly: true, brief: f.brief('dep') },
+    { id: 'sit', goal: 'Babysit', type: 'implement', owns: ['src/sit'], dependsOn: ['dep'], agent: 'claude', tier: 'complex', why: 'Fixture', brief: f.brief('sit', { hold: true }) },
+  ] });
+  await f.command(['plan', run.id, file]);
+  // A read-only dependency counts as integrated once it has finished and is closed.
+  await f.start(run, 'dep', { agent: 'codex', flags: ['--read-only'] }); await f.finished(run, 'dep');
+  await f.command(['close', run.id, 'dep']);
+  // The babysitter waits for memory, read from a file the test changes; its first poll is held.
+  const gate = pollGate(f, 'start'), free = path.join(f.root, 'free');
+  fs.writeFileSync(free, '1');
+  const memory = preload(f, 'memory-file', `const fs=require('fs'),read=fs.readdirSync;fs.readdirSync=function(...args){process.env.AGENT_ORCH_HEAVY_FREE_BYTES=fs.readFileSync(${JSON.stringify(free)},'utf8');return read.apply(this,args)};`);
+  const sitter = child(t, f, ['start', run.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture babysitter', '--brief', f.brief('sit', { hold: true }), '--wait', '10m', '--json'],
+    { AGENT_ORCH_MIN_FREE_AGENT: '1.5GB', NODE_OPTIONS: `${gate.env.NODE_OPTIONS} ${memory.NODE_OPTIONS}` });
+  await gate.ready();
+  try {
+    assert.match(sitter.output(), /waiting:.*available memory/);
+    // Meanwhile the dependency is resumed, so it is no longer integrated.
+    const resumed = await f.json(['start', run.id, 'dep', '--agent', 'codex', '--read-only', '--no-escalate', '--why', 'Rework', '--brief', f.brief('dep-again', { hold: true })]);
+    await f.ready(resumed);
+    fs.writeFileSync(free, '9999999999');
+  } finally { gate.release(); }
+  const result = await sitter.done; assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /cannot start sit: waits on dep \(not integrated\)/);
+  assert.equal(fs.existsSync(f.taskFile(run, 'sit')), false);
+  assert.equal(fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).length, 1);
+});
+
+test('review: dispatch waits for a busy machine lock once per wave, and --follow ends at its timeout', async (t) => {
+  const f = await fixture(t), a = await f.newRun(), c = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '4';
+  const file = path.join(f.root, 'plan.json'), ids = ['p1', 'p2', 'p3'];
+  writeJson(file, { goal: 'Busy lock', tasks: ids.map((id) => ({ id, goal: 'Inspect', type: 'research', owns: [], dependsOn: [], agent: 'codex', tier: 'standard', why: 'Fixture', readOnly: true, brief: f.brief(id, { hold: true }) })) });
+  await f.command(['plan', c.id, file]);
+  const hold = heldCount(f, 'wave'); const one = child(t, f, argsFor(f, a, 'one'), hold.env); await hold.ready();
+  const busy = /machine-wide admission lock .* stayed busy/;
+  try {
+    // The dispatch's clock moves only when the test moves it: a second wait for the lock would never end.
+    const clock = testClock(f, 'wave');
+    const wave = child(t, f, ['dispatch', c.id, '--json'], clock.env);
+    await eventually(() => tickets(f) === 2, 'dispatch did not queue for the lock', 20000);
+    clock.set(3500);
+    await eventually(() => wave.proc.exitCode !== null, 'dispatch waited for the lock again after it was busy', 20000);
+    const listed = await wave.done; assert.equal(listed.code, 0, listed.stderr);
+    const result = JSON.parse(listed.stdout);
+    assert.deepEqual(result.failed, []); assert.deepEqual(result.started, []);
+    assert.deepEqual(result.waitingForMachine.map((w) => w.id), ids);
+    for (const w of result.waitingForMachine) assert.match(w.reason, busy);
+    // --follow with a one-second timeout: its lock wait ends at that deadline, and it times out.
+    const follow = child(t, f, ['dispatch', c.id, '--follow', '--timeout', '1s', '--json'], clock.env);
+    await eventually(() => tickets(f) === 2, 'dispatch --follow did not queue for the lock', 20000);
+    clock.set(5000);
+    await eventually(() => follow.proc.exitCode !== null, 'dispatch --follow did not end at its timeout', 20000);
+    const followed = await follow.done; assert.equal(followed.code, 3, followed.stderr);
+    const data = JSON.parse(followed.stdout);
+    assert.equal(data.reason, 'timeout'); assert.deepEqual(data.waitingForMachine.map((w) => w.id), ids);
+    for (const id of ids) assert.equal(fs.existsSync(f.taskFile(c, id)), false);
+  } finally { hold.release(); }
+  assert.equal((await one.done).code, 0);
+});

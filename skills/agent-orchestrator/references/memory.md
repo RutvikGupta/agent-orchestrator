@@ -57,12 +57,18 @@ The count is read from the live relays each time, not from a persistent counter,
 the start share one machine-wide lock, so two starts at the same moment cannot both take the last
 place. During an interrupt, a live claim keeps one place between the old relay stopping and its
 replacement starting; the claim and relay never count twice. Dead holders release the lock.
-A stopped holder is revoked and must check again when it continues.
+A stopped holder is revoked and must check again when it continues. The limit controls load and is
+not a hard guarantee: a start that the system pauses at the moment it spawns its agent can put one
+task over the limit.
 
 - A new start waits up to 30 seconds for the lock; with `--wait`, until the `--wait` deadline, and
   it tries once more there. If another start still holds the lock, it refuses with exit 7 and names
   the busy lock as the reason, so `--wait` retries and `dispatch` lists the task as waiting. It
   never starts uncounted because the lock was busy.
+- `dispatch` waits at most three seconds for the lock per task, and never past the `--follow`
+  deadline. Once the lock is busy, it lists the wave's other agent tasks as waiting for the same
+  reason without trying them; `--follow` then checks its timeout and inbox and tries again on its
+  next pass.
 - The replacement of an agent that held a place (below) waits three seconds for the lock, then
   starts without it.
 - If the lock cannot be read or written, or the process start time cannot be read, one note is
@@ -77,7 +83,10 @@ When a start does not pass:
 
 - `start` validates the request first. A bad request keeps its usual error and exit code.
   A valid request refused by admission prints the reasons, starts nothing and exits 7.
-  `--wait` validates once, including any pull-request read, then repeats only the admission.
+  `--wait` checks the request once, including any pull-request read. Before each try it checks
+  again what can change while it waits: the plan's dependencies and conflicts with running tasks,
+  the run's parallel limit, and other writers in the same folder. Those refuse with their usual
+  message and exit code.
 - `--force` does not bypass it. It skips plan checks only (`references/dispatch.md`).
 - A resume or a rework is a new start, so it is checked the same way.
 - The agent that takes the place of one that ended does not wait for the count. This covers a

@@ -26,10 +26,11 @@ $ORCH dispatch <run> [--max N] [--dry-run] [--follow [--timeout DUR]]
 - A ready task that shares an owned path or a resource with a running task waits. It is listed,
   not refused, and starts on a later `dispatch`.
 - A ready agent task that the machine cannot take now waits too: the machine-wide agent limit is
-  reached, available memory is low, or macOS memory pressure is critical. It is listed as
-  `ready, waiting <task>: <reason>`, never as a failure, and `dispatch` does not exit 1 for it. A
-  later `dispatch`, or `dispatch --follow`, starts it when there is room. Command tasks are not
-  checked.
+  reached, available memory is low, macOS memory pressure is critical, or another start held the
+  machine-wide lock for three seconds. It is listed as `ready, waiting <task>: <reason>`, never as
+  a failure, and `dispatch` does not exit 1 for it. A later `dispatch`, or `dispatch --follow`,
+  starts it when there is room. After a busy lock, the wave's other agent tasks wait for the same
+  reason without being tried. Command tasks are not checked.
 - It lists the tasks still blocked and what each waits on. It never starts a planned babysitter,
   which needs a pull request number: it lists the `start` command instead (`SKILL.md`, step 8).
 - `--dry-run` lists what it would start.

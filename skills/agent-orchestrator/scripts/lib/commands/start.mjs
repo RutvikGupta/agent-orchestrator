@@ -194,20 +194,16 @@ export function startTask(args, extra = {}) {
   }
 }
 
-// Every check of a start that does not depend on the machine, done once. Returns the function that
-// takes the machine lock, checks admission and launches; `start --wait` calls it again while the
-// machine is full, so a slow check such as the pull-request read runs only once.
-function prepareStart(args, extra = {}) {
-  if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
-    refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
-  }
-  const run = loadRun(args._[0]);
-  const id = validTask(args._[1]);
+// The plan's checks on a task's first start, against the tasks that run now: it must be in the plan
+// (or --unplanned), its dependencies integrated, and it must not share an owned path or a resource
+// with a running task; --force skips the last two. Run when a start is validated and again at each
+// launch attempt, since a start that waits for the machine sees the run change meanwhile. Returns the
+// plan fields to record in the task.
+function planChecks(run, id, args, previous, { note = false } = {}) {
   const plan = readPlan(run.dir);
   const entry = plan?.tasks.find((task) => task.id === id);
-  const previous = loadTask(run, id);
-  const rows = listTasks(run);
   if (plan && !previous?.attempt) {
+    const rows = listTasks(run);
     if (!entry && !args.unplanned && !previous?.unplanned) {
       refuse(`task ${id} is not in the plan; add it with plan, or pass --unplanned to record the exception`);
     }
@@ -231,10 +227,25 @@ function prepareStart(args, extra = {}) {
       ].filter(Boolean);
       refuse(`cannot start ${id}: ${reasons.join("; ")}; --force overrides the plan checks`);
     }
-    extra = { ...extra, ...(entry ? { plan: entry } : { unplanned: true, unplannedAt: previous?.unplannedAt || new Date().toISOString() }) };
-  } else if (!plan && !previous?.attempt && rows.filter((row) => row.attempt).length === 2) {
+    return entry ? { plan: entry } : { unplanned: true, unplannedAt: previous?.unplannedAt || new Date().toISOString() };
+  }
+  if (note && !plan && !previous?.attempt && listTasks(run).filter((row) => row.attempt).length === 2) {
     process.stderr.write(`note: this run is reaching its third task without a plan; use node ${CLI_PATH} plan ${run.id} FILE to coordinate dependencies and owned paths\n`);
   }
+  return {};
+}
+
+// Every check of a start that does not depend on the machine, done once. Returns the function that
+// takes the machine lock, checks admission and launches; `start --wait` calls it again while the
+// machine is full, so a slow check such as the pull-request read runs only once.
+function prepareStart(args, extra = {}) {
+  if (DEPTH >= MAX_NEST_DEPTH && !args["allow-nested"]) {
+    refuse(`refusing to dispatch: this agent is ${DEPTH} levels below the user's session, the most allowed (AGENT_ORCH_MAX_DEPTH=${MAX_NEST_DEPTH}); do the work yourself`);
+  }
+  const run = loadRun(args._[0]);
+  const id = validTask(args._[1]);
+  const previous = loadTask(run, id);
+  extra = { ...extra, ...planChecks(run, id, args, previous, { note: true }) };
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
   if (key === COMMAND_AGENT) return () => startCommand(run, id, args, extra);
   if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
@@ -347,6 +358,8 @@ function prepareStart(args, extra = {}) {
     if (!args.check && relayAlive(current.pid, current.startedAt, current.outDir)) refuse(`task ${id} is already running`);
     // Another start that began and ended meanwhile: this one was validated against the attempt before.
     if ((current.attempt || 0) !== (prev.attempt || 0)) refuse(`task ${id} was started meanwhile, in attempt ${current.attempt}, so this start started nothing; run \`status\` to see it`);
+    // The plan's constraints and the run's limits as they are now, not as validation saw them.
+    const fields = { ...extra, ...planChecks(run, id, args, previous) };
     checkSlots(run, id, args, cd, { writes: !args["read-only"] });
     if (admissionEnabled()) {
       const reason = admissionReason(undefined, { replacement: replacement || !locked });
@@ -462,7 +475,7 @@ function prepareStart(args, extra = {}) {
       // Each attempt reports to the task that started it, even after a later attempt starts.
       attemptStartedBy: { ...(prev.attemptStartedBy || {}), [attempt]: startedBy },
       resumedBy: null, // who resumed this attempt by hand (cmdStart passes it), not a park or retry resume
-      ...extra,
+      ...fields,
     };
     // A close or stop that came while this resume was starting (since its claim's holder first saw
     // the task) wins: start nothing.
@@ -477,6 +490,10 @@ function prepareStart(args, extra = {}) {
     }
     let child;
     try {
+      // The last revocation check. A start that the system pauses after it and before the relay is
+      // spawned can be revoked by another start, which then takes the place, and still spawn when it
+      // continues: one agent over the limit. The limit controls load and is not a hard guarantee;
+      // waiting on a stopped holder instead would let one paused process block every start.
       owner();
       child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
     } catch (error) {
