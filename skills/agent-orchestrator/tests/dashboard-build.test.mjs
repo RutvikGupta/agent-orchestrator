@@ -14,8 +14,9 @@ import { eventually, fixture, readJson } from './helpers.mjs';
 // Server: its clock stands still at its start plus the milliseconds in ctl/clock. The timers whose
 // callbacks are named in TIMERS never fire on their own: ctl/timers logs each one set, cleared or
 // fired, with its delay, and the test fires them. On SIGUSR2 the server runs the commands in ctl/do
-// ("check" runs the escalation checks, which otherwise never run; "fire NAME" fires the pending
-// timers of that name), then logs to ctl/acks. ctl/watched logs each file event after the server
+// ("check" runs the escalation checks, which otherwise never run; "housekeep" runs the five-minute
+// housekeeping, which otherwise never runs either; "fire NAME" fires the pending timers of that
+// name), then logs to ctl/acks. ctl/intervals logs the name of each interval timer the server sets. ctl/watched logs each file event after the server
 // handled it, and ctl/sends each build request to a worker. ctl/forkthrow makes the next fork throw;
 // ctl/sendthrow, ctl/senderror and ctl/childerror make the next build request throw, fail in its
 // callback, or emit an error on the child, while the worker stays alive.
@@ -65,11 +66,12 @@ if (ctl && process.argv[2] === 'dashboard') {
     if (!timer || !timer.fakeTimer) return realClearTimeout.call(this, timer);
     if (pending.delete(timer.fakeTimer)) log('timers', 'clear ' + timer.fakeTimer);
   };
-  const checks = [];
+  const checks = [], chores = [];
   const every = globalThis.setInterval;
   globalThis.setInterval = function (fn, ...rest) {
-    if (fn && fn.name === 'checkAttention') {
-      checks.push(fn);
+    log('intervals', String(fn && fn.name));
+    if (fn && (fn.name === 'checkAttention' || fn.name === 'housekeeping')) {
+      (fn.name === 'checkAttention' ? checks : chores).push(fn);
       return every(() => {}, 2 ** 30).unref();
     }
     return every.call(this, fn, ...rest);
@@ -78,6 +80,7 @@ if (ctl && process.argv[2] === 'dashboard') {
     for (const command of fs.readFileSync(at('do'), 'utf8').split('\n').filter(Boolean)) {
       const [verb, name] = command.split(' ');
       if (verb === 'check') for (const fn of checks) fn();
+      if (verb === 'housekeep') for (const fn of chores) fn();
       if (verb === 'fire') {
         for (const [id, timer] of [...pending]) {
           if (timer.name !== name || !pending.delete(id)) continue;
@@ -324,7 +327,7 @@ test('health answers during the first build; state waits 10 seconds for the firs
     },
   });
   await eventually(() => b.exists('blocked'), 'the first build did not start');
-  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [30_000], 'the default build deadline is 30 seconds');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [300_000], 'the default first-build deadline is 5 minutes');
   const first = b.get('/api/state');
   const [wait] = await eventually(() => b.pending('answerWaitingRead').length && b.pending('answerWaitingRead'), 'the read did not wait');
   assert.equal(wait.ms, 10_000);
@@ -649,4 +652,81 @@ test('when the first build fails, state answers 503 with the reason at once, not
   assert.equal(r.headers.get('x-orch-error'), 'cannot read runs');
   assert.deepEqual(await r.json(), { error: 'cannot read runs' });
   assert.deepEqual(b.pending('answerWaitingRead'), [], 'a read waited although the reason was known');
+});
+
+test('a bad AGENT_ORCH_FIRST_BUILD_TIMEOUT stops startup with the usage code', async (t) => {
+  const f = await fixture(t);
+  const result = await f.command(['dashboard', '--host', '127.0.0.1', '--port', '0'], { code: 2, env: { AGENT_ORCH_FIRST_BUILD_TIMEOUT: 'later' } });
+  assert.match(result.stderr, /bad duration "later"/);
+  assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false);
+});
+
+test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT', async (t) => {
+  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
+  await eventually(() => b.exists('blocked'), 'the first build did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
+  // A read waits for the first board, through the lost build and its replacement.
+  const waiting = b.get('/api/state');
+  await eventually(() => b.pending('answerWaitingRead').length === 1, 'the read did not wait for the first board');
+  await b.control('fire overdueBuild');
+  await eventually(() => b.output().includes('state build timed out after 90s'), `the first build was not stopped at its deadline:\n${b.output()}`);
+  // Its replacement is a first build too.
+  await eventually(() => b.builds().length === 2 && b.pending('overdueBuild').length === 1, 'the replacement did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
+  assert.equal((await waiting).status, 200, 'the waiting read did not get the first board');
+  await b.settled();
+  await eventually(() => fs.existsSync(path.join(b.f.state, 'dashboard.json')), 'the dashboard was not announced after its first board');
+  b.remove('blocked');
+  b.touch('hang');
+  await b.rebuild();
+  await eventually(() => b.exists('blocked'), 'the later build did not hang');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000]);
+  b.touch('release');
+  await b.settled();
+});
+
+test('the first build\'s limit is never shorter than the later builds\' one', async (t) => {
+  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '10m' }, prepare: async (b) => b.touch('hang') });
+  await eventually(() => b.exists('blocked'), 'the first build did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [600_000]);
+  b.touch('release');
+  await b.settled();
+});
+
+// A run whose launching session has ended (its PID names no process), idle for three hours, with a
+// closed task's clean worktree; or, with `live`, one that this test's own process launched.
+async function idleRun(b, name, { live = false } = {}) {
+  const run = await b.f.newRun(name);
+  const wt = await b.f.json(['worktree', run.id, 'old', '--no-prep']);
+  const old = new Date(Date.now() - 3 * 3600000).toISOString();
+  const file = b.f.taskFile(run, 'old');
+  fs.writeFileSync(file, JSON.stringify({ ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 }));
+  fs.utimesSync(file, new Date(old), new Date(old));
+  const runFile = path.join(run.dir, 'run.json');
+  fs.writeFileSync(runFile, JSON.stringify({ ...readJson(runFile), createdAt: old, orchestrator: { agent: live ? 'codex' : 'claude', sessionId: live ? 'dashboard-session' : 'ended-session', pid: live ? process.pid : 99999999, lastSeenAt: old } }));
+  return { run, wt };
+}
+
+test('housekeeping collects unused worktrees as the user, whoever started the dashboard, and logs each one', async (t) => {
+  let ended, live;
+  // The dashboard runs in a live session's environment; its collection must not take that
+  // session's run for its own. The disk is low, so one hour of rest is enough.
+  const session = { CLAUDE_CODE_SESSION_ID: 'dashboard-session', CODEX_THREAD_ID: 'dashboard-session' };
+  const b = await setup(t, {
+    env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB', ...session },
+    prepare: async (b) => { ended = await idleRun(b, 'ended'); live = await idleRun(b, 'live', { live: true }); },
+  });
+  assert.ok(b.lines('intervals').includes('housekeeping'));
+  await b.control('housekeep');
+  await eventually(() => b.output().includes('auto gc freed'), `the collection did not run:\n${b.output()}`);
+  assert.ok(b.output().includes(`orch: auto gc removed worktree ${ended.wt.path} (run ${ended.run.id}, task old, `), b.output());
+  assert.match(b.output(), /orch: auto gc freed \S+ \S+ from 1 worktree; disk 20 GB free\n/);
+  assert.equal(fs.existsSync(ended.wt.path), false);
+  assert.equal(fs.existsSync(live.wt.path), true, 'the collection took the live session\'s worktree');
+});
+
+test('with AGENT_ORCH_AUTO_GC=off and AGENT_ORCH_RECLAIM=off the dashboard sets no housekeeping', async (t) => {
+  const b = await setup(t, { env: { AGENT_ORCH_AUTO_GC: 'off' } });
+  await eventually(() => b.output().includes('dashboard: http'), 'the dashboard did not finish starting');
+  assert.ok(!b.lines('intervals').includes('housekeeping'), b.lines('intervals').join(', '));
 });
