@@ -107,8 +107,11 @@ full. The details are in `references/memory.md`, "Agent admission".
   least 4). Available memory must not be below `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`), and
   macOS memory pressure must not be critical.
 - `AGENT_ORCH_MAX_TOTAL=0` turns off the count, and the memory checks too unless
-  `AGENT_ORCH_MIN_FREE_AGENT` is set. Set it to keep the memory checks with the count off.
-- A refusal exits 7 and starts nothing. `--force` cannot bypass it. A command task is never checked.
+  `AGENT_ORCH_MIN_FREE_AGENT` is set. Set `AGENT_ORCH_MIN_FREE_AGENT` to keep the memory checks
+  with the count off.
+- A refusal exits 7 and starts nothing. So does a start that cannot take the machine-wide lock
+  within 30 seconds, because another start holds it. `--force` cannot bypass either. A command task
+  is never checked.
 - A malformed `AGENT_ORCH_MAX_TOTAL` or `AGENT_ORCH_MIN_FREE_AGENT` is a usage error: `start`,
   `dispatch` and `agents` exit 2.
 - A resume or a rework is checked like a new start. The replacement of an agent that ended (a parked
