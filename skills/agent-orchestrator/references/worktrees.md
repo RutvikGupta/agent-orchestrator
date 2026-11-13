@@ -63,9 +63,10 @@ Every worktree is created after one check of the free space on the volume that w
   turns the check off.
 - Below the minimum, the command first runs the automatic collection ("Automatic collection"
   below, with the 1-hour age), then reads the disk again. If it is still below the minimum, it
-  refuses and creates nothing. The message gives the free space, the minimum, and the commands
-  that free space: `gc --dry-run`, `gc`, `close RUN TASK...`, and `git worktree remove` for a
-  worktree made by hand.
+  refuses with exit code 1 and creates nothing: no folder, no branch. The message gives the free
+  space, the minimum, and the commands that free space: `gc --dry-run`, `gc`,
+  `close RUN TASK...`, and `git worktree remove` for a worktree made by hand. `dispatch` reports it
+  as that task's refusal.
 - No option bypasses the check. Only the setting changes it.
 - The disk counts as low below twice the minimum. The dashboard's header then shows the free space
   as a warning, and the automatic collection collects sooner (`references/dashboard.md`).
@@ -113,7 +114,7 @@ reported and does not keep the worktree. A `teardown` that leaves tracked change
 ### `gc`
 
 ```bash
-$ORCH gc [--dry-run] [--older-than DUR] [--json]
+$ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
 ```
 
 - It takes no run. It looks at the runs the caller may act on (`references/ownership.md`): at a
