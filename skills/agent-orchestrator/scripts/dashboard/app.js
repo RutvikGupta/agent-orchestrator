@@ -136,11 +136,13 @@ document.addEventListener("pointerdown",e=>{pressed=e.target},true);
 document.addEventListener("pointerup",release,true);
 document.addEventListener("pointercancel",release,true);
 document.addEventListener("selectionchange",()=>{if(getSelection().isCollapsed)catchUp()});
-async function refresh(){
+async function refresh(cached){
   // Reads overlap (a click, a push and the timer all start one). One that started earlier but answers
   // after a newer one is dropped, so the board never steps back to a state before a message was stored.
+  // `cached` is a board text already read: it is drawn again without a read, and the header's
+  // marks, which describe a read, stay as they are.
   const mine=refresh.sent=(refresh.sent||0)+1;
-  let text,heavy={running:0,waiting:0},stale=null;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
+  let text=cached,heavy={running:0,waiting:0},stale=null,heavyText="";if(cached==null){try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
   if(mine<(refresh.applied||0))return;refresh.applied=mine;
   // The mark follows every answer, whether or not the board changed: a green dot while the board is
   // current, red "stale: <reason>" while it is a cached one (or the server has none to send yet).
@@ -149,8 +151,9 @@ async function refresh(){
     st.title=(stale.failed?"no board from the server":"showing a cached board"+(stale.age==null?"":", "+dur(stale.age*1000)+" old"))+": "+stale.why+" · checked "+now}
   else{st.className="live";st.textContent="";st.title="updated "+now}
   if(stale?.failed)return; // an error body is not a board: the one on the page stays
-  const heavyText=" · heavy: "+heavy.running+" running, "+heavy.waiting+" waiting";
-  const grand=document.getElementById("grand");grand.textContent=grand.textContent.replace(/ · heavy:.*$/, "")+heavyText;
+  heavyText=" · heavy: "+heavy.running+" running, "+heavy.waiting+" waiting";
+  const grand=document.getElementById("grand");grand.textContent=grand.textContent.replace(/ · heavy:.*$/, "")+heavyText;}
+  else heavyText=(document.getElementById("grand").textContent.match(/ · heavy:.*$/)||[""])[0];
   if(text===lastState)return;if(holding(document.getElementById("runs"))){behind=true;return}lastState=text;state=JSON.parse(text);
   let tin=0,tout=0,running=0;
   const root=document.getElementById("runs");
@@ -671,7 +674,9 @@ function dropOrder(d,at){const all={...orders};let name="sections",memo;
     const same=x=>sameParent(x,t);memo=dropMemo(run.tasks.filter(same).map(x=>x.key),treeRows(run,all).filter(same).map(x=>x.key),d.key,at.target,at.after)}
   if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];orders=all;saveOrders();return true}
 function endDrag(changed){markDrop(null);for(const el of document.getElementById("runs").querySelectorAll(".dragging"))el.classList.remove("dragging");
-  dragged=null;pressed=null;if(changed){behind=true;lastState=""}setTimeout(()=>catchUp(),0)}
+  // A drop shows at once, from the board already on the page: a read can take seconds on a busy
+  // machine, and the item would sit in its old place meanwhile. The catch-up read follows.
+  const shown=lastState;dragged=null;pressed=null;if(changed){behind=true;lastState="";if(shown)refresh(shown)}setTimeout(()=>catchUp(),0)}
 (()=>{const root=document.getElementById("runs");
   root.addEventListener("dragstart",e=>{const g=e.target?.closest?.(".grip");if(!g)return; // other drags, such as selected text, stay the browser's
     const row=g.closest("tbody.session[data-key]"),sec=g.closest(".run[data-run]");if(!sec)return;

@@ -65,7 +65,7 @@ test('text selection and pointer holds survive refresh until the reader releases
     getSelection: () => selection, setTimeout: (fn) => fn(),
     refresh: async () => { refreshed++; }, detail: () => { detailed++; }, lastState: 'before', lastDetail: 'before',
   });
-  vm.runInContext(snippet('let pressed=null,behind=false;', 'async function refresh()'), context);
+  vm.runInContext(snippet('let pressed=null,behind=false;', 'async function refresh('), context);
   assert.equal(vm.runInContext('holding(document.getElementById("runs"))', context), true);
   vm.runInContext('behind=true;catchUp()', context);
   assert.equal(refreshed, 0);
@@ -89,7 +89,7 @@ test('a new dashboard server reloads the browser and SSE change calls the refres
     server: 'old-server', fetch: async () => ({ headers: { get: () => 'new-server' } }),
     location: { reload: () => reloaded++ }, keepState: () => kept++,
   });
-  vm.runInContext(snippet('async function refresh()', '// The agent\'s structured report'), context);
+  vm.runInContext(snippet('async function refresh(', '// The agent\'s structured report'), context);
   await context.refresh();
   assert.equal(reloaded, 1);
   assert.equal(kept, 1, 'the tab keeps its chosen row and drafts across the reload');
@@ -350,9 +350,9 @@ function boardPage({ realHold = false } = {}) {
     pick: (row) => page.picked.push(row), setTimeout: (fn) => page.timers.push(fn),
     ...(realHold ? {} : { holding: () => page.held }),
   });
-  if (realHold) vm.runInContext(snippet('let pressed=null,behind=false;', 'async function refresh()'), context);
+  if (realHold) vm.runInContext(snippet('let pressed=null,behind=false;', 'async function refresh('), context);
   vm.runInContext(app.slice(0, app.indexOf('// Choosing a row')), context);
-  vm.runInContext(snippet('async function refresh()', "// The agent's structured report"), context);
+  vm.runInContext(snippet('async function refresh(', "// The agent's structured report"), context);
   vm.runInContext(snippet('document.getElementById("runs").addEventListener("click"', '// Ask once'), context);
   page.refresh = () => context.refresh();
   page.run = (code) => vm.runInContext(code, context);

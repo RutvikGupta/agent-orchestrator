@@ -989,7 +989,12 @@ test('a row dragged by its grip keeps its place across redraws and a reload, unt
   assert.equal(row('gamma'), dragging);
   // The drop puts gamma before alpha, and the board redraws (the poll stands in for the catch-up timer).
   await over(row('alpha'));
+  // The drop shows at once, from the board already on the page: no read is needed, so it shows even
+  // while the server cannot be reached.
+  page.board.down = true;
   await runs.dispatch('drop', { target: row('alpha'), dataTransfer: data, clientY: 0 });
+  assert.deepEqual(order(), ['gamma', 'alpha', 'beta'], 'the drop is drawn before any read');
+  page.board.down = false;
   await runs.dispatch('dragend', { target: grip });
   await page.poll();
   assert.deepEqual(order(), ['gamma', 'alpha', 'beta']);
