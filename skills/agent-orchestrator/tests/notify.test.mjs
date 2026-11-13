@@ -158,7 +158,8 @@ test('a top-level run sends no notice; a stopped child still notifies, from outs
   const record = await notice(child, 'held');
   assert.equal(record.state, 'stopped');
   const sent = inboxOf(parent, 'lead').find((m) => m.id === record.message);
-  assert.match(sent.text, new RegExp(`^Agent ${child.id}/held \\(attempt 1\\) failed \\(stopped\\): `));
+  // A stop is no failure: the notice says who stopped it.
+  assert.match(sent.text, new RegExp(`^Agent ${child.id}/held \\(attempt 1\\) was stopped by user \\(terminal\\); it did not fail\\.\\n`));
   assert.equal((await f.json(['status', child.id])).tasks.find((row) => row.id === 'held').state, 'stopped');
 });
 
