@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A babysitter parks when the `PARKED:` line is the last line of its final message, as well as
+  when it is the first. An agent told to end with the line was recorded as completed, with no
+  watcher on its pull request. `status` starts the watcher of an attempt that ended that way.
+
 ## 2.2.0 (2026-11-12)
 
 - An interrupt reaches a running agent in every state. `send --steer`, `steer` and the dashboard's

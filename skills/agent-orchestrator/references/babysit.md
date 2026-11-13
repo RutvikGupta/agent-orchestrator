@@ -88,6 +88,8 @@ It waits with `orch.mjs pr-watch`, which spends no tokens while waiting. `pr-wat
 
 - It ends its turn with a final message whose first line is `PARKED: PR #<n> waits for <what>`, and
   its agent exits.
+  The line also parks as the last line of the message's text; a `PARKED:` line in the middle,
+  quoted or indented does not, and the task then ends as completed with nobody watching.
 - A watcher of about 3 MB (a shell loop) then checks the pull request every minute and the task's
   inbox every few seconds. On the first event it resumes the same session, at the same tier.
 - `status` and the dashboard show the task as parked, with what it waits for. `wait` treats it as

@@ -415,16 +415,22 @@ console.log(JSON.stringify({ rows: measure(() => reviveParked(run, rows)), recor
   await eventually(() => watchers(run, 'sit', 1).length === 1, 'the revived watcher did not start');
 });
 
-test('only an unquoted, unindented PARKED: first line parks, and an orch-result outcome must agree', () => {
+test('only an unquoted, unindented PARKED: first or last line parks, and an orch-result outcome must agree', () => {
   const report = (outcome) => `\n\`\`\`orch-result\n{"outcome":"${outcome}","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n\`\`\``;
   assert.equal(parkedSignal(`PARKED: PR #42 waits for a review${report('parked')}`), 'PR #42 waits for a review');
   assert.equal(parkedSignal('PARKED: PR #42 waits for a review\nNo report block.'), 'PR #42 waits for a review');
+  // An agent told to end with the line puts it last: that parks too, with or without a report block.
+  assert.equal(parkedSignal('Approved; two checks pending.\n\n- detail\n\nPARKED: PR #42 waits for the merge queue\n'), 'PR #42 waits for the merge queue');
+  assert.equal(parkedSignal(`Done.\nPARKED: PR #42 waits for a review${report('parked')}`), 'PR #42 waits for a review');
   for (const message of [
     `> PARKED: quoted example\nActually completed.${report('done')}`,
     `> PARKED: quoted example${report('parked')}`,
     `  PARKED: indented${report('parked')}`,
     `**PARKED:** bold${report('parked')}`,
-    `Done.\nPARKED: on a later line${report('parked')}`,
+    `Done.\nPARKED: in the middle\nMore text.${report('parked')}`,
+    `Done.\n> PARKED: quoted last line${report('parked')}`,
+    `Done.\nPARKED: last line${report('done')}`,
+    'Done.\nPARKED: last line\nNEEDS DECISION:\n- Merge or wait?',
     `PARKED: PR #42 waits for a review${report('done')}`,
     'PARKED: PR #42 waits\n```orch-result\nnot json\n```',
     'PARKED: PR #42 waits\nNEEDS DECISION:\n- Merge or wait?',

@@ -265,7 +265,7 @@ function reportOutcome(message) {
 }
 
 // Parking (park.mjs). A pull-request babysitter that has nothing left to do ends its turn with a
-// final message whose first line starts with `PARKED:` (and an orch-result outcome `parked`). Its
+// final message whose first (or last) line starts with `PARKED:` (and an orch-result outcome `parked`). Its
 // relay and agent exit, and a small watcher resumes the same session on the next event. Until then
 // describe() reports the task as running, in phase `parked`, so `wait` keeps waiting for it. Each
 // parked attempt's folder holds the park's files: park-watcher-<k>.json, one per watcher started
@@ -282,13 +282,19 @@ const WATCHER_GRACE_MS = 15000;
 const CLAIM_GRACE_MS = 60000; // a claim that names no owner counts as live this long
 
 // What a final message says the babysitter waits for ("PR #42 waits for a human review"), or null
-// when it does not park. Its first line must start with `PARKED:` itself, neither quoted nor
-// indented. When it has an orch-result block, that block's outcome must be `parked` too: a message
-// whose two signals disagree does not park. A message that hands back a decision does not park.
+// when it does not park. A line that starts with `PARKED:` itself, neither quoted nor indented,
+// must be the message's first line, or the last line of its text (before an orch-result block):
+// agents asked to "end with" the line put it there, and a babysitter that meant to park must not
+// end unwatched. A `PARKED:` line in the middle does not park. When the message has an orch-result
+// block, that block's outcome must be `parked` too: a message whose two signals disagree does not
+// park. A message that hands back a decision does not park.
 export function parkedSignal(message) {
   const text = String(message || "");
-  const first = text.split("\n").find((line) => line.trim());
-  const m = first ? PARKED_RE.exec(first.replace(/\r$/, "")) : null;
+  const body = text.split(/^[\t ]*```orch-result[\t ]*\r?$/m)[0];
+  const lines = body.split("\n").filter((line) => line.trim());
+  const m = [lines[0], lines[lines.length - 1]]
+    .map((line) => (line ? PARKED_RE.exec(line.replace(/\r$/, "")) : null))
+    .find(Boolean);
   if (!m) return null;
   const report = reportOutcome(text);
   if ((report.present && report.outcome !== "parked") || report.decisions || decisionsIn(text)) return null;
