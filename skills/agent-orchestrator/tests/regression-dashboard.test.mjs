@@ -455,6 +455,7 @@ test('a press holds the board until it ends, so the click lands on the element p
 
 test('a section dragged by the grip in its header holds its place until the automatic order of the sections changes', async () => {
   const page = boardPage({ realHold: true }), { root } = page;
+  page.run(snippet('// Dragging a section by the grip', '// Jump to the top'));
   page.board = [boardSection('s1'), boardSection('s2'), boardSection('s3')];
   await page.refresh();
   const order = () => root.querySelectorAll('.run').map((s) => s.dataset.run);

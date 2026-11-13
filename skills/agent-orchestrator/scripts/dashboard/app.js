@@ -102,50 +102,6 @@ document.getElementById("runs").addEventListener("pointerover",e=>{const row=e.t
 document.getElementById("runs").addEventListener("focusin",e=>{if(refocusing)return;const row=e.target.closest("tbody.session");if(row&&row.dataset.key!==sel)preload(row.dataset.key)});
 document.getElementById("runs").addEventListener("keydown",e=>{if(e.key!=="Enter")return;const a=e.target.closest(".attn[data-key]");if(a)return reveal(a.dataset.key);
   pick(e.target.closest("tbody.session"))});
-// Dragging a section by the grip in its header, or a row by the grip at its start, among the items of
-// its list (the order rule is described above `heldOrder`). Only a grip is draggable, so clicks, arrows, text
-// selection and the message box's image drop work as before. The board holds still while a drag
-// runs (`holding`), a line marks where the item would land, and the board catches up after the drop.
-let dropMark=null; // `dragged` is with the press hold below
-const DRAG_TYPE="application/x-orch-order"; // not text, so no text field takes the drop
-function markDrop(el,after){if(dropMark&&(dropMark.el!==el||dropMark.after!==after))dropMark.el.classList.remove("drop-before","drop-after");
-  dropMark=el?{el,after}:null;if(el)el.classList.add(after?"drop-after":"drop-before")}
-// The last row drawn for `key`'s subtree in its section, where a line after it is drawn.
-function blockEnd(sec,run,key){const rows=[...sec.querySelectorAll("tbody.session")],byKey=new Map(run.tasks.map(t=>[t.key,t]));
-  const under=k=>{for(let p=byKey.get(k)?.parentKey;p;p=byKey.get(p)?.parentKey)if(p===key)return true;return false};
-  let i=rows.findIndex(b=>b.dataset.key===run.id+"/"+key);if(i<0)return null;while(rows[i+1]&&under(rows[i+1].dataset.key.split("/")[1]))i++;return rows[i]}
-const lowerHalf=(e,el)=>{const r=el.getBoundingClientRect();return e.clientY>r.top+r.height/2};
-// Where the dragged item would land under the pointer: {mark, after, target}, or null where it cannot.
-function dropAt(e){const d=dragged,el=e.target?.closest?.(d?.kind==="section"?".run[data-run]":"tbody.session[data-key]");if(!d||!el)return null;
-  if(d.kind==="section"){if(el.dataset.run===d.run)return null;const after=lowerHalf(e,el);return{mark:el,after,target:el.dataset.run}}
-  const[runId,over]=el.dataset.key.split("/"),run=state.find(r=>r.id===runId);if(runId!==d.run||!run)return null;
-  const at=rowTarget(run.tasks,d.key,over,lowerHalf(e,el));if(!at)return null;
-  const sec=el.closest(".run[data-run]"),mark=at.after?blockEnd(sec,run,at.target):sec.querySelector('tbody.session[data-key="'+CSS.escape(run.id+"/"+at.target)+'"]');
-  return mark?{mark,...at}:null}
-// Remember what a drop changed for its list; true when it changed the order shown.
-function dropOrder(d,at){const all=readOrders();let name="sections",memo;
-  if(d.kind==="section")memo=dropMemo(state.map(r=>r.id),sectionOrder(state,all).map(r=>r.id),d.run,at.target,at.after);
-  else{const run=state.find(r=>r.id===d.run),t=run?.tasks.find(x=>x.key===d.key);if(!t)return false;name=listName(d.run,t.parentKey);
-    const same=x=>sameParent(x,t);memo=dropMemo(run.tasks.filter(same).map(x=>x.key),treeRows(run,all).filter(same).map(x=>x.key),d.key,at.target,at.after)}
-  if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];writeOrders(all);return true}
-function endDrag(changed){markDrop(null);for(const el of document.getElementById("runs").querySelectorAll(".dragging"))el.classList.remove("dragging");
-  dragged=null;pressed=null;if(changed){behind=true;lastState=""}setTimeout(()=>catchUp(),0)}
-(()=>{const root=document.getElementById("runs");
-  root.addEventListener("dragstart",e=>{const g=e.target?.closest?.(".grip");if(!g)return; // other drags, such as selected text, stay the browser's
-    const row=g.closest("tbody.session[data-key]"),sec=g.closest(".run[data-run]");if(!sec)return;
-    if(row){const[run,key]=row.dataset.key.split("/");dragged={kind:"row",run,key,el:row}}else dragged={kind:"section",run:sec.dataset.run,el:sec};
-    e.dataTransfer.effectAllowed="move";e.dataTransfer.setData(DRAG_TYPE,dragged.run+"/"+(dragged.key||""));
-    const shown=row||g.parentNode,r=shown.getBoundingClientRect();try{e.dataTransfer.setDragImage(shown,e.clientX-r.left,e.clientY-r.top)}catch{}
-    // The item fades while it moves, a row with every row under it.
-    const run=state.find(x=>x.id===dragged.run),byKey=new Map((run?.tasks||[]).map(t=>[t.key,t]));
-    const moves=k=>{for(let p=k;p;p=byKey.get(p)?.parentKey)if(p===dragged.key)return true;return false};
-    if(row){for(const b of sec.querySelectorAll("tbody.session"))if(moves(b.dataset.key.split("/")[1]))b.classList.add("dragging")}else sec.classList.add("dragging")});
-  const over=e=>{if(!dragged)return;const at=dropAt(e);markDrop(at?.mark,at?.after);if(!at)return;e.preventDefault();e.dataTransfer.dropEffect="move"};
-  root.addEventListener("dragenter",over);root.addEventListener("dragover",over);
-  // Out over the rest of the page, the line goes; `dragleave` cannot tell, as it fires between cells too.
-  document.addEventListener("dragover",e=>{if(dragged&&!root.contains(e.target))markDrop(null)});
-  root.addEventListener("drop",e=>{if(!dragged)return;const at=dropAt(e);if(!at)return;e.preventDefault();endDrag(dropOrder(dragged,at))});
-  root.addEventListener("dragend",()=>{if(dragged)endDrag(false)})})();
 // Ask once, only after a deliberate click on the attention count. Remember a dismissed prompt
 // too, so polling, reconnecting and reloading the dashboard never ask again.
 let notificationAsked=false;
@@ -679,6 +635,50 @@ document.getElementById("compose-file").addEventListener("change",e=>{addFiles([
   box.addEventListener("dragleave",()=>box.classList.remove("drop"));
   box.addEventListener("drop",e=>{box.classList.remove("drop");if(!hasFiles(e)||document.getElementById("compose-text").hidden)return;e.preventDefault();addFiles([...e.dataTransfer.files])})})();
 new ResizeObserver(()=>{const box=document.getElementById("compose");document.documentElement.style.setProperty("--compose-h",(box.hidden?0:box.offsetHeight)+"px")}).observe(document.getElementById("compose"));
+// Dragging a section by the grip in its header, or a row by the grip at its start, among the items of
+// its list (the order rule is described above `heldOrder`). Only a grip is draggable, so clicks, arrows, text
+// selection and the message box's image drop work as before. The board holds still while a drag
+// runs (`holding`), a line marks where the item would land, and the board catches up after the drop.
+let dropMark=null; // `dragged` is with the press hold, near the top
+const DRAG_TYPE="application/x-orch-order"; // not text, so no text field takes the drop
+function markDrop(el,after){if(dropMark&&(dropMark.el!==el||dropMark.after!==after))dropMark.el.classList.remove("drop-before","drop-after");
+  dropMark=el?{el,after}:null;if(el)el.classList.add(after?"drop-after":"drop-before")}
+// The last row drawn for `key`'s subtree in its section, where a line after it is drawn.
+function blockEnd(sec,run,key){const rows=[...sec.querySelectorAll("tbody.session")],byKey=new Map(run.tasks.map(t=>[t.key,t]));
+  const under=k=>{for(let p=byKey.get(k)?.parentKey;p;p=byKey.get(p)?.parentKey)if(p===key)return true;return false};
+  let i=rows.findIndex(b=>b.dataset.key===run.id+"/"+key);if(i<0)return null;while(rows[i+1]&&under(rows[i+1].dataset.key.split("/")[1]))i++;return rows[i]}
+const lowerHalf=(e,el)=>{const r=el.getBoundingClientRect();return e.clientY>r.top+r.height/2};
+// Where the dragged item would land under the pointer: {mark, after, target}, or null where it cannot.
+function dropAt(e){const d=dragged,el=e.target?.closest?.(d?.kind==="section"?".run[data-run]":"tbody.session[data-key]");if(!d||!el)return null;
+  if(d.kind==="section"){if(el.dataset.run===d.run)return null;const after=lowerHalf(e,el);return{mark:el,after,target:el.dataset.run}}
+  const[runId,over]=el.dataset.key.split("/"),run=state.find(r=>r.id===runId);if(runId!==d.run||!run)return null;
+  const at=rowTarget(run.tasks,d.key,over,lowerHalf(e,el));if(!at)return null;
+  const sec=el.closest(".run[data-run]"),mark=at.after?blockEnd(sec,run,at.target):sec.querySelector('tbody.session[data-key="'+CSS.escape(run.id+"/"+at.target)+'"]');
+  return mark?{mark,...at}:null}
+// Remember what a drop changed for its list; true when it changed the order shown.
+function dropOrder(d,at){const all=readOrders();let name="sections",memo;
+  if(d.kind==="section")memo=dropMemo(state.map(r=>r.id),sectionOrder(state,all).map(r=>r.id),d.run,at.target,at.after);
+  else{const run=state.find(r=>r.id===d.run),t=run?.tasks.find(x=>x.key===d.key);if(!t)return false;name=listName(d.run,t.parentKey);
+    const same=x=>sameParent(x,t);memo=dropMemo(run.tasks.filter(same).map(x=>x.key),treeRows(run,all).filter(same).map(x=>x.key),d.key,at.target,at.after)}
+  if(memo===undefined)return false;if(memo)all[name]=memo;else delete all[name];writeOrders(all);return true}
+function endDrag(changed){markDrop(null);for(const el of document.getElementById("runs").querySelectorAll(".dragging"))el.classList.remove("dragging");
+  dragged=null;pressed=null;if(changed){behind=true;lastState=""}setTimeout(()=>catchUp(),0)}
+(()=>{const root=document.getElementById("runs");
+  root.addEventListener("dragstart",e=>{const g=e.target?.closest?.(".grip");if(!g)return; // other drags, such as selected text, stay the browser's
+    const row=g.closest("tbody.session[data-key]"),sec=g.closest(".run[data-run]");if(!sec)return;
+    if(row){const[run,key]=row.dataset.key.split("/");dragged={kind:"row",run,key,el:row}}else dragged={kind:"section",run:sec.dataset.run,el:sec};
+    e.dataTransfer.effectAllowed="move";e.dataTransfer.setData(DRAG_TYPE,dragged.run+"/"+(dragged.key||""));
+    const shown=row||g.parentNode,r=shown.getBoundingClientRect();try{e.dataTransfer.setDragImage(shown,e.clientX-r.left,e.clientY-r.top)}catch{}
+    // The item fades while it moves, a row with every row under it.
+    const run=state.find(x=>x.id===dragged.run),byKey=new Map((run?.tasks||[]).map(t=>[t.key,t]));
+    const moves=k=>{for(let p=k;p;p=byKey.get(p)?.parentKey)if(p===dragged.key)return true;return false};
+    if(row){for(const b of sec.querySelectorAll("tbody.session"))if(moves(b.dataset.key.split("/")[1]))b.classList.add("dragging")}else sec.classList.add("dragging")});
+  const over=e=>{if(!dragged)return;const at=dropAt(e);markDrop(at?.mark,at?.after);if(!at)return;e.preventDefault();e.dataTransfer.dropEffect="move"};
+  root.addEventListener("dragenter",over);root.addEventListener("dragover",over);
+  // Out over the rest of the page, the line goes; `dragleave` cannot tell, as it fires between cells too.
+  document.addEventListener("dragover",e=>{if(dragged&&!root.contains(e.target))markDrop(null)});
+  root.addEventListener("drop",e=>{if(!dragged)return;const at=dropAt(e);if(!at)return;e.preventDefault();endDrag(dropOrder(dragged,at))});
+  root.addEventListener("dragend",()=>{if(dragged)endDrag(false)})})();
 // Jump to the top or bottom of the details panel; each button shows only when it would move.
 (()=>{const d=document.getElementById("detail"),up=document.getElementById("jump-top"),down=document.getElementById("jump-bottom");
   const sync=()=>{up.hidden=d.scrollTop<40;down.hidden=atBottom(d)};
