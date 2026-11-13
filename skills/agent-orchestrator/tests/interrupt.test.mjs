@@ -882,6 +882,34 @@ for (const publishing of [false, true]) {
   });
 }
 
+for (const publishing of [false, true]) {
+  test(`the delivery line ${publishing ? 'offers no interrupt while a publishing command would hold it back' : 'offers the interrupt for an idle task'}`, async (t) => {
+    const f = await fixture(t);
+    const run = await f.newRun();
+    const command = publishing ? 'sleep 61; git push origin topic' : 'sleep 61; echo done';
+    const child = { type: 'assistant', parent_tool_use_id: 'toolu_task', message: { id: 'm-child-held', content: [{ type: 'tool_use', id: 'toolu_child_held', name: 'Bash', input: { command } }] } };
+    const task = await f.start(run, 'held', { config: { hold: true, shell: ['/bin/bash', '-c', command], extraEvents: [...idleEvents(), child] } });
+    await f.ready(task);
+    const sent = await f.command(['send', run.id, 'held', 'Read this when you can.']);
+    const { delivery } = (await rowOf(f, run, 'held')).inbox;
+    const listed = await f.command(['inbox', run.id, 'held']);
+    if (publishing) {
+      assert.match(delivery.held, /git push origin topic/);
+      assert.equal(delivery.steer, undefined);
+      for (const text of [delivery.text, sent.stdout, listed.stdout]) {
+        assert.match(text, /An interrupt waits too: `sleep 61; git push origin topic` is not stopped part-way/);
+        assert.doesNotMatch(text, /Interrupt it to deliver|Deliver it now|steer /);
+      }
+    } else {
+      assert.equal(delivery.held, undefined);
+      assert.match(delivery.steer, / steer /);
+      assert.match(delivery.text, /Interrupt it to deliver them now\./);
+      assert.match(sent.stdout, /Deliver it now with/);
+    }
+    await f.command(['stop', run.id, 'held']);
+  });
+}
+
 // A parent that waits only for its background Task: no background Bash command makes it idle.
 const childOnlyEvents = () => [
   { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'look around', run_in_background: true } }] } },

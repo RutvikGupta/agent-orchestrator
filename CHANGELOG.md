@@ -17,8 +17,8 @@
 - One claim covers every way a task is resumed (`start`, retry, rework, escalation, the park
   watcher, an interrupt), so two of them cannot start the next attempt together, and `stop` and
   `close` cancel a resume that is between its two relays.
-- Known gap: the delivery line and the attention item still suggest an interrupt while a
-  publishing command blocks it; `steer` then refuses and says why.
+- While a publishing command holds an interrupt back, the delivery line, the attention item, a
+  plain `send` and `inbox` say that an interrupt waits for that command too, and offer none.
 
 ## 2.1.1 (2026-11-12)
 

@@ -76,7 +76,9 @@ export function attentionOf(t, closed, now = Date.now()) {
   }
   if (t.state === "running" && t.idle && t.inbox?.unread > 0) {
     const n = t.inbox.unread, on = t.idle.background ? `command \`${shortText(t.idle.background, 80)}\`` : "work";
-    const reason = `ended its turn and waits on its own background ${on}, so ${n === 1 ? "a message waits" : `${n} messages wait`} unread until that ends; deliver ${n === 1 ? "it" : "them"} now with \`${t.idle.steer}\``;
+    const held = t.inbox.delivery?.held;
+    const next = held ? `an interrupt waits too: \`${shortText(held, 80)}\` is not stopped part-way` : `deliver ${n === 1 ? "it" : "them"} now with \`${t.idle.steer}\``;
+    const reason = `ended its turn and waits on its own background ${on}, so ${n === 1 ? "a message waits" : `${n} messages wait`} unread until that ends; ${next}`;
     return { ...item("unreachable", "unreachable", reason), sinceMs: Date.parse(t.inbox.unreadMessages?.[0]?.time) || t.lastActiveMs || 0 };
   }
   if (t.state === "running" && t.stuck) {

@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CLI_PATH, RUNS_DIR } from "./config.mjs";
+import { heldBy } from "./steer.mjs";
 
 export const INBOX_FILE = "inbox.jsonl";
 export const READ_FILE = "inbox-read.jsonl";
@@ -296,18 +297,24 @@ export function readsWhen(run, task, row) {
   if (row.interrupting) return { how: "resuming", text: "An interrupt is resuming its session with them now." };
   if (row.state !== "running") return { how: "not-running", text: "It is not running: they reach it only in the brief that resumes it." };
   if (task.agent === "command") return { how: "never", text: "A command task has no agent to read them." };
+  // A publishing command is never stopped part-way, so an interrupt waits for it as the message
+  // does: say so, and offer no interrupt that would be refused.
+  const held = row.idle || row.shell ? heldBy(task) : null;
+  const waits = held ? ` An interrupt waits too: ${quoted(held)} is not stopped part-way.` : "";
+  const now = held ? waits : " Interrupt it to deliver them now.";
+  const offer = held ? { held } : { steer };
   if (row.idle) {
     const on = row.idle.background ? `background command ${quoted(row.idle.background)}` : "background work";
-    return { how: "idle", text: `It ended its turn and waits on its own ${on}: it will not read them until that ends. Interrupt it to deliver them now.`, steer };
+    return { how: "idle", text: `It ended its turn and waits on its own ${on}: it will not read them until that ends.${now}`, ...offer };
   }
   const resume = "stop it and resume it with a delta brief instead";
   const noted = briefNoted(task.outDir);
   if (task.agent === "codex") {
     if (!noted) return { how: "never", text: `Its brief has no inbox note, so it will not read them; ${resume}.` };
-    return { how: "inbox", text: `It reads them the next time it runs \`inbox\`: after each gate run, and at least every 10 commands.${row.shell ? ` It is in the shell command ${quoted(row.shell)} now; interrupt it to deliver them now.` : ""}`, ...(row.shell ? { steer } : {}) };
+    return { how: "inbox", text: `It reads them the next time it runs \`inbox\`: after each gate run, and at least every 10 commands.${row.shell ? ` It is in the shell command ${quoted(row.shell)} now${held ? `.${waits}` : "; interrupt it to deliver them now."}` : ""}`, ...(row.shell ? offer : {}) };
   }
   if (inboxHookRegistered()) {
-    if (row.shell) return { how: "shell", text: `It reads them when its current shell command ends (${quoted(row.shell)}). Interrupt it to deliver them now.`, steer };
+    if (row.shell) return { how: "shell", text: `It reads them when its current shell command ends (${quoted(row.shell)}).${now}`, ...offer };
     return { how: "tool-call", text: "It reads them after its next tool call." };
   }
   if (task.readOnly) return { how: "never", text: `The orch-inbox hook is not registered, and a read-only agent has no shell to run \`inbox\`, so it will not read them; ${resume}.` };

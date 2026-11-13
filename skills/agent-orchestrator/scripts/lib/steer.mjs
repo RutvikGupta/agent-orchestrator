@@ -243,6 +243,18 @@ export function commandTree(relayPid, command, rows = processTable()) {
 // message waits for it; otherwise each of them is stopped, which returns its call. A sub-agent's
 // command that runs while the parent is idle is background work: a publishing one still holds the
 // interrupt back, and any other ends with the session, as a background command does.
+// The publishing command that holds an interrupt of this task back, or null: one of its turn
+// that has no result yet, or one it runs in the background. planSteer and planResume refuse for
+// the same commands, so what tells the user when a message is read can say so beforehand.
+export function heldBy(task) {
+  const events = path.join(task.outDir || "", "events.jsonl");
+  const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
+  const kept = all.find((p) => PROTECTED.test(p.command));
+  if (kept) return kept.command;
+  const background = task.agent === "claude" ? commandRuns("claude", events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
+  return background ? background.cmd : null;
+}
+
 export function planSteer(task, row = null) {
   const events = path.join(task.outDir || "", "events.jsonl");
   const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);

@@ -9,7 +9,7 @@ import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
 import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
 import { describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
-import { adoptResume, awaitInterrupt, claimResume, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
+import { adoptResume, awaitInterrupt, claimResume, heldBy, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration, readJson } from "../util.mjs";
 
 // How a message reaches this attempt of the task: { delivery, reaches }. An attempt started before
@@ -20,7 +20,11 @@ function delivery(run, task, row = null) {
   const resume = "stop it and resume it with a delta brief instead";
   if (row?.idle && run) {
     const on = row.idle.background ? `background command \`${shorten(row.idle.background)}\`` : "background work";
-    return { delivery: `the agent ended its turn and waits on its own ${on}, so it does not read this message until that wait ends. Deliver it now with \`node ${CLI_PATH} steer ${run.id} ${task.id}\`; next time, send with --steer: \`node ${CLI_PATH} send ${run.id} ${task.id} "<message>" --steer\``, reaches: true };
+    const held = heldBy(task);
+    const how = held
+      ? `An interrupt waits too: \`${shorten(held)}\` is not stopped part-way`
+      : `Deliver it now with \`node ${CLI_PATH} steer ${run.id} ${task.id}\`; next time, send with --steer: \`node ${CLI_PATH} send ${run.id} ${task.id} "<message>" --steer\``;
+    return { delivery: `the agent ended its turn and waits on its own ${on}, so it does not read this message until that wait ends. ${how}`, reaches: true };
   }
   const noted = briefNoted(task.outDir);
   const will = (text) => ({ delivery: text, reaches: !text.includes("will not read it") });
