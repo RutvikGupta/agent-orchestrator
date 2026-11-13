@@ -172,7 +172,8 @@ background work after the parent's turn ends, even without a background Bash com
 parent's own. Such a task is **idle**:
 
 - `status`, `wait` and the dashboard show it as running, with the activity "idle: ended its turn and
-  waits on its own background command `<command>`". Its row has `idle`.
+  waits on its own background command `<command>`", or "background work" for an open sub-agent
+  call. Its row has `idle`.
 - With a message unread, it needs attention at once: `wait` exits 5 with an `unreachable` item, and
   the dashboard's attention lane lists it. It is not left until it shows as silent after 15 minutes.
 - A plain `send` stores the message and says the agent will not read it until its own wait ends,
@@ -188,7 +189,7 @@ Codex agent that is not in a shell command resumes its thread the same way.
 `$ORCH inbox <run> <task-id>` (without `--ack` or `--all`), run by anyone but the agent itself,
 prints one line above the unread
 messages that says when the agent will read them: after its next tool call; when its current shell
-command ends; not until its own background command ends (idle); when its watcher wakes it (parked);
+command ends; not until its background work ends (idle); when its watcher wakes it (parked);
 or at its next `inbox` (Codex). Where an interrupt would deliver them now, a second line gives the
 command. The dashboard shows the same line above its message box. In `status --json`, a task row's
 `inbox.delivery` holds it as `{ how, text, steer }`.
