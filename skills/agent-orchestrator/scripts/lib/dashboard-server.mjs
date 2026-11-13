@@ -691,37 +691,56 @@ export async function serveDashboard({ host, port, args }) {
     setInterval(checkAttention, escalationCheckMs());
   }
 
-  // Every five minutes, housekeeping: reclaim orphaned build daemons (`reclaim`), then collect
-  // unused worktrees (`gc --auto`), one child at a time, so lsof, du and git do not block HTTP
-  // requests. Neither waits for other sessions: `reclaim` checks each workspace's owners, and
-  // `gc --auto` collects only the user's own runs and runs whose session has ended. `gc --auto` runs
-  // as the user, without the session variables of whoever started this server, so which runs it
-  // collects never depends on that. AGENT_ORCH_RECLAIM=off and AGENT_ORCH_AUTO_GC=off turn each off.
-  const chores = [
-    ...(process.env.AGENT_ORCH_RECLAIM !== "off" ? [{ name: "reclaim", argv: ["reclaim"], env: process.env }] : []),
-    ...(process.env.AGENT_ORCH_AUTO_GC !== "off" ? [{ name: "automatic worktree collection", argv: ["gc", "--auto"], env: userEnv() }] : []),
-  ];
-  let housekeeper = null;
-  if (chores.length) {
-    const housekeeping = () => {
-      if (housekeeper) return;
-      const next = (i) => {
-        housekeeper = null;
-        if (i >= chores.length) return;
-        const chore = chores[i];
-        const child = spawn(process.execPath, [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
-        housekeeper = child;
-        let done = false;
-        const finish = () => { if (!done) { done = true; next(i + 1); } };
-        child.on("error", (error) => { process.stderr.write(`orch: ${chore.name} failed: ${error.message}\n`); finish(); });
-        child.on("close", finish);
-      };
-      next(0);
+  // Housekeeping runs in children, one at a time, so lsof, du and git never block HTTP requests:
+  // every five minutes it reclaims orphaned build daemons (`reclaim`; AGENT_ORCH_RECLAIM=off turns it
+  // off), and five minutes after each pass it collects unused worktrees (`gc --auto`;
+  // AGENT_ORCH_AUTO_GC=off turns it off), so a long collection never runs back to back. Neither
+  // waits for other sessions: `reclaim` checks each workspace's owners, and `gc --auto` collects only
+  // the user's own runs and runs whose session has ended. `gc --auto` runs as the user, without the
+  // session variables of whoever started this server, so which runs it collects never depends on that.
+  let housekeeper = null; // the chore whose child runs: { chore, child }
+  const queue = [];
+  const pump = () => {
+    if (housekeeper || !queue.length) return;
+    const chore = queue.shift();
+    const child = spawn(process.execPath, [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
+    housekeeper = { chore, child };
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      housekeeper = null;
+      chore.after?.();
+      pump();
     };
-    const timer = setInterval(housekeeping, 5 * 60000);
-    timer.unref();
-    process.on("exit", () => { clearInterval(timer); housekeeper?.kill("SIGTERM"); });
+    child.on("error", (error) => { process.stderr.write(`orch: ${chore.name} failed: ${error.message}\n`); finish(); });
+    child.on("close", finish);
+  };
+  const runChore = (chore) => {
+    if (housekeeper?.chore === chore || queue.includes(chore)) return;
+    queue.push(chore);
+    pump();
+  };
+  let reclaimTimer = null, collectTimer = null;
+  if (process.env.AGENT_ORCH_RECLAIM !== "off") {
+    const reclaim = { name: "reclaim", argv: ["reclaim"], env: process.env };
+    reclaimTimer = setInterval(() => runChore(reclaim), 5 * 60000);
+    reclaimTimer.unref();
   }
+  if (process.env.AGENT_ORCH_AUTO_GC !== "off") {
+    const collection = { name: "automatic worktree collection", argv: ["gc", "--auto"], env: userEnv() };
+    const autoCollect = () => runChore(collection);
+    collection.after = () => {
+      collectTimer = setTimeout(autoCollect, 5 * 60000);
+      collectTimer.unref();
+    };
+    collection.after();
+  }
+  process.on("exit", () => {
+    clearInterval(reclaimTimer);
+    clearTimeout(collectTimer);
+    housekeeper?.child.kill("SIGTERM");
+  });
 
   // In the background, exit once nothing is running and no browser tab has polled for a while.
   if (args["idle-exit"]) {

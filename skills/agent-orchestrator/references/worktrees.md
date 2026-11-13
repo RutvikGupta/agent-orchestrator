@@ -142,9 +142,10 @@ $ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
 
 ### Automatic collection
 
-`gc --auto` is the collection that runs without anyone asking. The dashboard runs it every five
-minutes, after it reclaims orphaned build daemons, for as long as it runs. `AGENT_ORCH_AUTO_GC=off`
-turns that off. Worktree creation also runs it on a disk below the minimum ("Free disk space").
+`gc --auto` is the collection that runs without anyone asking. The dashboard runs it five minutes
+after it starts, then five minutes after each pass ends, for as long as it runs.
+`AGENT_ORCH_AUTO_GC=off` turns that off. Worktree creation also runs it on a disk below the minimum
+("Free disk space").
 
 - It follows every rule of `gc` above: only worktrees of closed or integrated tasks, nothing
   uncommitted, commits kept on a branch, and never a run with a running task.

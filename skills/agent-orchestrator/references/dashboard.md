@@ -16,9 +16,10 @@ act on. `SKILL.md` step 5 says when to open it.
   the other limit): a first build reads everything with cold caches, often on a machine that is
   still busy after a restart.
 - Every five minutes it stops orphaned build daemons (`reclaim`; `AGENT_ORCH_RECLAIM=off` turns it
-  off) and then collects unused worktrees (`gc --auto`; `AGENT_ORCH_AUTO_GC=off` turns it off).
-  `references/worktrees.md` ("Automatic collection") says what it collects. Their lines go to the
-  dashboard's output, which for `--detach` is `dashboard.log` under the state root.
+  off). Five minutes after it starts, and five minutes after each pass ends, it collects unused
+  worktrees (`gc --auto`; `AGENT_ORCH_AUTO_GC=off` turns it off). The two never run at the same
+  time. `references/worktrees.md` ("Automatic collection") says what it collects. Their lines go to
+  the dashboard's output, which for `--detach` is `dashboard.log` under the state root.
 
 ## What it shows
 

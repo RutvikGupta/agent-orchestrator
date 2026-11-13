@@ -14,9 +14,8 @@ import { eventually, fixture, readJson } from './helpers.mjs';
 // Server: its clock stands still at its start plus the milliseconds in ctl/clock. The timers whose
 // callbacks are named in TIMERS never fire on their own: ctl/timers logs each one set, cleared or
 // fired, with its delay, and the test fires them. On SIGUSR2 the server runs the commands in ctl/do
-// ("check" runs the escalation checks, which otherwise never run; "housekeep" runs the five-minute
-// housekeeping, which otherwise never runs either; "fire NAME" fires the pending timers of that
-// name), then logs to ctl/acks. ctl/intervals logs the name of each interval timer the server sets. ctl/watched logs each file event after the server
+// ("check" runs the escalation checks, which otherwise never run; "fire NAME" fires the pending
+// timers of that name), then logs to ctl/acks. ctl/watched logs each file event after the server
 // handled it, and ctl/sends each build request to a worker. ctl/forkthrow makes the next fork throw;
 // ctl/sendthrow, ctl/senderror and ctl/childerror make the next build request throw, fail in its
 // callback, or emit an error on the child, while the worker stays alive.
@@ -26,7 +25,7 @@ import { eventually, fixture, readJson } from './helpers.mjs';
 // it read the board, until ctl/release; ctl/blocked names the hold. ctl/crash makes builds exit 7,
 // ctl/fail makes them fail with its text, and ctl/ignoreterm makes workers started while it exists
 // ignore SIGTERM.
-const TIMERS = ['overdueBuild', 'killWorker', 'pacedBuild', 'answerWaitingRead'];
+const TIMERS = ['overdueBuild', 'killWorker', 'pacedBuild', 'answerWaitingRead', 'autoCollect'];
 const PRELOAD = String.raw`
 const fs = require('node:fs');
 const path = require('node:path');
@@ -66,12 +65,11 @@ if (ctl && process.argv[2] === 'dashboard') {
     if (!timer || !timer.fakeTimer) return realClearTimeout.call(this, timer);
     if (pending.delete(timer.fakeTimer)) log('timers', 'clear ' + timer.fakeTimer);
   };
-  const checks = [], chores = [];
+  const checks = [];
   const every = globalThis.setInterval;
   globalThis.setInterval = function (fn, ...rest) {
-    log('intervals', String(fn && fn.name));
-    if (fn && (fn.name === 'checkAttention' || fn.name === 'housekeeping')) {
-      (fn.name === 'checkAttention' ? checks : chores).push(fn);
+    if (fn && fn.name === 'checkAttention') {
+      checks.push(fn);
       return every(() => {}, 2 ** 30).unref();
     }
     return every.call(this, fn, ...rest);
@@ -80,7 +78,6 @@ if (ctl && process.argv[2] === 'dashboard') {
     for (const command of fs.readFileSync(at('do'), 'utf8').split('\n').filter(Boolean)) {
       const [verb, name] = command.split(' ');
       if (verb === 'check') for (const fn of checks) fn();
-      if (verb === 'housekeep') for (const fn of chores) fn();
       if (verb === 'fire') {
         for (const [id, timer] of [...pending]) {
           if (timer.name !== name || !pending.delete(id)) continue;
@@ -706,7 +703,7 @@ async function idleRun(b, name, { live = false } = {}) {
   return { run, wt };
 }
 
-test('housekeeping collects unused worktrees as the user, whoever started the dashboard, and logs each one; AGENT_ORCH_AUTO_GC=off with AGENT_ORCH_RECLAIM=off sets none', async (t) => {
+test('the automatic collection runs five minutes after each pass, as the user whoever started the dashboard, and logs each worktree; AGENT_ORCH_AUTO_GC=off turns it off', async (t) => {
   let ended, live;
   // The dashboard runs in a live session's environment; its collection must not take that
   // session's run for its own. The disk is low, so one hour of rest is enough.
@@ -717,16 +714,18 @@ test('housekeeping collects unused worktrees as the user, whoever started the da
   });
   // The server sets its timers after it announces itself, and prints its address after them.
   await eventually(() => b.output().includes('dashboard: http'), 'the dashboard did not finish starting');
-  assert.ok(b.lines('intervals').includes('housekeeping'), b.lines('intervals').join(', '));
-  await b.control('housekeep');
+  assert.deepEqual(b.pending('autoCollect').map((x) => x.ms), [300_000]);
+  await b.control('fire autoCollect');
   await eventually(() => b.output().includes('auto gc freed'), `the collection did not run:\n${b.output()}`);
+  // Once the pass has ended, the next one waits five minutes again.
+  await eventually(() => b.pending('autoCollect').length === 1, 'the next collection was not scheduled');
+  assert.deepEqual(b.pending('autoCollect').map((x) => x.ms), [300_000]);
   assert.ok(b.output().includes(`orch: auto gc removed worktree ${ended.wt.path} (run ${ended.run.id}, task old, `), b.output());
   assert.match(b.output(), /orch: auto gc freed \S+ \S+ from 1 worktree; disk 20 GB free\n/);
   assert.equal(fs.existsSync(ended.wt.path), false);
   assert.equal(fs.existsSync(live.wt.path), true, 'the collection took the live session\'s worktree');
 
-  // The setup turns reclaim off; with the collection off too, nothing is left to do.
   const off = await setup(t, { env: { AGENT_ORCH_AUTO_GC: 'off' } });
   await eventually(() => off.output().includes('dashboard: http'), 'the dashboard did not finish starting');
-  assert.ok(!off.lines('intervals').includes('housekeeping'), off.lines('intervals').join(', '));
+  assert.deepEqual(off.pending('autoCollect'), []);
 });
