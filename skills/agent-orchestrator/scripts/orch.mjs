@@ -78,7 +78,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   overwrite it without --force
   start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
-        [--max-parallel N] [--wait [DUR]] [--force] [--unplanned] [--babysit --pr N] [-- RELAY_ARGS...]
+        [--max-parallel N] [--force] [--unplanned] [--babysit --pr N] [--wait [DUR]] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
                                   Machine agent count or critical memory refuses with exit 7.
                                   --wait [DUR] waits for room (default 10m), then starts or exits 7.
