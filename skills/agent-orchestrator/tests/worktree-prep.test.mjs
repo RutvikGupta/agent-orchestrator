@@ -367,7 +367,9 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     put(f.root, 'setup-running.mjs', `import fs from 'node:fs';
       import { spawn } from 'node:child_process';
       const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-      fs.writeFileSync(process.env.ORCH_WORKTREE + '/setup-ready.json', JSON.stringify({ pid: process.pid, child: child.pid }));
+      const ready = process.env.ORCH_WORKTREE + '/setup-ready.json';
+      fs.writeFileSync(ready + '.tmp', JSON.stringify({ pid: process.pid, child: child.pid }));
+      fs.renameSync(ready + '.tmp', ready);
       setInterval(() => {}, 1000);`);
     const env = recipes(f, { match: f.repo, symlink: ['vendor/'], port: true,
       setup: ['printf first-complete', 'exec "$TEST_NODE" "$TEST_SETUP"', 'touch should-not-run'], teardown: ['echo teardown'] });
