@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- On macOS, relays, the finish and park watchers, the interrupt's resume helper and
+  `dashboard --detach` start through a one-off launchd job, so quitting the terminal application
+  no longer ends them. A direct start is the fallback, and `AGENT_ORCH_LAUNCHD=off` turns this off.
+  Tasks record `launch`, `result` shows a direct start, and `agents` says whether agents start
+  outside the terminal (`references/agents.md`).
 - A Claude Code hook, `scripts/hooks/orch-ask.mjs`, refuses a question dialog while the session's
   tasks run or wait on it, and always inside an orch task (`AGENT_ORCH_ASK_HOOK=off`): a dialog
   stops the session, and task results, messages and scheduled prompts do not reach it meanwhile.

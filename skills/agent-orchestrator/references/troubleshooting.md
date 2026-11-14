@@ -50,3 +50,20 @@ propose changing it.
 
 The maintaining session reproduces a report before it changes anything, and replies to the sender
 with what it changed, or why it changed nothing.
+
+## Agents died when the terminal was quit
+
+On macOS, quitting the terminal application ends every process started under it, even detached
+ones and ones in a tmux session that was started from that terminal. `orch.mjs` starts relays,
+watchers and the detached dashboard through a one-off launchd job, so they survive
+(`references/agents.md`, "Agents outlive the terminal").
+
+- Run `$ORCH agents`. If its "agents outside the terminal" line says `no: AGENT_ORCH_LAUNCHD=off`,
+  remove that setting. If it says `no: launchctl was not found`, put `/bin` back on `PATH`.
+- `$ORCH result <run> <task>` shows `launch: direct, not through launchd (<reason>)` when an
+  attempt fell back to a direct start.
+- The terminal session that launched the agents always ends with the terminal. Resume it, run
+  `$ORCH recover`, and resume any killed task with `start`.
+- To keep the dashboard up through a quit, run it under launchd yourself (a job with `KeepAlive`
+  that runs `orch.mjs dashboard` in the foreground), not with `dashboard --detach` from a terminal
+  that may be quit before the first agent starts.
