@@ -49,6 +49,11 @@ untouched.
   - A finished task that has waited `AGENT_ORCH_REVIEW_REMIND` (default 10m) with no `accept`,
     `verdict` or `close` also wakes it, once per interval per task, and `wait` prints the commands.
   - Other attention that was there when `wait` started is listed, but does not wake it.
+  - **Items passed up to you.** When one of your tasks is not running (it was stopped, or it
+    ended), an item of a task it started is yours: it would have gone to that task. `wait` lists it
+    as `<run>/<task>: <kind> — <reason> (passed on: task <run>/<task> is not running)`, with the
+    run of the task that needs it, and wakes for it like any other item. Results awaiting review
+    count here, since nobody below reads them. Close the task, or resume its parent to handle it.
 - **Exit 6:** this agent got a new unread message during the call. Read it, then run the same
   command again.
 - **Notes do not wake it.** In your own session, a note that a task sends with `tell` needs no
@@ -66,6 +71,9 @@ A result is unread until you run `result` on it, `close` the task, `accept` it, 
 decision. `result` on a task that handed back a decision marks the decision seen; `close` on it
 marks the decision resolved. `resolve` moves the task to awaiting review, where it can be accepted.
 
+A task that a stop ended (`stopped`) has no unread result. It counts as finished, so `wait` returns
+once nothing else it watches runs, but it never wakes `wait` by itself.
+
 ## How `wait` and `nap` idle
 
 On POSIX, with a Node version that supports `process.execve`, `wait` and `nap` spend idle time in a
@@ -79,7 +87,8 @@ The `Stop` hook `scripts/hooks/orch-stop.mjs` (set up in `integrations/claude/se
 Codex 0.166 and later run it too) blocks ending your turn, once per set of items, while any of these
 holds:
 
-- a question, an unread result or an open decision waits on you (a closed task never does);
+- a question, an unread result or an open decision waits on you (a closed task never does, nor
+  does a task that a stop ended);
 - a task runs with no live `wait`.
 
 ## Automatic retry
@@ -93,6 +102,12 @@ timeout and a usage limit are never retried.
 - A task is **finished** when its relay process has exited. Its **state** is the relay's
   `result.json` status: `completed`, `failed`, `timeout`, `aborted`, or `<cli>_unavailable`.
   `aborted` with no result means the relay died early; read `log`.
+- A task reads **`stopped`** when a stop ended its current attempt: `stop`, or `close` of a task
+  that still ran, recorded the stop on the task, no later `start` cleared it, and the attempt did
+  not end on its own first. A relay records `aborted` on SIGTERM, and a stopped task reads `stopped`
+  instead. It raises no attention item, counts as no failure, is never awaiting review or unread,
+  and its health is `ok`. Its phase is still `failed`. `start` resumes it and clears the stop.
+  `references/agents.md`, "Stopping a task", says what a stop reaches.
 - A task counts as running only while its recorded PID is its own relay, the one that writes that
   attempt's folder. A PID that was reused, even by another task's relay, no longer keeps a dead task
   running, and `stop` and `close` never signal it.

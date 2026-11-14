@@ -10,7 +10,7 @@
 //
 // 1. Items address the session. Only tasks it started itself count (no `startedBy`): an open
 //    question for it, an unread result, and a decision it read but has not resolved. A closed task
-//    never counts, whether or not it was accepted.
+//    never counts, whether or not it was accepted, nor does one whose attempt a stop ended.
 // 2. Nothing will wake it: a task of the run runs, or is parked, and no `orch.mjs wait` is live.
 //
 // It never loops. STATE_ROOT/stop-hook/<session>.json keeps a hash of the last blocked set; the same
@@ -58,7 +58,7 @@ async function stop() {
   const { decisionsIn } = await import("../lib/briefs.mjs");
   const { openQuestions, readInbox, readQuestions } = await import("../lib/inbox.mjs");
   const { acceptedNow } = await import("../lib/lifecycle.mjs");
-  const { isParked } = await import("../lib/runs.mjs");
+  const { endedByStop, isParked } = await import("../lib/runs.mjs");
   const { readJson } = await import("../lib/util.mjs");
 
   const recordFile = path.join(STATE_ROOT, "stop-hook", `${sessionId}.json`);
@@ -136,7 +136,8 @@ async function stop() {
         continue;
       }
       const result = task.outDir ? readJson(path.join(task.outDir, "result.json")) : null;
-      if (!result) continue;
+      // An attempt that a stop ended (`stopped`) has no result to read: whoever stopped it knows.
+      if (!result || endedByStop(task, result)) continue;
       const decisions = result.status === "completed" ? decisionsIn(result.finalMessage) : null;
       const resolved = task.decisionResolvedAttempt === attempt;
       if (decisions) {

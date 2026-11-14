@@ -112,9 +112,11 @@ for (const kind of ['dead', 'silent']) {
     await f.ready(task);
     const waited = await f.waitAfterPoll([run.id, '--timeout', '0'], async () => {
       if (kind === 'dead') {
-        await f.command(['stop', run.id, 'task']);
-        await f.finished(run, 'task');
-        fs.unlinkSync(path.join(task.outDir, 'result.json'));
+        // A relay that dies without a result, as a crash leaves it: `stop` would make it read
+        // `stopped`, which is no failure. The test kills the exact relay it started.
+        process.kill(task.pid, 'SIGKILL');
+        await eventually(() => { try { process.kill(task.pid, 0); return false; } catch { return true; } }, 'the relay did not die');
+        fs.rmSync(path.join(task.outDir, 'result.json'), { force: true });
       } else {
         const old = new Date(Date.now() - 16 * 60_000);
         fs.utimesSync(path.join(task.outDir, 'events.jsonl'), old, old);

@@ -82,8 +82,10 @@ test('each item names who must act: the launching session, the parent task, or t
   f.launchingSession(idle, 'idlesess-0001');
   waitedAgo(idle, 20);
   await finish(f, idle, 'stale');
-  // Nested runs: `gone-lead` has finished; `lead` runs (last, since a held fake relay fails after 30s).
+  // Nested runs: `gone-lead` has finished, so its sub-agent's item goes on to the session above it;
+  // `lead` runs (last, since a held fake relay fails after 30s).
   const earlier = await f.newRun('earlier');
+  f.launchingSession(earlier, 'earliers-0001');
   await finish(f, earlier, 'gone-lead');
   const orphans = await f.newRun('orphans', as(earlier, 'gone-lead'));
   await finish(f, orphans, 'kid2', {}, { env: as(earlier, 'gone-lead') });
@@ -102,7 +104,8 @@ test('each item names who must act: the launching session, the parent task, or t
   assert.deepEqual(who('orphan'), ['user', 'orchestrator session endedses', 'its process has ended']);
   assert.deepEqual(who('stale'), ['user', 'orchestrator session idlesess', 'no wait on its run for 20m']);
   assert.deepEqual(who('kid'), ['agent', `task ${parent.id}/lead`, null]);
-  assert.deepEqual(who('kid2'), ['user', `task ${earlier.id}/gone-lead`, 'it is not running']);
+  assert.deepEqual(who('kid2'), ['agent', 'orchestrator session earliers', null]);
+  assert.deepEqual(lane.kid2.passed, [`task ${earlier.id}/gone-lead is not running`]);
 
   // A live wait of the session makes the idle run's items the session's again.
   waitedAgo(idle, 0);
@@ -158,7 +161,9 @@ test('an item goes to the user once its agent is gone, and its notice says so', 
   waitedAgo(run, 20);
   await finish(f, run, 'review');
   await finish(f, run, 'decides', { finalMessage: 'NEEDS DECISION: Which endpoint?' });
+  // `lead` has ended and its run was started from a terminal, so its sub-agent's item ends with the user.
   const parent = await f.newRun('parent');
+  f.launchingSession(parent, null, 'terminal');
   await finish(f, parent, 'lead');
   const child = await f.newRun('child', as(parent, 'lead'));
   await finish(f, child, 'kid', {}, { env: as(parent, 'lead') });

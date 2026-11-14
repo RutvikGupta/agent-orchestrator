@@ -186,7 +186,8 @@ test('stop ends the command and its children; close stops a running one; another
   assert.match(stopped.stdout, new RegExp(`^stopped long \\(pid ${task.pid}\\)`));
   await eventually(() => !alive(child) && !alive(shell), 'the command or its child outlived stop');
   const after = await f.finished(run, 'long');
-  assert.equal(after.state, 'aborted');
+  // The relay records `aborted`; the stop recorded on the task makes it read `stopped`.
+  assert.deepEqual([after.state, after.result.status], ['stopped', 'aborted']);
   assert.equal(after.result.signal, 'SIGTERM');
   assert.equal(after.health, 'ok', 'a stop is not a failure to retry');
 

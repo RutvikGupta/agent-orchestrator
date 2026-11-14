@@ -301,6 +301,35 @@ export function parkedSignal(message) {
   return m[1] || "its pull request";
 }
 
+// Whether a task's current attempt ended because of a stop: `stop`, or `close` of a task that still
+// ran, recorded it on the task (stoppedAt), no later `start` cleared it, and the attempt did not end
+// on its own first. That holds when the relay left no result, when its result is an unsuccessful one
+// written as the stop came or after (a relay records `aborted` on SIGTERM), and when it is a parked
+// babysitter's completed one, whose park the stop ended. A result that completed is the agent's own
+// end, and one that came before the stop (a command task's relay that died and left processes that
+// `stop` ended) is too. `result` is the attempt's result.json, or null.
+export function endedByStop(task, result) {
+  const parked = result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
+  return stopEnded(task?.stoppedAt, result && { status: result.status, finishedAt: result.finishedAt, parked });
+}
+
+// The same for any attempt: `stoppedAt` is the stop recorded for it, and `end` what its result says
+// ({ status, finishedAt, parked }), or null when it has none.
+function stopEnded(stoppedAt, end) {
+  if (!stoppedAt) return false;
+  if (!end) return true;
+  if (end.status === "completed") return Boolean(end.parked);
+  return !(Date.parse(end.finishedAt) < Date.parse(stoppedAt));
+}
+
+// Who recorded a stop (stoppedBy, as ownership.mjs's actorOf() writes it), in a few words.
+function stopperText(actor) {
+  if (!actor) return null;
+  if (typeof actor === "string") return actor;
+  if (actor.agent === "delegated-agent") return `task ${actor.run}/${actor.task}`;
+  return `${actor.agent || "an agent"} session${actor.sessionId ? ` ${String(actor.sessionId).slice(0, 8)}` : ""}`;
+}
+
 // Whether a task can be parked now: a babysitter's started attempt, neither closed nor stopped.
 // `close` and `stop` mark the task itself (closedAt, stoppedAt), whatever its attempt, and only a
 // `start` by hand clears them.
@@ -632,13 +661,15 @@ function attemptsOf(task, seen, row) {
     // An attempt an interrupt stopped to resume its session (steer.mjs) did not fail: the next one
     // continues it.
     if (!now && attemptReasonOf(task, n + 1) === "interrupt") state = "interrupted";
+    // An earlier attempt that a stop ended (`start` keeps the stop in attemptStops) did not fail either.
+    else if (!now && stopEnded(task.attemptStops?.[n], r)) state = "stopped";
     else if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
     else if (!now && state === "completed" && r.parked && (task.babysit || task.plan?.type === "babysit")) state = "parked";
     const startedAt = now ? row.startedAt : r?.startedAt || null;
     const finishedAt = now ? result?.finishedAt || null : r?.finishedAt || null;
     const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
     const errorText = now ? (typeof result?.error === "string" ? result.error : result?.error ? JSON.stringify(result.error) : "") : r?.error || "";
-    const failed = !["completed", "needs-decision", "running", "prepared", "parked", "interrupted"].includes(state);
+    const failed = !["completed", "needs-decision", "running", "prepared", "parked", "interrupted", "stopped"].includes(state);
     return {
       n,
       limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (r && r.status !== "completed" && USAGE_LIMIT_RE.test(summary.error || "")) || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
@@ -700,15 +731,17 @@ export function describe(run, task) {
   let state;
   if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
   else if (running || interrupting) state = "running";
+  // An attempt that a stop ended did not fail: it reads `stopped`, whatever the relay recorded. A
+  // stopped park has ended too (a stop keeps a babysitter from parking: parkable).
+  else if (endedByStop(task, result)) state = "stopped";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
   // A session that ended by handing back a question is waiting on its orchestrator, not done.
   const decisions = state === "completed" ? decisionsIn(result.finalMessage) : null;
   if (decisions) state = "needs-decision";
-  // A parked babysitter still runs as far as anyone waiting on it can tell; a stopped park has ended.
+  // A parked babysitter still runs as far as anyone waiting on it can tell.
   const parked = state === "completed" ? parkedOf(run, task, result) : null;
   if (parked) state = "running";
-  else if (state === "completed" && task.stoppedAt && parkedSignal(result.finalMessage)) state = "stopped";
   const started = task.startedAt ? Date.parse(task.startedAt) : null;
   const ended = running || interrupting ? Date.now() : result?.finishedAt ? Date.parse(result.finishedAt) : null;
   const elapsedMs = started && ended ? ended - started : null;
@@ -755,7 +788,7 @@ export function describe(run, task) {
   // A task that stopped because its agent ran out of usage: the one case where limits matter.
   const finishedText = [current.error, result?.error, result?.finalMessage, result?.stderrTail].filter(Boolean).join("\n");
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
-  const limitHit = !running && !interrupting && !parked && !["prepared", "completed", "needs-decision"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
+  const limitHit = !running && !interrupting && !parked && !["prepared", "completed", "needs-decision", "stopped"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
   // Where a running agent is in its turn: the foreground shell command it is in, if any, and, for a
   // Claude relay that ended its turn and stays alive on a background command of its own, `idle`
   // ({ since, background, steer }): it reads no message until that command ends.
@@ -768,6 +801,7 @@ export function describe(run, task) {
   else if (interrupting) now = "interrupted to deliver a message: resuming its session";
   else if (decisions) now = firstLine(`asks: ${decisions.join(" · ")}`);
   else if (parked) now = parkedNow(parked);
+  else if (state === "stopped") now = `stopped${task.stoppedBy ? ` by ${stopperText(task.stoppedBy)}` : ""}`;
   else if (result && command) now = commandOutcome(result) || "(no output)";
   else if (result) now = firstLine(result.finalMessage) || current.error || "(empty final message)";
   else now = state === "closed" ? "closed before it started" : state === "prepared" ? "worktree ready" : "relay exited without a result; see log";
@@ -820,6 +854,8 @@ export function describe(run, task) {
     ...(task.handoffs?.[task.attempt] ? { handoff: task.handoffs[task.attempt] } : {}),
   };
   const reported = { ...row, ...reportFields(run, task, row) };
+  // A relay that a stop ended without a result is not dead: the stop says why it is gone.
+  if (state === "stopped") reported.health = "ok";
   const staged = { ...reported, ...lifecycleFields(run, task, reported) };
   if (parked) Object.assign(staged, { phase: "parked", awaitingReviewMs: null });
   const described = { ...staged, ...inboxFields(run, task, staged) };

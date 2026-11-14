@@ -23,7 +23,7 @@ import { decisionsIn } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
 import { firstLine } from "./format.mjs";
 import { spawnParkWatcher } from "./park.mjs";
-import { attemptAgent, describe, loadTask, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
+import { attemptAgent, describe, endedByStop, loadTask, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -134,6 +134,11 @@ export function noticeText(run, row, current = row.attempt) {
     const outcome = row.report?.outcome && !row.report.invalid ? ` It reported ${row.report.outcome}.` : "";
     return `${head} completed and is ready for your review.${outcome}\nRead it with \`${read}\`, review it, and record \`accept\` or \`verdict\`.${later}`;
   }
+  // A stop ended it on purpose (runs.mjs, endedByStop): it did not fail.
+  if (row.state === "stopped") {
+    const how = /^stopped by /.test(row.now || "") ? row.now : "stopped";
+    return `${head} was ${how}; it did not fail.\nResume it with \`start\` if its work is still needed, or close it.${later}`;
+  }
   const error = firstLine(row.result?.error, 200) || firstLine(row.result?.finalMessage, 200) || (row.result ? "no error given" : "the relay exited without a result");
   const why = row.limitHit ? "stopped on a usage limit" : `failed (${row.state})`;
   const retry = row.health === "transient-error" ? " It was a transient error: your next `wait` on its run resumes it once." : "";
@@ -145,14 +150,17 @@ export function noticeText(run, row, current = row.attempt) {
 // alone, so when the PID now belongs to another relay, the attempt's result says how it ended.
 function endedRow(run, task, n, pid) {
   const outDir = path.join(taskDir(run, task.id), `attempt-${n}`);
+  // An earlier attempt's stop is in attemptStops, since `start` clears the task's own.
   const own = n === task.attempt && (!pid || pid === task.pid)
     ? task
-    : { ...task, attempt: n, agent: attemptAgent(task, n), outDir, pid: pid || task.pid, startedAt: null };
+    : { ...task, attempt: n, agent: attemptAgent(task, n), outDir, pid: pid || task.pid, startedAt: null, ...(n === task.attempt ? {} : { stoppedAt: task.attemptStops?.[n] ?? null }) };
   const row = describe(run, own);
   if (row.state !== "running") return row;
   const result = readJson(path.join(outDir, "result.json"));
   const decisions = result?.status === "completed" ? decisionsIn(result.finalMessage) : null;
-  const state = !result ? "aborted" : decisions ? "needs-decision" : result.status || "unknown";
+  // A stop of this attempt is recorded as the task's stop while it is the current attempt, and in
+  // attemptStops once a later one has started.
+  const state = endedByStop(own, result) ? "stopped" : !result ? "aborted" : decisions ? "needs-decision" : result.status || "unknown";
   return { ...row, state, phase: null, health: null, report: null, limitHit: false, decisions, result, session: result?.sessionId || result?.threadId || row.session };
 }
 
