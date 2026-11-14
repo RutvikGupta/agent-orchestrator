@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The dashboard's state column shows the state only (the attempt counts are in its tooltip), and
+  a section's heading shows at most about 60 characters of its title, with the whole title in its
+  tooltip.
 - The dashboard's tree is easier to follow: one line per parent, centred under its arrow and drawn
   to the bottom of its last child's row; each stretch, and each arrow, has the status colour of
   its row.

@@ -505,3 +505,15 @@ test('tree lines: one per parent, to the bottom of its last child, in the colour
   assert.doesNotMatch(rows.map((r) => layers(r.key, false) + layers(r.key, true)).join(' '), /px 1px/, 'no horizontal lines');
   assert.equal(context.guideLayers(1, undefined, false), '');
 });
+
+test('a section heading shows a short title, cut at a word, and keeps a short one whole', () => {
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet('const TITLE_MAX=', '\n')};this.shortTitle=shortTitle;`, context);
+  const long = 'Design the output stage in the design doc, cut subtasks on the onboarding board, and give the work breakdown before any implementation (example-org/example-repo#12)';
+  const short = context.shortTitle(long);
+  assert.equal(short, 'Design the output stage in the design doc, cut subtasks on…');
+  assert.ok(short.length <= 61 && long.startsWith(short.slice(0, -1)));
+  assert.equal(context.shortTitle('Fix the parser'), 'Fix the parser');
+  assert.equal(context.shortTitle('x'.repeat(60)), 'x'.repeat(60), 'a title at the limit is whole');
+  assert.equal(context.shortTitle('y'.repeat(80)), `${'y'.repeat(60)}…`, 'one long word is cut at the limit');
+});
