@@ -1,7 +1,7 @@
 :root{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea;--card:#fafafa;--sel:#eef4ff;
---run:#a15c00;--ask:#8250df;--ok:#1a7f37;--review:#0969da;--bad:#c62828;--idle:#6e6e73;--guide:#d0d0d6;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+--run:#a15c00;--ask:#8250df;--ok:#1a7f37;--review:#0969da;--bad:#c62828;--idle:#6e6e73;--guide:#a8a8b6;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#ececf0;--muted:#9a9aa3;--line:#2c2c31;--card:#1d1d21;--sel:#1f2a3d;
---run:#f0a646;--ask:#c297ff;--ok:#4cc26b;--review:#4f9cf9;--bad:#ff6b6b;--idle:#9a9aa3;--guide:#3c3c44}}
+--run:#f0a646;--ask:#c297ff;--ok:#4cc26b;--review:#4f9cf9;--bad:#ff6b6b;--idle:#9a9aa3;--guide:#6a6a7a}}
 *{box-sizing:border-box}body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
 header{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--bg);flex:none}
 header h1{font-size:16px;margin:0}
@@ -41,7 +41,11 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
 .rich ul{margin:0 0 6px;padding-left:18px}.rich li{margin:1px 0}.rich code{font:12px var(--mono);background:var(--card);border:1px solid var(--line);border-radius:3px;padding:0 3px}
 .rich a{color:var(--ask);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--ask) 40%,transparent)}.rich a:hover{border-bottom-color:var(--ask)}
 .msg .r{grid-column:2;border-left:3px solid var(--ok);padding-left:8px;margin-top:2px}.msg .r .k{color:var(--ok)}
-.msg{display:grid;grid-template-columns:150px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--line)}.msg .k{font-size:12px;color:var(--muted)}.msg.you .k{color:var(--ask)}
+.msg{display:grid;grid-template-columns:150px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+/* A folded message shows its first line only; its replies are counted beside its time. */
+.msg pre{min-width:0}.msg.shut pre{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msg.shut .r{display:none}
+.mt{border:0;background:none;color:var(--muted);cursor:pointer;padding:0 5px 0 0;font-size:10px;line-height:1;vertical-align:1px}.mt:hover,.mt:focus-visible{color:var(--fg);outline:none}
+.mt.open::before{content:"▼"}.mt.shut::before{content:"▶"}.msg .k{font-size:12px;color:var(--muted)}.msg.you .k{color:var(--ask)}
 #runs{overflow:auto;padding:16px 20px}#detail{overflow:auto;padding:16px 20px;min-width:0}
 main.no-detail{grid-template-columns:minmax(0,1fr)}main.no-detail #splitter,main.no-detail #detail,main.no-detail #compose,main.no-detail~#jump{display:none}
 .dhead{position:sticky;top:-16px;z-index:2;display:flex;align-items:flex-start;gap:8px;margin:-16px -20px 8px;padding:14px 20px 8px;background:var(--bg);border-bottom:1px solid var(--line)}.dhead h2{flex:1;margin:0;font-size:16px}
@@ -54,16 +58,22 @@ body.resizing{cursor:col-resize;user-select:none}
 /* A section's "show N older" / "hide older" control, after its summary. */
 .run h2 .older{margin-left:8px;padding:0 6px;border:1px solid var(--line);border-radius:10px;background:none;color:var(--muted);font:inherit;font-size:11.5px;font-weight:400;line-height:18px;cursor:pointer;vertical-align:1px}
 .run h2 .older:hover,.run h2 .older:focus-visible{background:var(--sel);color:var(--fg);outline:none}
-table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;font-weight:500;color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}th{text-align:left;font-weight:500;color:var(--muted);font-size:12px}
 th,td{padding:4px 6px;border-top:1px solid var(--line);white-space:nowrap}
 tr.nowrow td{border-top:0;padding-top:0;color:var(--muted);font-size:12px;white-space:normal;overflow-wrap:anywhere}
 td.num{font-variant-numeric:tabular-nums;text-align:right}th.num{text-align:right}
-/* Tree cells: indent guides, plus a row separator that starts at the session's own indent. */
-td.name{border-top-color:transparent;background-repeat:no-repeat;
-  background-image:linear-gradient(var(--line),var(--line)),repeating-linear-gradient(to right,var(--guide) 0 1px,transparent 1px 18px);
-  background-size:calc(100% - var(--pad)) 1px,var(--gw) 100%;background-position:var(--pad) 0,13px 0}
-tr.nowrow td.name{background-image:repeating-linear-gradient(to right,var(--guide) 0 1px,transparent 1px 18px);background-size:var(--gw) 100%;background-position:13px 0}
+/* Tree cells: a row separator that starts at the session's own indent, plus the tree's vertical
+   lines, which the page sets per row (--gi images, --gs sizes, --gp positions): one line per
+   parent, drawn to the bottom of its last child's row, each stretch in the status colour of the row
+   beside it. They are painted from the border's edge, and the table keeps separate borders (a
+   collapsed border is painted over the cell), so a line has no gap at a row's top. */
+td.name{border-top-color:transparent;background-repeat:no-repeat;background-origin:border-box;
+  background-image:linear-gradient(var(--line),var(--line)),var(--gi,none);
+  background-size:calc(100% - var(--pad)) 1px,var(--gs,0 0);background-position:var(--pad) 0,var(--gp,0 0)}
+tr.nowrow td.name{background-image:var(--gi,none);background-size:var(--gs,0 0);background-position:var(--gp,0 0)}
 .caret{display:inline-block;width:14px;text-align:center;color:var(--muted);font-size:10px;cursor:pointer;user-select:none}
+/* An arrow has its row's status colour, like the line that starts under it. */
+.caret.d-run{color:var(--run)}.caret.d-ok{color:var(--ok)}.caret.d-ask{color:var(--ask)}.caret.d-bad{color:var(--bad)}
 .caret:hover{color:var(--fg)}.caret.blank{cursor:default}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 7px 1px 3px;background:var(--idle);vertical-align:middle}
 .dot.d-run{background:var(--run);animation:pulse 1600ms ease-in-out infinite}.dot.d-ok{background:var(--ok)}.dot.d-ask{background:var(--ask)}.dot.d-bad{background:var(--bad)}
@@ -72,7 +82,10 @@ tbody.session{cursor:pointer;background:var(--card)}tbody.session:hover,tbody.se
 .tree{color:var(--muted);font-family:var(--mono);white-space:pre}
 .state{font-weight:600}.s-running{color:var(--run)}.s-completed{color:var(--ok)}.s-ask{color:var(--ask)}.s-bad{color:var(--bad)}.s-idle{color:var(--idle)}
 .totals{padding:8px 12px;font-size:12px;border-top:1px solid var(--line)}
-tbody.session.closed td{opacity:.65}
+/* A closed row is dimmed, but not the tree lines painted behind its first cell: there the text and
+   the elements are dimmed, and the cell itself is left alone, so a line keeps one colour and width. */
+tbody.session.closed td:not(.name){opacity:.65}tbody.session.closed td.name>*{opacity:.65}
+tbody.session.closed td.name{color:color-mix(in srgb,var(--fg) 65%,transparent)}tbody.session.closed tr.nowrow td.name{color:color-mix(in srgb,var(--muted) 65%,transparent)}
 h3{font-size:13px;margin:16px 0 6px}dl{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;margin:0;font-size:12px}
 dt{color:var(--muted)}dd{margin:0;font-family:var(--mono);overflow-wrap:anywhere}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);margin:0}

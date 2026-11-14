@@ -7,6 +7,30 @@ const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="complet
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
+// The tree's lines, for the rows shown, in tree order. For each row: `last`, it has no later
+// sibling, so its parent's line ends at it; `cont[k]`, its ancestor at depth k has a later sibling,
+// so that ancestor's line runs on through this row; `kids`, its own sub-agents are shown below it,
+// so a line starts under it; `tone[k]`, the status (a row's `tone`, its dot's class) of the row at
+// depth k that this row is or sits under, which colours the line at that depth beside this row.
+function treeGuides(rows){const out=new Map(),path=[];
+  for(let i=0;i<rows.length;i++){const d=rows[i].depth||0,cont=[],tone=[];path[d]=rows[i];
+    const after=k=>{for(let j=i+1;j<rows.length;j++){const e=rows[j].depth||0;if(e<=k)return e===k}return false};
+    for(let k=1;k<d;k++)cont[k]=after(k);
+    for(let k=0;k<=d;k++)tone[k]=path[k]?.tone||"";
+    out.set(rows[i].key,{last:d>0&&!after(d),cont,kids:(rows[i+1]?.depth||0)>d,tone})}
+  return out}
+// One tree cell's lines as background layers (--gi images, --gs sizes, --gp positions). The line
+// of a row at depth d is 2px wide on whole pixels (a line on a half pixel blurs in a dimmed row),
+// centred under its parent's arrow at 12+IND*(d-1)px, and runs the whole
+// height of the row, so a parent's line ends at the bottom of its last child's row. Each stretch
+// has the colour of the status it stands beside; the line that starts under an open parent has the
+// parent's. `second` is the row's second line.
+const TONES={"d-run":"var(--run)","d-ok":"var(--ok)","d-ask":"var(--ask)","d-bad":"var(--bad)"};
+function guideLayers(d,g,second){if(!g)return"";const L=[],x=k=>12+IND*(k-1)+"px",c=k=>TONES[g.tone?.[k]]||"var(--guide)";
+  for(let k=1;k<d;k++)if(g.cont[k])L.push(["2px 100%",x(k)+" 0",c(k)]);
+  if(d>0)L.push(["2px 100%",x(d)+" 0",c(d)]);
+  if(g.kids)L.push(["2px "+(second?"100%":"30%"),x(d+1)+" 100%",c(d)]);
+  return L.length?";--gi:"+L.map(l=>"linear-gradient("+l[2]+","+l[2]+")").join(",")+";--gs:"+L.map(l=>l[0]).join(",")+";--gp:"+L.map(l=>l[1]).join(","):""}
 // A row with sub-agents opens while any agent under it runs and closes once none do; clicking its
 // arrow, or the row itself, overrides that until the running state under it changes.
 const manual=new Map(),live=new Map();
@@ -152,12 +176,13 @@ function sectionView(run){
   const listed=run.tasks.filter(t=>showOlder||!older.has(t)),kids=new Map(),below=new Map(),busy=new Map();
   for(const t of listed){if(t.parentKey)kids.set(t.parentKey,(kids.get(t.parentKey)||0)+1);for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey){below.set(p,(below.get(p)||0)+1);if(t.state==="running")busy.set(p,(busy.get(p)||0)+1)}}
   const hiddenBy=t=>{for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)if(!isOpen(run.id+"/"+p))return true;return false};
-  const rows=listed.filter(t=>!hiddenBy(t)).map(t=>{
+  const shown=listed.filter(t=>!hiddenBy(t)),guides=treeGuides(shown.map(t=>({key:t.key,depth:t.depth,tone:dotClass(t)})));
+  const rows=shown.map(t=>{
     const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
-    const indent=w=>({class:"name",style:"padding-left:"+(6+t.depth*IND+w)+"px;--pad:"+(4+t.depth*IND)+"px;--gw:"+(t.depth*IND)+"px"});
+    const indent=(w,second)=>({class:"name",style:"padding-left:"+(6+t.depth*IND+w)+"px;--pad:"+(4+t.depth*IND)+"px"+guideLayers(t.depth,guides.get(t.key),second)});
     return $("tbody",{class:c,"data-key":key,tabindex:"0"},$("tr",{},
       $("td",{...indent(0),title:t.native&&t.parent!=="orchestrator"?"started by "+t.parent:""},
-        nk?$("span",{class:"caret","data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
+        nk?$("span",{class:"caret "+dotClass(t),"data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
         $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+senderOf(m)+": "+m.text).join("\n")},"✉ "+t.inbox.unread+" waiting"):null,
@@ -165,7 +190,7 @@ function sectionView(run){
       $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")+(t.attempt>1?" · "+t.attempt+" attempts":"")+(startedIn(t,byKey.get(t.parentKey))?" · attempt "+startedIn(t,byKey.get(t.parentKey)):"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
-      $("tr",{class:"nowrow"},$("td",{...indent(32),colspan:"10"},nowText(t))))});
+      $("tr",{class:"nowrow"},$("td",{...indent(32,true),colspan:"10"},nowText(t))))});
   // The run's goal as its title, with a short status after it; run id, launcher, and branch are in the tooltip.
   const clock=ms=>{const d=new Date(ms),t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});return d.toDateString()===new Date().toDateString()?t:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t};
   const tt=run.totals,ap=tt.exact?"":"~",started=clock(Date.parse(run.createdAt)),awaiting=(run.attention||[]).filter(a=>a.kind==="awaiting-review").length;
@@ -434,14 +459,23 @@ function dismiss(key,lid){const list=(pending.get(key)||[]).filter(e=>e.lid!==li
 // Redraw what shows a task's own messages (its queue under the details, and its thread in the panel).
 function touched(key){if(sel!==key)return;compose();repaint(key)}
 // The task's thread: the board's messages, then those sent from this page that it does not list yet.
+// A long message starts folded to its first line; the arrow before it opens and folds it, and the
+// arrow in the heading does the same for every long message at once. A choice holds while the page
+// is open (msgFold: message id -> true when open).
+const msgFold=new Map(),longText=x=>x.length>280||x.split("\n").length>4;
 function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t);if(!sent.length&&!mine.length)return[];
   const word={sending:"sending…",queued:"queued",failed:"failed"},pic=n=>n?"\n("+imageCount(n)+" attached)":"";
-  return[$("h3",{},"Messages ("+(sent.length+mine.length)+")"),...sent.map(m=>$("div",{class:"msg"+(m.from==="user"?" you":"")},
-      $("span",{class:"k"},(m.from==="user"?"you":"orchestrator")+" · "+hhmm(m.time)+" · "+(m.read?"read":"queued")),$("pre",{},m.text+pic(m.images)),
-      ...(m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+hhmm(r.time)),rich(r.text))))),
-    ...mine.map(e=>$("div",{class:"msg you "+e.status,"data-lid":String(e.lid)},$("span",{class:"k"},"you · "+hhmm(e.at)+" · "+word[e.status]),$("pre",{},e.text+pic(e.images)),
-      e.status==="failed"?$("div",{style:"grid-column:2"},$("span",{class:"state s-bad"},"Not sent: "+e.error+" "),
-        $("button",{type:"button",class:"linkish",onclick:()=>dismiss(key,e.lid)},"dismiss")):null))]}
+  const items=[...sent.map(m=>({id:key+"|"+(m.id||m.time),text:m.text+pic(m.images),m})),...mine.map(e=>({id:key+"|l"+e.lid,text:e.text+pic(e.images),e}))];
+  const open=i=>msgFold.has(i.id)?msgFold.get(i.id):!longText(i.text),long=items.filter(i=>longText(i.text)),anyOpen=long.some(open);
+  const flip=(list,to)=>{for(const i of list)msgFold.set(i.id,to);repaint(key)};
+  const arrow=i=>longText(i.text)?$("button",{type:"button",class:"mt "+(open(i)?"open":"shut"),title:open(i)?"fold this message":"show the whole message","aria-expanded":String(open(i)),onclick:()=>flip([i],!open(i))}):null;
+  return[$("h3",{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),title:anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
+    ...items.map(i=>i.m?$("div",{class:"msg"+(i.m.from==="user"?" you":"")+(open(i)?"":" shut")},
+      $("span",{class:"k"},arrow(i),(i.m.from==="user"?"you":"orchestrator")+" · "+hhmm(i.m.time)+" · "+(i.m.read?"read":"queued")+(!open(i)&&i.m.replies?.length?" · "+i.m.replies.length+(i.m.replies.length===1?" reply":" replies"):"")),$("pre",{},i.text),
+      ...(i.m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+hhmm(r.time)),rich(r.text))))
+    :$("div",{class:"msg you "+i.e.status+(open(i)?"":" shut"),"data-lid":String(i.e.lid)},$("span",{class:"k"},arrow(i),"you · "+hhmm(i.e.at)+" · "+word[i.e.status]),$("pre",{},i.text),
+      i.e.status==="failed"?$("div",{style:"grid-column:2"},$("span",{class:"state s-bad"},"Not sent: "+i.e.error+" "),
+        $("button",{type:"button",class:"linkish",onclick:()=>dismiss(key,i.e.lid)},"dismiss")):null))]}
 // The free disk space under the state root, from /api/health: amber below twice the minimum, red below
 // it (worktrees are then refused); the tooltip names the commands that free space.
 async function diskSpace(){try{const d=(await (await fetch("api/health")).json()).disk,el=document.getElementById("disk");if(!d||!el)return;

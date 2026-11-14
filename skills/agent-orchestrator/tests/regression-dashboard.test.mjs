@@ -469,3 +469,39 @@ test('a row opens by itself only for a running agent or a main session with a ru
   // The count a closed row shows names the hidden rows that still run.
   assert.ok(app.includes('" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")'));
 });
+
+test('tree lines: one per parent, to the bottom of its last child, in the colour of the row beside it', () => {
+  const context = vm.createContext({});
+  vm.runInContext(`const IND=18;${snippet('function treeGuides(', '// A row with sub-agents opens while')};this.treeGuides=treeGuides;this.guideLayers=guideLayers;`, context);
+  // main > a > (a1, a2), main > b > b1, in the order the board lists them, with each row's status.
+  const rows = [['main', 0, 'd-run'], ['a', 1, 'd-run'], ['a1', 2, 'd-ok'], ['a2', 2, 'd-bad'], ['b', 1, 'd-ok'], ['b1', 2, '']].map(([key, depth, tone]) => ({ key, depth, tone }));
+  const guides = context.treeGuides(rows);
+  const of = (key) => {
+    const g = guides.get(key), depth = rows.find((r) => r.key === key).depth;
+    return { last: g.last, kids: g.kids, cont: Array.from({ length: Math.max(0, depth - 1) }, (_, i) => Boolean(g.cont[i + 1])), tone: Array.from(g.tone) };
+  };
+  assert.deepEqual(of('main'), { last: false, kids: true, cont: [], tone: ['d-run'] });
+  assert.deepEqual(of('a'), { last: false, kids: true, cont: [], tone: ['d-run', 'd-run'] }, 'b follows a');
+  assert.deepEqual(of('a1'), { last: false, kids: false, cont: [true], tone: ['d-run', 'd-run', 'd-ok'] }, "a's line runs on to b");
+  assert.deepEqual(of('a2'), { last: true, kids: false, cont: [true], tone: ['d-run', 'd-run', 'd-bad'] });
+  assert.deepEqual(of('b'), { last: true, kids: true, cont: [], tone: ['d-run', 'd-ok'] });
+  assert.deepEqual(of('b1'), { last: true, kids: false, cont: [false], tone: ['d-run', 'd-ok', ''] }, 'nothing follows b, so its parent line has ended');
+
+  const layers = (key, second) => context.guideLayers(rows.find((r) => r.key === key).depth, guides.get(key), second);
+  const line = (colour) => `linear-gradient(var(--${colour}),var(--${colour}))`;
+  // a2, the last child, failed: beside it the main session's line runs through in the colour of a,
+  // the running row a2 sits under, and a2's own line is red and runs to the bottom of its row.
+  assert.equal(layers('a2', false), `;--gi:${line('run')},${line('bad')};--gs:2px 100%,2px 100%;--gp:12px 0,30px 0`);
+  assert.equal(layers('a2', true), `;--gi:${line('run')},${line('bad')};--gs:2px 100%,2px 100%;--gp:12px 0,30px 0`, 'and on its second line too');
+  // a1, done, with a sibling below: its own line is green and runs the whole height of both lines.
+  assert.equal(layers('a1', false), `;--gi:${line('run')},${line('ok')};--gs:2px 100%,2px 100%;--gp:12px 0,30px 0`);
+  assert.equal(layers('a1', true), `;--gi:${line('run')},${line('ok')};--gs:2px 100%,2px 100%;--gp:12px 0,30px 0`);
+  // An open parent: the line that starts under its arrow has the parent's own colour.
+  assert.equal(layers('a', false), `;--gi:${line('run')},${line('run')};--gs:2px 100%,2px 30%;--gp:12px 0,30px 100%`);
+  assert.equal(layers('main', false), `;--gi:${line('run')};--gs:2px 30%;--gp:12px 100%`);
+  // A row with no status colour (idle, closed, parked) keeps the plain line.
+  assert.equal(layers('b1', false), `;--gi:${line('guide')};--gs:2px 100%;--gp:30px 0`);
+  assert.equal(layers('b1', true), `;--gi:${line('guide')};--gs:2px 100%;--gp:30px 0`, "the main session's line ended with b, so only b's line is beside b1");
+  assert.doesNotMatch(rows.map((r) => layers(r.key, false) + layers(r.key, true)).join(' '), /px 1px/, 'no horizontal lines');
+  assert.equal(context.guideLayers(1, undefined, false), '');
+});

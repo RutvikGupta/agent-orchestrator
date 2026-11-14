@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The dashboard's tree is easier to follow: one line per parent, centred under its arrow and drawn
+  to the bottom of its last child's row; each stretch, and each arrow, has the status colour of
+  its row.
+- In the details panel a long message folds to its first line; the arrow before it, or the one in
+  the "Messages" heading for all of them, opens and folds it.
 - `stop`, and `close` of a running task, also stop every task below it (the runs it created, and
   theirs), and list them in one line. A stop used to leave an agent's own sub-agents running.
 - A task that a stop ended reads `stopped`, not `aborted`: no attention item, no failure, no unread
