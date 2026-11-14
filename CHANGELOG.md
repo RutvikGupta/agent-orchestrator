@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A machine-wide agent limit: `AGENT_ORCH_MAX_TOTAL` (default 75% of RAM in GiB, at least 4) and
+  `AGENT_ORCH_MIN_FREE_AGENT` (default 1.5GB). `start` exits 7 or waits with `--wait [DUR]`,
+  `dispatch` keeps such tasks ready, and `agents` shows the numbers. The limit is a load control:
+  a start the system pauses as it spawns can put one task over it.
 - A babysitter parks when the `PARKED:` line is the last line of its final message, as well as
   when it is the first. An agent told to end with the line was recorded as completed, with no
   watcher on its pull request. `status` starts the watcher of an attempt that ended that way.

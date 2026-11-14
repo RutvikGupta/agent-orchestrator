@@ -294,7 +294,7 @@ babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>
 | `references/review.md` | Before you review, accept, rework or escalate a result (step 6) |
 | `references/integrate.md` | Before you integrate (step 7) |
 | `references/babysit.md` | Before you start a babysitter, and when one finishes (step 8); it fills in the template `references/babysit-brief.md` |
-| `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers |
+| `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers; when `start` exits 7 (the machine is full or short of memory: `wait`, or `start --wait`) |
 | `references/ownership.md` | Before you act on a run you did not launch, after an exit 4, or when you changed another session's task |
 | `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, or a long sequential queue |
 | `references/troubleshooting.md` | When a command, task or gate fails in a way the step you are on does not cover, and when you find a bug in this skill |
