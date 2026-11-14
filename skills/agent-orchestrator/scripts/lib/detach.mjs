@@ -210,7 +210,9 @@ function adopted(spec, since) {
   return null;
 }
 
-// The job folder, made private to this user, with stale files of dead callers removed.
+// The job folder, made private to this user, without the files of callers that died while they
+// waited: every file of a job older than STALE_MS goes, a spec above all, which holds an
+// environment, and such a job is removed from launchd should it still be loaded.
 function jobsDir() {
   fs.mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
   const st = fs.lstatSync(JOBS_DIR);
@@ -218,15 +220,15 @@ function jobsDir() {
     throw new Error(`${JOBS_DIR} must be a folder that only this user can read (mode 0700)`);
   }
   for (const name of fs.readdirSync(JOBS_DIR)) {
-    const m = /^(agent-orch\.[0-9a-f]+)\.plist$/.exec(name);
+    const m = /^(agent-orch\.[0-9a-f]+)\.(plist|spec\.json|result\.json(?:\.tmp)?|log)$/.exec(name);
     if (!m) continue;
     try {
       if (Date.now() - fs.statSync(path.join(JOBS_DIR, name)).mtimeMs < STALE_MS) continue;
     } catch {
       continue;
     }
-    for (const domain of [`gui/${process.getuid()}`, `user/${process.getuid()}`]) launchctl(["bootout", `${domain}/${m[1]}`]);
-    removeJob(jobFiles(JOBS_DIR, m[1]));
+    if (m[2] === "plist") for (const domain of [`gui/${process.getuid()}`, `user/${process.getuid()}`]) launchctl(["bootout", `${domain}/${m[1]}`]);
+    fs.rmSync(path.join(JOBS_DIR, name), { force: true });
   }
   return JOBS_DIR;
 }

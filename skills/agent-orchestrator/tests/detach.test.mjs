@@ -200,6 +200,23 @@ test('on macOS a relay starts through a one-off launchd job, in its folder, with
   await finish(f, run, task, command);
 });
 
+test('a start removes the job files a dead caller left, and its job from launchd', { skip: launchdOnly }, async (t) => {
+  const f = await fixture(t);
+  const fake = fakeLaunchd(f);
+  fs.mkdirSync(jobsFolder(f), { recursive: true, mode: 0o700 });
+  const old = new Date(Date.now() - 10 * 60_000);
+  for (const name of ['agent-orch.0a1d.plist', 'agent-orch.0a1d.spec.json', 'agent-orch.5ec.spec.json']) {
+    fs.writeFileSync(path.join(jobsFolder(f), name), '{"env":{"TOKEN":"left behind"}}', { mode: 0o600 });
+    fs.utimesSync(path.join(jobsFolder(f), name), old, old);
+  }
+  const run = await f.newRun('stale');
+  const { task, command } = await startHeld(f, run, 'stale', fake.env);
+  assert.equal(task.launch.how, 'launchd', JSON.stringify(task.launch));
+  assert.deepEqual(fs.readdirSync(jobsFolder(f)), []);
+  assert.deepEqual(fake.calls().filter((c) => c.verb === 'bootout' && c.target.endsWith('/agent-orch.0a1d')).map((c) => c.target), [`gui/${uid}/agent-orch.0a1d`, `user/${uid}/agent-orch.0a1d`]);
+  await finish(f, run, task, command);
+});
+
 test('without a gui domain, as in an SSH login, the job goes to the user domain', { skip: launchdOnly }, async (t) => {
   const f = await fixture(t);
   const fake = fakeLaunchd(f, 'no-gui');
