@@ -125,7 +125,10 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
   if (item.label === "usage limit") return user();
   if (item.kind === "question" && row.question?.to === "user") return user();
   let r = run, rec = record, last = null; // `last`: the nearest task passed, for a terminal's run
-  for (let hops = 0; hops < 20; hops++) {
+  // The chain is followed to its end, however long; a task met twice means the records form a
+  // cycle, which no agent above ends, so the item is the user's.
+  const visited = new Set();
+  for (;;) {
     const parent = parentOf(r, rec);
     if (!parent) {
       const session = mainSession(r);
@@ -134,6 +137,9 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
       const gone = sessionGone(r, session, now, table);
       return gone ? user(agent, gone) : { to: "agent", agent, agentTask: null, gone: null, passed };
     }
+    const key = `${parent.run}/${parent.task}`;
+    if (visited.has(key)) return last ? user(last.agent, "it is not running", last.agentTask) : user();
+    visited.add(key);
     const agent = `task ${parent.run}/${parent.task}`;
     const agentTask = { run: parent.run, task: parent.task };
     const parentRun = runById(parent.run);
@@ -144,7 +150,6 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
     last ??= { agent, agentTask };
     [r, rec] = [parentRun, task];
   }
-  return user();
 }
 
 // An item with its addressee. One that passed agents on its way up says so in its reason too, which

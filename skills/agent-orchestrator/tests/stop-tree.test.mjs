@@ -291,3 +291,160 @@ test('an item of a stopped task\'s sub-agent goes to the session above it while 
   }, 'the item did not go to the user once the session was gone');
   assert.deepEqual([gone.agent, gone.gone, gone.passed], ['orchestrator session abovesn1', 'no wait on its run for 20m', passed]);
 });
+
+// Races the walk below a stopped task must survive. Each test holds a process at an exact point with
+// a preload in that process alone, never with a sleep.
+
+// The environment that makes this test's `stop` find relay `pid` gone as it signals it: the relay
+// exits just before the SIGTERM reaches it, so both signals fail with ESRCH, as when a task ends
+// between the check that it runs and the stop. The preload kills only that PID, which the test started.
+function vanishes(f, pid) {
+  const file = path.join(f.root, 'vanish.cjs');
+  fs.writeFileSync(file, `const target = Number(process.env.TEST_VANISH_PID);
+if (target && /orch\\.mjs$/.test(process.argv[1] || '') && process.argv[2] === 'stop') {
+  const { spawnSync } = require('node:child_process');
+  const kill = process.kill.bind(process);
+  process.kill = (pid, signal) => {
+    if (Math.abs(pid) === target && signal) {
+      try { kill(target, 'SIGKILL'); } catch {}
+      for (let i = 0; i < 200; i++) { try { kill(target, 0); } catch { break; } spawnSync('sleep', ['0.05']); }
+      throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH', errno: -3, syscall: 'kill' });
+    }
+    return kill(pid, signal);
+  };
+}
+`);
+  return { NODE_OPTIONS: `--require=${JSON.stringify(file)}`, TEST_VANISH_PID: String(pid) };
+}
+
+// The environment that holds one `orch.mjs <sub>` process at its first write of `file` (a path) whose
+// content holds `text` (fixtures/pause-at-write.cjs), and its marker: the process writes its PID there
+// and waits for `<marker>.release`.
+const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function pauseAt(f, name, { sub, file, text = '', after = false }) {
+  const marker = path.join(f.root, name);
+  const preload = fileURLToPath(new URL('./fixtures/pause-at-write.cjs', import.meta.url));
+  return { marker, env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_PAUSE_SCRIPT: 'orch\\.mjs$', TEST_PAUSE_SUB: sub, TEST_PAUSE_FILE: `^${escape(file)}$`, TEST_PAUSE_TEXT: text, TEST_PAUSE_AFTER: after ? '1' : '', TEST_PAUSE_MARKER: marker } };
+}
+// The environment that holds this test's `stop` as it is about to record the stop on task file
+// `file`: after it found the task's attempt running, before it reads the record it marks (the `mark`
+// step of stopTask in commands/task.mjs). It writes its PID to the marker and waits for
+// `<marker>.release`.
+function holdBeforeMark(f, name, file) {
+  const marker = path.join(f.root, name);
+  const preload = path.join(f.root, `${name}.cjs`);
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const file = process.env.TEST_MARK_FILE, marker = process.env.TEST_MARK_MARKER;
+if (file && /orch\\.mjs$/.test(process.argv[1] || '') && process.argv[2] === 'stop') {
+  const read = fs.readFileSync, sleep = new Int32Array(new SharedArrayBuffer(4));
+  let done = false;
+  fs.readFileSync = function readFileSync(target, ...rest) {
+    if (!done && String(target) === file && /at mark \\(.*commands\\/task\\.mjs/.test(new Error().stack)) {
+      done = true;
+      fs.writeFileSync(marker, String(process.pid));
+      while (!fs.existsSync(marker + '.release')) Atomics.wait(sleep, 0, 0, 10);
+    }
+    return read.call(fs, target, ...rest);
+  };
+}
+`);
+  return { marker, env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_MARK_FILE: file, TEST_MARK_MARKER: marker } };
+}
+const reached = (marker) => eventually(() => fs.existsSync(marker), 'the process did not reach the write', 20_000);
+const go = (marker) => fs.writeFileSync(`${marker}.release`, '');
+
+test('a task below that exits as it is signalled does not end the walk: the rest are still stopped', async (t) => {
+  const f = await fixture(t);
+  const { top, mid, deep, lead, a, b, d } = await tree(f);
+  const out = await f.command(['stop', top.id, 'lead'], { env: vanishes(f, a.pid) });
+  assert.equal(out.stderr, '');
+  assert.match(out.stdout, new RegExp(`^stopped lead \\(pid ${lead.pid}\\)`));
+  assert.match(out.stdout, new RegExp(`\\nalso stopped 3 tasks below it: ${mid.id}/a, ${mid.id}/b, ${deep.id}/d\\n$`));
+  for (const task of [lead, a, b, d]) assert.ok(!alive(task.pid), `${task.id}'s relay has exited`);
+  for (const [run, id] of [[mid, 'a'], [mid, 'b'], [deep, 'd']]) {
+    assert.ok(readJson(f.taskFile(run, id)).stoppedAt, `${id} records its stop`);
+    assert.equal((await rowOf(f, run, id)).state, 'stopped', id);
+  }
+});
+
+test('a task below whose start saves its record after the walk read its run is stopped by a later pass', async (t) => {
+  const f = await fixture(t);
+  const top = await f.newRun('top');
+  const lead = await held(f, top, 'lead');
+  const mid = await f.newRun('mid', as(top, 'lead'));
+  const a = await held(f, mid, 'a', as(top, 'lead'));
+  // b's start is held at its record's first write, so the walk below cannot see b yet.
+  const starting = pauseAt(f, 'start-b', { sub: 'start', file: f.taskFile(mid, 'b') });
+  const start = f.json(['start', mid.id, 'b', '--agent', 'claude', '--tier', 'complex', '--read-only', '--why', 'Starts while its parent is stopped',
+    '--brief', f.brief('b', { hold: true })], { env: { ...as(top, 'lead'), ...starting.env } });
+  await reached(starting.marker);
+  // The stop is held once it has read mid's tasks and marked a stopped; then b's start finishes.
+  const stopping = pauseAt(f, 'stop-a', { sub: 'stop', file: f.taskFile(mid, 'a'), text: 'stoppedBy', after: true });
+  const stop = f.command(['stop', top.id, 'lead'], { env: stopping.env });
+  await reached(stopping.marker);
+  go(starting.marker);
+  const b = await start;
+  await f.ready(b);
+  go(stopping.marker);
+  const out = await stop;
+  assert.match(out.stdout, new RegExp(`\\nalso stopped 2 tasks below it: ${mid.id}/a, ${mid.id}/b\\n$`));
+  for (const task of [lead, a, b]) assert.ok(!alive(task.pid), `${task.id}'s relay has exited`);
+  assert.ok(readJson(f.taskFile(mid, 'b')).stoppedAt, 'b records its stop');
+  assert.equal((await rowOf(f, mid, 'b')).state, 'stopped');
+});
+
+test('a stop that a resume overtakes stops the attempt it recorded the stop on', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun('race');
+  const first = await held(f, run, 'w');
+  // The stop is held after it found attempt 1 running and before it reads the record it marks.
+  const stopping = holdBeforeMark(f, 'stop-w', f.taskFile(run, 'w'));
+  const stop = f.command(['stop', run.id, 'w'], { env: stopping.env });
+  await reached(stopping.marker);
+  // Meanwhile an interrupt stops attempt 1 and resumes the session in attempt 2.
+  await f.command(['send', run.id, 'w', 'Change of plan.', '--steer'], { env: HOLD });
+  await eventually(() => fs.existsSync(path.join(attemptDir(run, 'w', 2), 'ready')), 'attempt 2 did not start');
+  const second = readJson(f.taskFile(run, 'w'));
+  assert.deepEqual([second.attempt, alive(second.pid), alive(first.pid)], [2, true, false]);
+  go(stopping.marker);
+  const out = await stop;
+  assert.match(out.stdout, new RegExp(`and attempt 2, which a resume had started \\(pid ${second.pid}\\)`));
+  const record = readJson(f.taskFile(run, 'w'));
+  assert.deepEqual([record.attempt, Boolean(record.stoppedAt)], [2, true], 'the stop is recorded on attempt 2');
+  assert.ok(!alive(second.pid), 'attempt 2, which the stop is recorded on, was stopped');
+  assert.equal((await rowOf(f, run, 'w')).state, 'stopped');
+});
+
+test('the walk below a stopped task and the chain above an item go past twenty levels', async (t) => {
+  const f = await fixture(t);
+  f.env.AGENT_ORCH_MAX_DEPTH = '40';
+  const top = await f.newRun('top');
+  f.launchingSession(top, 'deepsesn-0001');
+  // t0 in the top run started t1 in a run of its own, and so on, 22 levels down; each has finished.
+  const runs = [top];
+  await f.start(top, 't0', { flags: ['--read-only'] });
+  for (let i = 1; i <= 21; i++) {
+    const env = as(runs[i - 1], `t${i - 1}`, i);
+    runs.push(await f.newRun(`l${i}`, env));
+    await f.start(runs[i], `t${i}`, { env, flags: ['--read-only'] });
+  }
+  const env = as(runs[21], 't21', 22);
+  const last = await f.newRun('l22', env);
+  await f.start(last, 'kid', { config: { status: 'failed', error: 'Build failed' }, env, flags: ['--read-only'] });
+  await f.finished(last, 'kid');
+  const deepest = await held(f, last, 'held', env);
+
+  // kid's item passes 22 tasks that are not running, up to the session that launched the top run.
+  const board = await f.dashboard();
+  const item = await eventually(async () => {
+    const found = (await board.json('/api/state')).flatMap((section) => section.attention).find((a) => a.id === 'kid');
+    return found?.passed?.length === 22 ? found : null;
+  }, 'kid\'s item did not pass all 22 levels');
+  assert.deepEqual([item.to, item.agent, item.passed.at(-1)], ['agent', 'orchestrator session deepsesn', `task ${top.id}/t0 is not running`]);
+
+  // A stop of t0, which has ended, still reaches the running task 22 levels below it.
+  const out = await f.command(['stop', top.id, 't0']);
+  assert.equal(out.stdout, `task t0 is not running\nalso stopped 1 task below it: ${last.id}/held\n`);
+  assert.ok(!alive(deepest.pid), 'the deepest task was stopped');
+  assert.equal((await rowOf(f, last, 'held')).state, 'stopped');
+});
