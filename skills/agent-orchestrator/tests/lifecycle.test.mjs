@@ -406,10 +406,17 @@ test('recover groups tasks by phase, flags dirty worktrees and dead processes, a
 
   // Closing a task, or collecting its result, moves it out of the groups that need action. The run's
   // owner does both: `result` closes a task only for its owner.
+  // A stopped task is listed as stopped, with how to go on, not as failed.
+  await f.command(['stop', run.id, 'busy'], { env: parent });
+  const stopped = (await f.command(['recover', run.id])).stdout;
+  assert.match(stopped, /\n  stopped \(1\): busy\n    next: .* result .* busy; then resume it with start, or close it/);
+  assert.doesNotMatch(stopped, /failed \(\d+\): [^\n]*busy/);
   await f.command(['close', run.id, 'busy'], { env: parent });
   await f.command(['result', run.id, 'oops'], { env: parent });
   const after = (await f.command(['recover', run.id])).stdout;
-  assert.match(after, /closed after failing \(2\): busy, oops/);
+  // A task closed while it ran was stopped, which is no failure.
+  assert.match(after, /closed after failing \(1\): oops/);
+  assert.match(after, /closed after a stop \(1\): busy/);
   assert.doesNotMatch(after, /running \(/);
   await f.command(['result', other.id, 'peek']);
   assert.match((await f.command(['recover', other.id])).stdout, /integrated \(1\): peek/);

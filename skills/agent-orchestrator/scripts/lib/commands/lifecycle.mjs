@@ -845,6 +845,14 @@ function recoverRun(run, rows, own, dirty) {
       next: (items) => `${CLI} result ${run.id} ${id1(items)}; then resume it, give it to the other agent, or close it`,
     },
     {
+      // Ended by a stop: nothing failed, and nothing resumes it until its orchestrator does.
+      key: "stopped",
+      label: "stopped",
+      items: phase("stopped").filter((r) => !closed(r)),
+      show: label,
+      next: (items) => `${CLI} result ${run.id} ${id1(items)}; then resume it with start, or close it`,
+    },
+    {
       key: "awaiting-review",
       label: "awaiting review",
       items: phase("awaiting-review").filter((r) => r.mode?.split("+")[0] !== "babysit"),
@@ -884,6 +892,7 @@ function recoverRun(run, rows, own, dirty) {
   ];
   const integrated = phase("integrated");
   const closedFailed = phase("failed").filter(closed);
+  const closedStopped = phase("stopped").filter(closed);
 
   const manualMerges = rows.flatMap((r) => {
     const merged = manualMerge(run, records.get(r.id));
@@ -913,6 +922,7 @@ function recoverRun(run, rows, own, dirty) {
   }
   if (integrated.length) lines.push(`  integrated (${integrated.length}): ${integrated.map(label).join(", ")}`);
   if (closedFailed.length) lines.push(`  closed after failing (${closedFailed.length}): ${closedFailed.map(label).join(", ")}`);
+  if (closedStopped.length) lines.push(`  closed after a stop (${closedStopped.length}): ${closedStopped.map(label).join(", ")}`);
   if (!rows.length && !plan) lines.push("  no tasks yet");
   for (const w of warnings) lines.push(`  ! ${w}`);
 
@@ -933,6 +943,7 @@ function recoverRun(run, rows, own, dirty) {
         blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
         integrated: ids(integrated),
         closedFailed: ids(closedFailed),
+        closedStopped: ids(closedStopped),
       },
       warnings,
       manualMerges,

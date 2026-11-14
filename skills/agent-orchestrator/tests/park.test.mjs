@@ -620,7 +620,7 @@ test('a stop recorded while a resumed relay ends parked holds for the new attemp
   const notice = await eventually(() => readClaim(path.join(attemptDir(run, 'sit', 2), 'parent-notice.json')).skipped && readClaim(path.join(attemptDir(run, 'sit', 2), 'parent-notice.json')), 'no notice record');
   assert.deepEqual([notice.parked, notice.watcher], [true, null]);
   const row = await rowOf(f, run, 'sit');
-  assert.deepEqual([row.state, row.phase, row.parked], ['stopped', 'failed', undefined]);
+  assert.deepEqual([row.state, row.phase, row.parked], ['stopped', 'stopped', undefined]);
   assert.equal(watchers(run, 'sit', 2).length, 0);
   assert.equal(fs.readdirSync(attemptDir(run, 'sit', 2)).some((n) => n.startsWith('park-watcher-')), false);
 });
