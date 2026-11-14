@@ -290,9 +290,11 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Record a verified lesson for the repository, which every later
                                   brief includes; --list prints them
   log RUN TASK [--lines N]        Tail of the relay's combined output
-  stop RUN TASK                   Terminate a running task (its relay records "aborted")
+  stop RUN TASK                   Terminate a running task, then every running task below it (the runs
+                                  it created, and theirs); each reads "stopped"
   close RUN TASK... | close RUN --all
-                                  Stop any of these tasks that still run, and mark them closed.
+                                  Stop any of these tasks that still run, and the tasks below them, and
+                                  mark the named ones closed.
                                   Views keep closed sessions, dimmed and below the open ones; "result"
                                   closes a finished task, and resuming a task opens it again
   rename RUN TASK --to NAME       Give a task a name that status, wait, result, recover, stop, the

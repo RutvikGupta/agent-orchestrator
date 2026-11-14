@@ -3,7 +3,7 @@ for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextN
 const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":(n/1e6).toFixed(1)+"M";
 const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
-const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="closed"||s==="idle"||s==="parked"?"s-idle":"s-bad";
+const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="closed"||s==="idle"||s==="parked"||s==="stopped"?"s-idle":"s-bad";
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;

@@ -181,7 +181,7 @@ $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 - **Handle each finished task in the same turn you read it** (step 6): `accept` it (a write task
   once its work is committed), `rework` it, or `close` it. Leave none waiting.
 - **When `wait` exits 5, or shows a state you do not know, read `references/monitor.md`.** Stop a
-  task (`$ORCH stop <run> <task-id>`) only when it is clearly stuck or off-track, or the user asks.
+  task (`$ORCH stop <run> <task-id>`; it stops the tasks it started too) only when stuck or asked.
 - After the first dispatch, run `$ORCH dashboard --detach --open` and give the user the URL in one
   line, unless they asked not to open a browser; never `$ORCH watch` instead, which they cannot see.
   When the user asks about the dashboard, or it escalates an item, read `references/dashboard.md`.

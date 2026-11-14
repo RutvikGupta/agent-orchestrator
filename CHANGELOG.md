@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `stop`, and `close` of a running task, also stop every task below it (the runs it created, and
+  theirs), and list them in one line. A stop used to leave an agent's own sub-agents running.
+- A task that a stop ended reads `stopped`, not `aborted`: no attention item, no failure, no unread
+  result. An item whose agent is not running goes up the chain to the agent above, and says whom
+  it passed; the run owner's `wait` shows it.
 - Worktree creation refuses below `AGENT_ORCH_MIN_FREE_DISK` (default 15GB) of free disk, after
   first collecting unused worktrees; that collection stops at `AGENT_ORCH_COLLECT_TIMEOUT` (60s).
 - `gc` also collects runs whose launching session has certainly ended, and only worktrees inside a

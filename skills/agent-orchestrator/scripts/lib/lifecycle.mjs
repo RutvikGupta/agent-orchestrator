@@ -64,7 +64,8 @@ export function isClosedPreparation(task) {
 
 // The phase of a task in a given state (describe()'s `state`).
 export function phaseOf(task, state) {
-  if (["prepared", "running", "needs-decision", "closed"].includes(state)) return state;
+  // A task that a stop ended did not fail: its orchestrator stopped it and may resume it.
+  if (["prepared", "running", "needs-decision", "closed", "stopped"].includes(state)) return state;
   if (state !== "completed" || rejectedNow(task)) return "failed";
   if (task.babysit || task.plan?.type === "babysit") return "integrated";
   if (acceptedNow(task) && task.integratedAt) return "integrated";

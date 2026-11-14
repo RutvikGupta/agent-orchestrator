@@ -111,7 +111,7 @@ function orchestratorLabel(run) {
   return ` · launched by ${o.agent}${o.sessionId ? ` session ${o.sessionId.slice(0, 8)}` : ""}`;
 }
 
-const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 31, aborted: 31, prepared: 90, closed: 90, idle: 90 };
+const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 90, aborted: 31, prepared: 90, closed: 90, idle: 90 };
 
 function paint(text, state, tty) {
   const code = COLORS[state] ?? (String(state).endsWith("_unavailable") ? 31 : null);
