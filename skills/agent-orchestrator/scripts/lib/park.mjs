@@ -37,13 +37,14 @@
 // task whose watcher has died, after a reboot say, is restarted by `status`, `start` and the
 // dashboard (reviveParked), cheaply enough to run on every poll of `wait`.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HANDOFF_RULES } from "./briefs.mjs";
 import { CLI_PATH } from "./config.mjs";
+import { startDetached } from "./detach.mjs";
 import { INBOX_FILE, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
 import { PARK_CHECK_FILE, exists, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
@@ -203,25 +204,21 @@ export function spawnParkWatcher(run, task, { by = "park", table = null } = {}) 
     if (error.code === "ENOENT") return null;
     throw error;
   }
-  let log = null;
   try {
-    log = fs.openSync(path.join(dir, LOG), "a");
     const seconds = parkInterval();
     const inbox = path.join(taskDir(run, task.id), INBOX_FILE);
-    const child = spawn("/bin/sh", ["-c", PARK_SCRIPT, "park-watch", process.execPath, SCRIPT, dir, String(generation), inbox, String(seconds), String(Math.min(5, seconds))], {
+    // Detached, and on macOS started through launchd, outside the terminal application (detach.mjs).
+    const { pid } = startDetached({
+      command: "/bin/sh",
+      args: ["-c", PARK_SCRIPT, "park-watch", process.execPath, SCRIPT, dir, String(generation), inbox, String(seconds), String(Math.min(5, seconds))],
       cwd: dir,
-      detached: true,
-      stdio: ["ignore", log, log],
       env: parkEnv(task),
+      stdout: path.join(dir, LOG),
     });
-    child.on("error", () => {});
-    child.unref();
-    writeJson(file, { ...record, pid: child.pid ?? null });
-    return child.pid ? { pid: child.pid, generation } : null;
+    writeJson(file, { ...record, pid: pid ?? null });
+    return pid ? { pid, generation } : null;
   } catch {
     return null;
-  } finally {
-    if (log !== null) fs.closeSync(log);
   }
 }
 

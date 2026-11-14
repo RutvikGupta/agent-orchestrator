@@ -1,12 +1,12 @@
 // `start`: launch a task's relay in the background, with the policy's model and the task's permissions.
 
 import { admissionReason, admissionEnabled, admissionSettingsError, AdmissionRevoked, withAdmissionLock } from "../admission.mjs";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
 import { decisionNote, handoffNote, nestingNote, publishHoldNote } from "../briefs.mjs";
+import { startDetached } from "../detach.mjs";
 import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote, inboxWake } from "../inbox.mjs";
 import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, reviveParked } from "../park.mjs";
@@ -488,19 +488,20 @@ function prepareStart(args, extra = {}) {
         refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while this resume was starting, so it started nothing`);
       }
     }
-    let child;
+    let started;
     try {
       // The last revocation check. A start that the system pauses after it and before the relay is
       // spawned can be revoked by another start, which then takes the place, and still spawn when it
       // continues: one agent over the limit. The limit controls load and is not a hard guarantee;
       // waiting on a stopped holder instead would let one paused process block every start.
       owner();
-      child = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
+      started = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
     } catch (error) {
       giveBack();
       throw error;
     }
-    task.pid = child.pid;
+    task.pid = started.pid;
+    task.launch = started.launch;
     // First of all, record the relay: a resume that dies now leaves it for the next claimant to adopt.
     parkClaim?.spawned?.(task);
     // A resume never clears a close or stop that came while it started.
@@ -514,7 +515,7 @@ function prepareStart(args, extra = {}) {
       sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
     return {
       task,
-      text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${child.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
+      text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${started.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
     };
   };
   // A new start never runs uncounted because another start holds the lock: it waits up to 30 seconds,
@@ -570,29 +571,26 @@ function readAgentEnv() {
   }
 }
 
-// Start a relay detached, in its own process group, writing its output to the attempt's relay.log,
-// with the variables that link what it runs to the task. Returns the child process.
+// Start a relay detached, in its own process group (on macOS through launchd, outside the terminal
+// application; detach.mjs), writing its output to the attempt's relay.log, with the variables that
+// link what it runs to the task. Returns { pid, launch }: its PID, and how it started, which the
+// task records for its attempt.
 function spawnRelay(run, id, relay, relayArgs, outDir, cd, env) {
-  const log = fs.openSync(path.join(outDir, "relay.log"), "a");
-  try {
-    const child = spawn(process.execPath, [relay, ...relayArgs], {
-      cwd: cd,
-      detached: true,
-      stdio: ["ignore", log, log],
-      env: {
-        ...process.env,
-        ...env,
-        AGENT_ORCH_HEAVY_ACTIVE: undefined, // A new agent needs its own heavy admissions.
-        AGENT_ORCH_DEPTH: String(DEPTH + 1),
-        AGENT_ORCH_RUN: run.id,
-        AGENT_ORCH_TASK: id,
-      },
-    });
-    child.unref();
-    return child;
-  } finally {
-    fs.closeSync(log);
-  }
+  const log = path.join(outDir, "relay.log");
+  return startDetached({
+    command: process.execPath,
+    args: [relay, ...relayArgs],
+    cwd: cd,
+    stdout: log,
+    env: {
+      ...process.env,
+      ...env,
+      AGENT_ORCH_HEAVY_ACTIVE: undefined, // A new agent needs its own heavy admissions.
+      AGENT_ORCH_DEPTH: String(DEPTH + 1),
+      AGENT_ORCH_RUN: run.id,
+      AGENT_ORCH_TASK: id,
+    },
+  });
 }
 
 // Start a command task: COMMAND_RELAY runs the words after `--` as an argument vector, with no
@@ -694,14 +692,15 @@ function startCommand(run, id, args, extra) {
     fs.rmSync(outDir, { recursive: true, force: true });
     refuse(`task ${id} was ${ended.closedAt ? "closed" : "stopped"} while it was starting again, so it started nothing`);
   }
-  let child;
+  let started;
   try {
-    child = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
+    started = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
   } catch (error) {
     claim?.release();
     throw error;
   }
-  task.pid = child.pid;
+  task.pid = started.pid;
+  task.launch = started.launch;
   claim?.spawned?.(task);
   if (claim) Object.assign(task, endedSince(since, loadTask(run, id)) || {});
   saveTask(run, task);
@@ -710,6 +709,6 @@ function startCommand(run, id, args, extra) {
   const opts = [done !== null ? `done marker ${JSON.stringify(done)}` : null, timeout !== null ? `timeout ${timeout}` : null].filter(Boolean);
   return {
     task,
-    text: `started ${id} → command (no model${opts.length ? `, ${opts.join(", ")}` : ""}) pid ${child.pid}, attempt ${attempt}\n  run: ${line}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
+    text: `started ${id} → command (no model${opts.length ? `, ${opts.join(", ")}` : ""}) pid ${started.pid}, attempt ${attempt}\n  run: ${line}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
   };
 }

@@ -9,12 +9,13 @@
 //   interrupts the session, which stops it and resumes it in the same session with the unread
 //   messages as its next prompt (see "Interrupts" below).
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
+import { startDetached } from "./detach.mjs";
 import { claudeTurnEnded, subagentEvent } from "./claude.mjs";
 import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
@@ -512,33 +513,29 @@ export function stopResume(run, task, mark) {
 // Start the helper that resumes the claimed task, detached, logging to the attempt's interrupt.log.
 // Releases the claim when it cannot start.
 export function launchInterrupt(run, task, claim) {
-  let log = null;
   try {
-    log = fs.openSync(path.join(task.outDir, INTERRUPT_LOG), "a");
-    const child = spawn(process.execPath, [SCRIPT, "resume", run.dir, task.id, String(task.attempt), String(claim.generation)], {
+    // On macOS it starts through launchd, outside the terminal application (detach.mjs).
+    const helper = startDetached({
+      command: process.execPath,
+      args: [SCRIPT, "resume", run.dir, task.id, String(task.attempt), String(claim.generation)],
       cwd: run.dir,
-      detached: true,
-      stdio: ["ignore", log, log],
       env: parkEnv(task),
+      stdout: path.join(task.outDir, INTERRUPT_LOG),
     });
-    child.on("error", () => {});
-    child.unref();
-    if (!child.pid) throw new Error("the helper did not start");
+    if (!helper.pid) throw new Error("the helper did not start");
     // The helper owns the claim from now on: when it ends without a word, the claim is abandoned
     // and the next sender takes it over, however long this process lives. The handoff goes in a
     // file of its own, written once (runs.mjs, resumeHandoffFile): from here only the helper writes
     // the claim's record, so neither process can overwrite what the other wrote.
     try {
-      createExclusive(resumeHandoffFile(task.outDir, claim.generation), { pid: child.pid, started: processStarted(child.pid), at: new Date().toISOString() });
+      createExclusive(resumeHandoffFile(task.outDir, claim.generation), { pid: helper.pid, started: processStarted(helper.pid), at: new Date().toISOString() });
     } catch {
       // Without it the claim's owner is this process until the helper names itself in the record.
     }
-    return child.pid;
+    return helper.pid;
   } catch (error) {
     writeJson(claim.file, { ...claim.record, released: true, releasedAt: new Date().toISOString(), error: `the interrupt could not start: ${error.message}` });
     return null;
-  } finally {
-    if (log !== null) fs.closeSync(log);
   }
 }
 
