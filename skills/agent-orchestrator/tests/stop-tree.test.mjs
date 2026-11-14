@@ -295,26 +295,29 @@ test('an item of a stopped task\'s sub-agent goes to the session above it while 
 // Races the walk below a stopped task must survive. Each test holds a process at an exact point with
 // a preload in that process alone, never with a sleep.
 
-// The environment that makes this test's `stop` find relay `pid` gone as it signals it: the relay
-// exits just before the SIGTERM reaches it, so both signals fail with ESRCH, as when a task ends
-// between the check that it runs and the stop. The preload kills only that PID, which the test started.
-function vanishes(f, pid) {
-  const file = path.join(f.root, 'vanish.cjs');
-  fs.writeFileSync(file, `const target = Number(process.env.TEST_VANISH_PID);
+// The environment in which this test's `stop` cannot signal relay `pid`. With ESRCH the relay exits
+// just before the SIGTERM reaches it, so both signals find no such process, as when a task ends
+// between the check that it runs and the stop; the preload kills only that PID, which the test
+// started. With EPERM the signals are refused and the relay keeps running.
+function signalFails(f, pid, code) {
+  const file = path.join(f.root, `signal-${code}.cjs`);
+  fs.writeFileSync(file, `const target = Number(process.env.TEST_SIGNAL_PID), code = process.env.TEST_SIGNAL_CODE;
 if (target && /orch\\.mjs$/.test(process.argv[1] || '') && process.argv[2] === 'stop') {
   const { spawnSync } = require('node:child_process');
   const kill = process.kill.bind(process);
   process.kill = (pid, signal) => {
     if (Math.abs(pid) === target && signal) {
-      try { kill(target, 'SIGKILL'); } catch {}
-      for (let i = 0; i < 200; i++) { try { kill(target, 0); } catch { break; } spawnSync('sleep', ['0.05']); }
-      throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH', errno: -3, syscall: 'kill' });
+      if (code === 'ESRCH') {
+        try { kill(target, 'SIGKILL'); } catch {}
+        for (let i = 0; i < 200; i++) { try { kill(target, 0); } catch { break; } spawnSync('sleep', ['0.05']); }
+      }
+      throw Object.assign(new Error('kill ' + code), { code, syscall: 'kill' });
     }
     return kill(pid, signal);
   };
 }
 `);
-  return { NODE_OPTIONS: `--require=${JSON.stringify(file)}`, TEST_VANISH_PID: String(pid) };
+  return { NODE_OPTIONS: `--require=${JSON.stringify(file)}`, TEST_SIGNAL_PID: String(pid), TEST_SIGNAL_CODE: code };
 }
 
 // The environment that holds one `orch.mjs <sub>` process at its first write of `file` (a path) whose
@@ -356,7 +359,7 @@ const go = (marker) => fs.writeFileSync(`${marker}.release`, '');
 test('a task below that exits as it is signalled does not end the walk: the rest are still stopped', async (t) => {
   const f = await fixture(t);
   const { top, mid, deep, lead, a, b, d } = await tree(f);
-  const out = await f.command(['stop', top.id, 'lead'], { env: vanishes(f, a.pid) });
+  const out = await f.command(['stop', top.id, 'lead'], { env: signalFails(f, a.pid, 'ESRCH') });
   assert.equal(out.stderr, '');
   assert.match(out.stdout, new RegExp(`^stopped lead \\(pid ${lead.pid}\\)`));
   assert.match(out.stdout, new RegExp(`\\nalso stopped 3 tasks below it: ${mid.id}/a, ${mid.id}/b, ${deep.id}/d\\n$`));
@@ -365,6 +368,18 @@ test('a task below that exits as it is signalled does not end the walk: the rest
     assert.ok(readJson(f.taskFile(run, id)).stoppedAt, `${id} records its stop`);
     assert.equal((await rowOf(f, run, id)).state, 'stopped', id);
   }
+});
+
+test('a task below that cannot be signalled is reported after the walk, which still stops the rest', async (t) => {
+  const f = await fixture(t);
+  const { top, mid, deep, lead, a, b, d } = await tree(f);
+  const out = await f.command(['stop', top.id, 'lead'], { code: 1, env: signalFails(f, a.pid, 'EPERM') });
+  assert.equal(out.stderr, `orch: could not stop ${mid.id}/a: kill EPERM\n`);
+  assert.match(out.stdout, new RegExp(`^stopped lead \\(pid ${lead.pid}\\).*\\nalso stopped 2 tasks below it: ${mid.id}/b, ${deep.id}/d\\n$`, 's'));
+  for (const task of [lead, b, d]) assert.ok(!alive(task.pid), `${task.id}'s relay has exited`);
+  assert.ok(alive(a.pid), 'a, which could not be signalled, still runs');
+  f.release(a);
+  await f.finished(mid, 'a');
 });
 
 test('a task below whose start saves its record after the walk read its run is stopped by a later pass', async (t) => {

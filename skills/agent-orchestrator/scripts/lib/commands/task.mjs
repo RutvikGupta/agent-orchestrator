@@ -305,7 +305,7 @@ function belowLines(below) {
   const lines = [];
   const list = below.stopped;
   if (list.length) lines.push(`also stopped ${list.length} task${list.length === 1 ? "" : "s"} below it: ${list.map((b) => `${b.run}/${b.name}${b.exited ? "" : " (sent SIGTERM; it has not exited yet)"}`).join(", ")}`);
-  if (below.busy) lines.push(`tasks below it were still starting after ${MORE_PASSES + 1} passes; run stop again`);
+  if (below.busy) lines.push(`tasks below it were still starting after ${MORE_PASSES + 1} pass${MORE_PASSES ? "es" : ""}; run stop again`);
   return lines;
 }
 const errorLines = (errors) => errors.map((e) => `orch: could not stop ${e.run}/${e.name}: ${e.error?.message || e.error}\n`).join("");
