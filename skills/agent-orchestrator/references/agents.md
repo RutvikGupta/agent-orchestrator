@@ -92,6 +92,60 @@ These are hard limits of the relays on this machine:
   result waiting to be read (`references/monitor.md`, "States, phases and health"). `start` resumes
   it as before and clears the stop.
 
+## Agents outlive the terminal
+
+On macOS, quitting the terminal application ends every process started under it, even a detached
+one: macOS groups the processes an application starts with that application. A process that
+launchd (the macOS service manager) starts is not in that group. So on macOS, `orch.mjs` starts
+every process it leaves running through launchd: each task's relay, the finish and park watchers,
+an interrupt's resume helper, and `dashboard --detach`.
+
+- **How.** For each start, `orch.mjs` loads a one-off launchd job with `launchctl bootstrap
+  gui/<uid>`, or `user/<uid>` when there is no desktop login, as over SSH. The job runs a small
+  helper, `scripts/detach-helper.mjs`. The helper starts a shell, detached, which writes its own PID
+  as the job's answer and only then becomes the process. macOS takes every `DYLD_*` variable from
+  that shell, so the shell hands them back to the process through `/usr/bin/env`. Then `orch.mjs`
+  removes the job with
+  `launchctl bootout` and checks that it is gone. The process keeps running, with launchd as its
+  parent. A start takes a few hundred milliseconds longer.
+- **Exactly one start.** The answer is a file that only one side can create. When no answer comes
+  in time, `orch.mjs` creates it itself and starts the process directly. A shell that comes later
+  finds the answer taken, or the job's folder gone, and runs nothing. When `orch.mjs` itself finds
+  the job's folder gone, it cannot know what the job did. Then `start` fails with `task <id>: it is
+  not known whether ... started`, and starts nothing: check `status` before you start the task again.
+- **The environment stays private.** Each job has a folder in `launchd/` under the state root, a
+  folder only you can read. The job file names only Node, the helper and a spec file. The spec holds
+  the command, its folder, its environment and its output files. The helper deletes the spec as soon
+  as it has read it, and `orch.mjs` removes the job's folder once the start is over.
+- **Left-overs.** Before every command, `orch.mjs` looks in `launchd/` for what a start that died
+  left behind. It deletes any spec older than a minute, and a job's folder after five minutes. A
+  folder stays while the command that made it still runs, or while the process named in its answer
+  does. A job that `launchctl bootout` could not
+  remove keeps a file holding only its label, and `orch.mjs` tries to remove the job again, at
+  most once a minute. This clean-up takes at most five seconds, and never runs while a start holds
+  the machine-wide admission lock.
+- **What stays the same.** The process leads its own process group, runs in the same folder with
+  the same environment, and writes to the same files. So `stop`, `close`, `status` and the finish
+  notice work as before. What it starts is outside the terminal too: it carries
+  `AGENT_ORCH_OUTSIDE=1`, and a start from there goes directly.
+- **Fallback.** When `launchctl` is missing, the job cannot be loaded, or no answer comes in time,
+  the process starts directly, as before, and the start does not fail. Quitting the terminal then
+  ends it. Each task records how its current attempt started (`launch` in its record: `launchd`, or
+  `direct` with the reason). On macOS, `result` shows a direct start in one line: `launch: direct,
+  not through launchd (<reason>)`. `$ORCH agents` says whether agents start outside the terminal on
+  this machine.
+- **A start that cannot start.** When the process cannot start at all, for example because its
+  folder is missing or its program is not an executable file, the start fails the same way through
+  launchd or directly:
+  `start` exits 1 with `task <id> did not start: <why>`, and records nothing.
+- **Settings.** `AGENT_ORCH_LAUNCHD=off` turns this off: every start is direct, and nothing calls
+  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a start waits
+  for the answer.
+- **What still ends with the terminal.** The session that you run in the terminal, and that
+  launched the agents, still ends when you quit it. Its agents keep running. Resume that session,
+  then run `$ORCH recover`: it lists the agents the session launched, so you can follow them again.
+- **Other systems.** On Linux every start is direct, as before.
+
 ## Command tasks
 
 `start <run> <task> --agent command --why "<reason>" [--max-tier TIER] [--done "<marker>"]

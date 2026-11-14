@@ -134,6 +134,7 @@ export function cmdResult(args) {
     Array.isArray(r?.touchedFiles) ? `touched (${r.touchedFiles.length}):${r.touchedFiles.map((f) => `\n  ${f}`).join("")}` : null,
     r?.readOnlyViolation ? "WARNING: readOnlyViolation=true; the read-only run changed files" : null,
     `artifacts: ${d.outDir}`,
+    task.launch?.how === "direct" && process.platform === "darwin" ? `launch: direct, not through launchd (${task.launch.reason || "no reason recorded"})` : null,
     "",
     r ? r.finalMessage || "(empty final message: treat as failed)" : `no result.json yet; log tail:\n${tail(path.join(d.outDir || "", "relay.log"), 30)}`,
     reportText(d),

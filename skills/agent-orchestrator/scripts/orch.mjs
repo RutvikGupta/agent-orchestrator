@@ -37,6 +37,7 @@ import { cmdTell } from "./lib/commands/tell.mjs";
 import { cmdClose, cmdLog, cmdResult, cmdStop } from "./lib/commands/task.mjs";
 import { cmdVerdict, cmdVerify } from "./lib/commands/verify.mjs";
 import { cmdReview, cmdRework, syncReviewVerdicts } from "./lib/commands/review.mjs";
+import { sweepJobs } from "./lib/detach.mjs";
 
 // The commands before which a finished reviewer's verdict line is recorded as a review round of the
 // task it reviewed (review.mjs): those that show review rounds or act on them.
@@ -479,6 +480,9 @@ if (command === "wait" && rest.includes("--help")) {
 } else if (!handlers[command]) {
   die(`unknown command "${command}"\n\n${USAGE}`, 2);
 } else {
+  // Delete what starts through launchd left behind when their caller died (lib/detach.mjs): a
+  // spec, which holds an environment, goes after a minute. It never throws and is bounded.
+  sweepJobs();
   // A task's name (`rename`) becomes its id before anything reads the arguments, ownership included.
   // --wait alone has a default; keep the shared argument parser's required-value rules.
   const words = command === "start" ? rest.flatMap((word, i) =>

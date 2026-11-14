@@ -71,10 +71,12 @@ export async function fixture(t) {
   }
   // An allowlist prevents inherited nesting, git overrides, session IDs, Node preloads,
   // credentials, or user configuration from influencing any child process.
+  // AGENT_ORCH_LAUNCHD=off keeps every start direct: no test loads a job into the real launchd
+  // unless it overrides this (detach.test.mjs).
   const env = {
     PATH: process.env.PATH, HOME: home, TMPDIR: path.join(root, 'tmp'),
     LANG: 'C', LC_ALL: 'C', TZ: 'UTC',
-    AGENT_ORCH_HOME: state, AGENT_ORCH_SKILLS_DIR: skills,
+    AGENT_ORCH_HOME: state, AGENT_ORCH_SKILLS_DIR: skills, AGENT_ORCH_LAUNCHD: 'off',
     AGENT_ORCH_WAIT_POLL_MS: '100', AGENT_ORCH_MAX_TOTAL: '0',
     AGENT_ORCH_HEAVY_FREE_BYTES: '9999999999', AGENT_ORCH_HEAVY_PRESSURE_LEVEL: '0',
     CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex,

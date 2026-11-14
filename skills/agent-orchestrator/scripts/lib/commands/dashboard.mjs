@@ -1,10 +1,11 @@
 // `dashboard`: reuse a running dashboard, start one in the background or the foreground, or stop it.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { CLI_PATH, DASHBOARD_FILE, STATE_ROOT } from "../config.mjs";
 import { keyedUrl, openBrowser, serveDashboard } from "../dashboard-server.mjs";
+import { startDetached } from "../detach.mjs";
 import { die, emit, readJson } from "../util.mjs";
 
 const PAGE_OPEN_MS = 10000; // the page polls every 2 s, so a request this recent means a tab shows it
@@ -103,37 +104,52 @@ export async function cmdDashboard(args) {
     const idle = args["idle-exit"] || "30m";
     fs.mkdirSync(STATE_ROOT, { recursive: true });
     const logPath = path.join(STATE_ROOT, "dashboard.log");
-    const log = fs.openSync(logPath, "a");
-    const child = spawn(process.execPath, [self, "dashboard", "--host", host, "--port", String(port), "--idle-exit", idle], {
-      detached: true,
-      stdio: ["ignore", log, log],
-    });
-    child.unref();
-    fs.closeSync(log);
-    const exited = () => child.exitCode !== null || child.signalCode !== null;
+    // Detached, and on macOS started through launchd, outside the terminal application (detach.mjs).
+    let pid;
+    try {
+      ({ pid } = startDetached({
+        command: process.execPath,
+        args: [self, "dashboard", "--host", host, "--port", String(port), "--idle-exit", idle],
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: logPath,
+      }));
+    } catch (error) {
+      die(`the background dashboard did not start: ${error.message}`);
+    }
+    // Whether the server has exited, from its PID, since launchd rather than this process may be its
+    // parent. A direct child that exits is reaped by Node while this loop waits, so its PID is gone.
+    const exited = () => {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch (error) {
+        return error.code !== "EPERM";
+      }
+    };
     const stopHint = `  exits once no task is running and no browser tab has shown it for ${idle}; stop now with: node ${self} dashboard --stop`;
     // The server records itself once its first board is built. Wait a minute for that, while it lives.
     const deadline = Date.now() + DETACH_WAIT_MS;
     while (!exited() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       const rec = readJson(DASHBOARD_FILE);
-      if (rec?.pid !== child.pid) continue;
+      if (rec?.pid !== pid) continue;
       if (args.open) openBrowser(keyedUrl(rec.url));
       return emit(args, rec, `dashboard: ${rec.url}  (background pid ${rec.pid}${args.open ? ", opened in the browser" : ""})\n${stopHint}`);
     }
     // A first build on a busy machine can take minutes (AGENT_ORCH_FIRST_BUILD_TIMEOUT, 5m). A server
     // that still lives answers its health check meanwhile: it is starting, not failed, and a tab
     // opened now shows the board as soon as it is built.
-    const url = exited() ? null : await serverUrl(host, port, child.pid);
+    const url = exited() ? null : await serverUrl(host, port, pid);
     if (url) {
       if (args.open) openBrowser(keyedUrl(url));
-      return emit(args, { url, pid: child.pid, building: true },
-        `dashboard: ${url}  (background pid ${child.pid}, still building its first board${args.open ? "; opened in the browser" : ""})\n${stopHint}`);
+      return emit(args, { url, pid, building: true },
+        `dashboard: ${url}  (background pid ${pid}, still building its first board${args.open ? "; opened in the browser" : ""})\n${stopHint}`);
     }
     // Alive, but no address is proved to be its own yet: say so, and open nothing.
     if (!exited()) {
-      return emit(args, { url: null, pid: child.pid, building: true },
-        `dashboard: starting in the background (pid ${child.pid}); its address is not known yet, so nothing was opened. Run this command again in a moment; its log is ${logPath}\n${stopHint}`);
+      return emit(args, { url: null, pid, building: true },
+        `dashboard: starting in the background (pid ${pid}); its address is not known yet, so nothing was opened. Run this command again in a moment; its log is ${logPath}\n${stopHint}`);
     }
     die(`the background dashboard did not start; see ${logPath}`);
   }

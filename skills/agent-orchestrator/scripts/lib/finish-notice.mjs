@@ -15,12 +15,13 @@
 // no notice (it still runs, as far as its parent can tell), and its watcher starts the park watcher
 // that resumes it (park.mjs).
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decisionsIn } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
+import { startDetached } from "./detach.mjs";
 import { firstLine } from "./format.mjs";
 import { spawnParkWatcher } from "./park.mjs";
 import { attemptAgent, describe, endedByStop, loadTask, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
@@ -81,26 +82,21 @@ export function startedByCaller(run, id) {
 // every 10 seconds), means the relay ended. An unreadable start time proves nothing either way.
 export const WAIT_SCRIPT = 'id=$2; [ -n "$id" ] || id=$(ps -o lstart= -p "$1" 2>/dev/null); n=0; while kill -0 "$1" 2>/dev/null; do if [ $((n % 10)) -eq 0 ]; then now=$(ps -o lstart= -p "$1" 2>/dev/null); [ -n "$id" ] || id=$now; if [ -n "$now" ] && [ "$now" != "$id" ]; then break; fi; fi; sleep 1; n=$((n+1)); done; shift 2; exec "$@" "$id"';
 
-// Start the watcher for a task's new attempt; called by `start` once the task record is saved. The
-// relay already runs, so a watcher that cannot start never fails the start: it returns null.
+// Start the watcher for a task's new attempt, detached (on macOS through launchd, outside the
+// terminal application; detach.mjs); called by `start` once the task record is saved. The relay
+// already runs, so a watcher that cannot start never fails the start: it returns null.
 export function watchForFinish(run, task) {
-  let log = null;
   try {
-    log = fs.openSync(path.join(task.outDir, NOTICE_LOG), "a");
     const send = [process.execPath, SCRIPT, run.dir, task.id, String(task.attempt), String(task.pid)];
-    const child = spawn("/bin/sh", ["-c", WAIT_SCRIPT, "finish-notice", String(task.pid), "", ...send], {
+    return startDetached({
+      command: "/bin/sh",
+      args: ["-c", WAIT_SCRIPT, "finish-notice", String(task.pid), "", ...send],
       cwd: run.dir,
-      detached: true,
-      stdio: ["ignore", log, log],
       env: process.env,
-    });
-    child.on("error", () => {});
-    child.unref();
-    return child.pid ?? null;
+      stdout: path.join(task.outDir, NOTICE_LOG),
+    }).pid;
   } catch {
     return null;
-  } finally {
-    if (log !== null) fs.closeSync(log);
   }
 }
 
