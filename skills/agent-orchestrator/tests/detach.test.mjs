@@ -319,14 +319,17 @@ test('a helper that goes on after the caller stopped waiting, and outlives the b
   // relay directly and removes the job, while the helper still runs.
   const { task, command } = await startHeld(f, run, 'late', fake.env);
   assert.ok(fs.existsSync(path.join(fake.dir, 'helper-took')), 'the helper did not take the spec');
-  assert.deepEqual(task.launch, { how: 'direct', reason: 'launchd gave no answer within 3000 ms' });
   // Now the helper goes on and starts its shell, which finds no place to answer: it runs nothing.
   const helper = Number(fs.readFileSync(path.join(fake.dir, 'helper-took'), 'utf8'));
   fs.writeFileSync(path.join(fake.dir, 'helper-go'), '');
   await eventually(() => !alive(helper), 'the helper did not end', 20_000);
   const label = fake.calls().find((c) => c.verb === 'bootstrap').label;
   await eventually(() => !spawnSync('ps', ['-axww', '-o', 'command='], { encoding: 'utf8' }).stdout.includes(`detach-start ${path.join(jobsFolder(f), label)}`), 'the shell did not end', 20_000);
-  assert.equal(command.starts().length, 1, 'the late helper ran the command too');
+  // The relay is held until released, so a second one would still run now.
+  const relays = spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout.split('\n')
+    .filter((line) => line.includes(`command-relay.mjs --out-dir ${task.outDir} `)).map((line) => Number(line.trim().split(/\s+/)[0]));
+  assert.deepEqual(relays, [task.pid], 'the late helper started a second relay');
+  assert.deepEqual(task.launch, { how: 'direct', reason: 'launchd gave no answer within 3000 ms' });
   assert.deepEqual(listJobs(f), []);
   await finish(f, run, task, command);
 });
@@ -337,9 +340,9 @@ test('a helper killed as soon as it has started the shell: the command it ran is
   const run = await f.newRun('killed');
   // A command that ends at once: nothing of it is left to find when the caller decides.
   const { task, command } = await startHeld(f, run, 'killed', fake.env, { quick: true });
-  assert.equal(task.launch.how, 'launchd', JSON.stringify(task.launch));
   await f.finished(run, 'killed');
   assert.equal(command.starts().length, 1, 'the command started more than once');
+  assert.equal(task.launch.how, 'launchd', JSON.stringify(task.launch));
   assert.deepEqual(listJobs(f), []);
 });
 
