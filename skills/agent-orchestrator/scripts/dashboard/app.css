@@ -9,6 +9,7 @@ header h1{font-size:16px;margin:0}
 .live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);align-self:center}
 .live.off{width:auto;height:auto;border-radius:0;background:none;color:var(--bad);font-size:12px}
 #limits{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-left:auto}.limit b{font-weight:600;color:var(--fg)}.limit.hot{color:var(--bad)}
+.disk{font-size:12px;color:var(--muted);white-space:nowrap}.disk.low{color:var(--run);font-weight:600}.disk.critical{color:var(--bad);font-weight:600}
 .muted{color:var(--muted)}html,body{height:100%}body{display:flex;flex-direction:column}
 main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px var(--detail-w,30%);grid-template-rows:minmax(0,1fr) auto}
 #runs,#splitter{grid-row:1/3}#detail{grid-column:3;grid-row:1}

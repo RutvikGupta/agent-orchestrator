@@ -442,6 +442,10 @@ function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t)
     ...mine.map(e=>$("div",{class:"msg you "+e.status,"data-lid":String(e.lid)},$("span",{class:"k"},"you · "+hhmm(e.at)+" · "+word[e.status]),$("pre",{},e.text+pic(e.images)),
       e.status==="failed"?$("div",{style:"grid-column:2"},$("span",{class:"state s-bad"},"Not sent: "+e.error+" "),
         $("button",{type:"button",class:"linkish",onclick:()=>dismiss(key,e.lid)},"dismiss")):null))]}
+// The free disk space under the state root, from /api/health: amber below twice the minimum, red below
+// it (worktrees are then refused); the tooltip names the commands that free space.
+async function diskSpace(){try{const d=(await (await fetch("api/health")).json()).disk,el=document.getElementById("disk");if(!d||!el)return;
+  el.className="disk"+(d.critical?" critical":d.low?" low":"");el.textContent=d.summary+(d.critical?" · below minimum":d.low?" · low":"");el.title=d.title||""}catch{}}
 async function limits(){try{const u=await (await fetch("api/usage")).json();
   document.getElementById("limits").replaceChildren(...["claude","codex"].map(k=>$("span",{class:"limit"+(u[k]&&u[k].max>=80?" hot":""),title:u[k]?u[k].full:"no reading yet"},
     $("b",{},k[0].toUpperCase()+k.slice(1))," "+(u[k]?u[k].short:"unknown"))))}catch{}}
@@ -618,7 +622,7 @@ addEventListener("pagehide",keepState);
 (()=>{let kept;try{kept=JSON.parse(sessionStorage.getItem("orchKept")||"null");sessionStorage.removeItem("orchKept")}catch{}
   if(!kept)return;for(const[k,text]of kept.drafts||[])drafts.set(k,{text,files:[]});
   if(kept.sel){sel=kept.sel;document.querySelector("main").classList.remove("no-detail")}})();
-refresh().then(detail);setInterval(()=>soon(),2000);limits();setInterval(limits,30000);
+refresh().then(detail);setInterval(()=>soon(),2000);limits();setInterval(limits,30000);diskSpace();setInterval(diskSpace,30000);
 // The server pushes "change" when an agent writes; refresh at once, one refresh at a time.
 let refreshing=false,queued=false;
 function soon(){if(refreshing){queued=true;return}refreshing=true;refresh().then(detail).finally(()=>{refreshing=false;if(queued){queued=false;soon()}})}

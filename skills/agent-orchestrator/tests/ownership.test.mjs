@@ -536,3 +536,235 @@ test('the user at a terminal and the dashboard may act on any run; each owner is
   assert.deepEqual([fromDashboard.steeredBy, fromDashboard.from], ['user (dashboard)', 'user']);
   assert.deepEqual((await f.json(['status', parent.id], { env: A })).changedByOthers.map((n) => [n.task, n.action, n.by]), [['two', 'steered', 'user (dashboard)']]);
 });
+
+test('a run counts as ended only when every launcher up its chain is gone; only gc acts on it, and nothing on a terminal run', async (t) => {
+  const f = await fixture(t);
+  const setLauncher = (run, orchestrator) => {
+    const file = path.join(run.dir, 'run.json');
+    writeJson(file, { ...readJson(file), orchestrator });
+  };
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+  const idle = (run, id) => {
+    const file = path.join(run.dir, 'tasks', id, 'task.json');
+    writeJson(file, { ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 });
+    fs.utimesSync(file, new Date(old), new Date(old));
+    const runFile = path.join(run.dir, 'run.json');
+    writeJson(runFile, { ...readJson(runFile), createdAt: old });
+  };
+  // A main session's run, with a task `lead` that is not running, and the nested run `lead` started.
+  const parent = await f.newRun('parent');
+  await f.json(['worktree', parent.id, 'lead', '--no-prep']);
+  const nested = await f.newRun('nested');
+  const wt = await f.json(['worktree', nested.id, 'kid', '--no-prep']);
+  idle(nested, 'kid');
+  setLauncher(nested, { agent: 'delegated-agent', parentRun: parent.id, parentTask: 'lead', lastSeenAt: old });
+  // A terminal run, idle and closed: the user's, never ended.
+  const terminal = await f.newRun('terminal');
+  const mine = await f.json(['worktree', terminal.id, 'own', '--no-prep']);
+  idle(terminal, 'own');
+  const reasons = async () => Object.fromEntries((await f.json(['gc', '--dry-run'], { env: B })).runs.map((r) => [r.run, r.reason ?? r.sessionEnded]));
+
+  // The parent's session lives (this test's process shows as a `codex` host): the nested run is
+  // still its, though its own launcher, task lead, is not running.
+  setLauncher(parent, { agent: 'codex', sessionId: 'session-a', pid: process.pid, lastSeenAt: old });
+  assert.equal((await reasons())[nested.id], 'ownership refused');
+  // The parent's session ended too: the whole chain is gone, so gc collects the nested run.
+  setLauncher(parent, { agent: 'claude', sessionId: 'session-a', pid: 99999999, lastSeenAt: old });
+  const all = await reasons();
+  assert.equal(all[nested.id], 'its process (pid 99999999) is gone');
+  assert.equal(all[terminal.id], 'ownership refused', 'a terminal run counted as ended');
+  // Guarded commands other than gc still refuse it, and adopting is what takes it over.
+  await f.command(['cleanup', nested.id], { code: 4, env: B });
+  await f.command(['close', nested.id, 'kid'], { code: 4, env: B });
+  assert.equal(fs.existsSync(wt.path), true);
+  const report = await f.json(['gc'], { env: B });
+  assert.deepEqual(report.runs.find((r) => r.run === nested.id).removed.map((r) => r.task), ['kid']);
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.equal(fs.existsSync(mine.path), true);
+});
+
+// A process that stands for a host: `title` is what `ps` shows for it, and `file`, when given, is a
+// file it holds open, as a running Codex session holds its rollout. Stopped by its PID at the end.
+async function standIn(t, f, title, file = null) {
+  const ready = path.join(f.root, `stand-in-${Math.random().toString(36).slice(2)}`);
+  const script = `const fs=require('fs');process.title=${JSON.stringify(title)};${file ? `globalThis.held=fs.openSync(${JSON.stringify(file)},'a');` : ''}fs.writeFileSync(${JSON.stringify(ready)},'');setInterval(()=>{},10000);`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await eventually(() => child.exitCode !== null || child.signalCode !== null, 'the stand-in did not exit');
+  };
+  t.after(stop);
+  await eventually(() => fs.existsSync(ready), 'the stand-in did not start');
+  return { pid: child.pid, stop };
+}
+
+// An idle run with a closed task's worktree, launched by `orchestrator` (or as `new` recorded it),
+// last used three days ago.
+async function idleLaunched(f, name, orchestrator, env = {}) {
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+  const run = await f.newRun(name, env);
+  const wt = await f.json(['worktree', run.id, 'kid', '--no-prep'], { env });
+  const file = path.join(run.dir, 'tasks', 'kid', 'task.json');
+  writeJson(file, { ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 });
+  fs.utimesSync(file, new Date(old), new Date(old));
+  const runFile = path.join(run.dir, 'run.json');
+  const record = readJson(runFile);
+  writeJson(runFile, { ...record, createdAt: old, orchestrator: { ...(orchestrator || record.orchestrator), lastSeenAt: old } });
+  return { run, wt };
+}
+const gcReason = async (f, run, env = B) => {
+  const r = (await f.json(['gc', '--dry-run'], { env })).runs.find((x) => x.run === run.id);
+  return r.reason ?? `ended: ${r.sessionEnded}`;
+};
+
+test('a session resumed under a new process keeps its run, however its recorded process ended: Claude by its session file, Codex by its open rollout', async (t) => {
+  const f = await fixture(t);
+  // Claude: the recorded process is gone, but Claude Code reports the session live in another one.
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'resumed-claude', pid: 99999999 });
+  const host = await standIn(t, f, 'claude');
+  fs.mkdirSync(path.join(f.claude, 'sessions'), { recursive: true });
+  writeJson(path.join(f.claude, 'sessions', `${host.pid}.json`), { pid: host.pid, sessionId: 'resumed-claude' });
+  assert.equal(await gcReason(f, claude.run), 'ownership refused');
+  // Codex: a live process holds the session's rollout open.
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'resumed-codex', pid: 99999999 });
+  const rollout = path.join(f.codex, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-resumed-codex.jsonl');
+  fs.mkdirSync(path.dirname(rollout), { recursive: true });
+  fs.writeFileSync(rollout, '');
+  const holder = await standIn(t, f, 'codex', rollout);
+  assert.equal(await gcReason(f, codex.run), 'ownership refused');
+  assert.equal((await f.json(['gc'], { env: B })).totals.removed, 0);
+  for (const wt of [claude.wt, codex.wt]) assert.equal(fs.existsSync(wt.path), true);
+  // Once those processes end too, both sessions have ended.
+  await host.stop();
+  await holder.stop();
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+  assert.equal(await gcReason(f, codex.run), 'ended: its process (pid 99999999) is gone');
+});
+
+test('a launcher whose process cannot be read is not ended: a live relay with ps failing keeps its nested run', async (t) => {
+  const f = await fixture(t);
+  const parent = await f.newRun('parent');
+  const lead = await f.start(parent, 'lead', { config: { hold: true } });
+  await f.ready(lead);
+  const parentFile = path.join(parent.dir, 'run.json');
+  writeJson(parentFile, { ...readJson(parentFile), orchestrator: { agent: 'claude', sessionId: 'gone-session', pid: 99999999, lastSeenAt: new Date(Date.now() - 3 * 86400000).toISOString() } });
+  const nested = await idleLaunched(f, 'nested', null, as(parent, 'lead'));
+  // A `ps` that fails, first on the PATH.
+  const bin = path.join(f.root, 'failing-ps');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const blind = { ...B, PATH: `${bin}:${f.env.PATH}` };
+  assert.equal(await gcReason(f, nested.run, blind), 'ownership refused');
+  await f.command(['gc'], { env: blind });
+  assert.equal(fs.existsSync(nested.wt.path), true, 'a run whose relay could not be read was collected');
+  // With ps readable the relay is seen running; once it has finished, the chain has ended.
+  assert.equal(await gcReason(f, nested.run), 'ownership refused');
+  f.release(lead);
+  await f.finished(parent, 'lead');
+  assert.equal(await gcReason(f, nested.run), 'ended: its process (pid 99999999) is gone');
+});
+
+test('a session is looked for under the host root its run recorded: one live there keeps its run, and a recorded root that is gone proves nothing', async (t) => {
+  const f = await fixture(t);
+  // `new` records where the launching session's host keeps its sessions.
+  const made = await f.newRun('made', { CODEX_THREAD_ID: 'session-a' });
+  assert.deepEqual([made.orchestrator.agent, made.orchestrator.hostRoot], ['codex', f.codex]);
+  // A Claude session and a Codex session that run under other roots than the collector's.
+  const claudeRoot = path.join(f.root, 'other-claude'), codexRoot = path.join(f.root, 'other-codex');
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'elsewhere-claude', pid: 99999999, hostRoot: claudeRoot });
+  const host = await standIn(t, f, 'claude');
+  fs.mkdirSync(path.join(claudeRoot, 'sessions'), { recursive: true });
+  writeJson(path.join(claudeRoot, 'sessions', `${host.pid}.json`), { pid: host.pid, sessionId: 'elsewhere-claude' });
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'elsewhere-codex', pid: 99999999, hostRoot: codexRoot });
+  const rollout = path.join(codexRoot, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-elsewhere-codex.jsonl');
+  fs.mkdirSync(path.dirname(rollout), { recursive: true });
+  fs.writeFileSync(rollout, '');
+  const holder = await standIn(t, f, 'codex', rollout);
+  // A run whose recorded root no longer exists: nothing says its session has ended.
+  const lost = await idleLaunched(f, 'lost', { agent: 'claude', sessionId: 'lost-session', pid: 99999999, hostRoot: path.join(f.root, 'no-such-root') });
+  for (const r of [claude, codex, lost]) assert.equal(await gcReason(f, r.run), 'ownership refused', `${r.run.id} counted as ended`);
+  await host.stop();
+  await holder.stop();
+  for (const r of [claude, codex]) assert.equal(await gcReason(f, r.run), 'ended: its process (pid 99999999) is gone');
+  assert.equal(await gcReason(f, lost.run), 'ownership refused');
+});
+
+test('session evidence that cannot be read in full is not an ended session: a corrupt file of a live process, an unreadable rollout folder', async (t) => {
+  const f = await fixture(t);
+  const sessions = path.join(f.claude, 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  const claude = await idleLaunched(f, 'claude', { agent: 'claude', sessionId: 'unclear-claude', pid: 99999999 });
+  // A corrupt file of a PID that names no process cannot name a live session: it blocks nothing.
+  fs.writeFileSync(path.join(sessions, '99999998.json'), '{"sessionId": "uncl');
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+  // The same file under a live process's PID may name this session.
+  const host = await standIn(t, f, 'claude');
+  fs.writeFileSync(path.join(sessions, `${host.pid}.json`), '{"sessionId": "uncl');
+  assert.equal(await gcReason(f, claude.run), 'ownership refused');
+  await host.stop();
+  assert.equal(await gcReason(f, claude.run), 'ended: its process (pid 99999999) is gone');
+
+  // Codex: a date folder that cannot be listed may hold the session's rollout.
+  const codex = await idleLaunched(f, 'codex', { agent: 'codex', sessionId: 'unclear-codex', pid: 99999999 });
+  const day = path.join(f.codex, 'sessions', '2026', '11', '12');
+  fs.mkdirSync(day, { recursive: true });
+  assert.equal(await gcReason(f, codex.run), 'ended: its process (pid 99999999) is gone');
+  fs.chmodSync(day, 0o000);
+  try {
+    assert.equal(await gcReason(f, codex.run), 'ownership refused');
+    assert.equal((await f.json(['gc'], { env: B })).runs.find((r) => r.run === codex.run.id).reason, 'ownership refused');
+    assert.equal(fs.existsSync(codex.wt.path), true);
+  } finally {
+    fs.chmodSync(day, 0o700);
+  }
+});
+
+test('one lsof listing serves a whole collection pass, however many Codex sessions it judges', async (t) => {
+  const f = await fixture(t);
+  const day = path.join(f.codex, 'sessions', '2026', '11', '13');
+  fs.mkdirSync(day, { recursive: true });
+  const runs = [];
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    fs.writeFileSync(path.join(day, `rollout-2026-11-13T00-00-${String(n).padStart(2, '0')}-many-${n}.jsonl`), '');
+    runs.push(await idleLaunched(f, `many-${n}`, { agent: 'codex', sessionId: `many-${n}`, pid: 99999999 }));
+  }
+  // An `lsof` that records each call, then runs the real one.
+  const real = f.env.PATH.split(':').map((dir) => path.join(dir, 'lsof')).find((file) => fs.existsSync(file));
+  assert.ok(real, 'no lsof on the PATH');
+  const bin = path.join(f.root, 'counting-lsof'), log = path.join(f.root, 'lsof.log');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'lsof'), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${real}" "$@"\n`, { mode: 0o755 });
+  const report = await f.json(['gc', '--dry-run'], { env: { ...B, PATH: `${bin}:${f.env.PATH}` } });
+  for (const r of runs) assert.equal(report.runs.find((x) => x.run === r.run.id).sessionEnded, 'its process (pid 99999999) is gone');
+  // Calls that ask which files are open (not the ones that ask for working directories). A listing
+  // is asked for again, in parts, only when a process went while it was read, eight calls at most:
+  // never one per session.
+  const probes = fs.readFileSync(log, 'utf8').split('\n').filter((line) => line && !line.includes('-d cwd'));
+  assert.ok(probes.length >= 1 && probes.length <= 8, `${probes.length} lsof calls for ten sessions:\n${probes.join('\n')}`);
+});
+
+test('Codex evidence that is not known to be complete is not an ended session: an lsof that exits with an error, a rollout whose path does not resolve', async (t) => {
+  const f = await fixture(t);
+  const day = path.join(f.codex, 'sessions', '2026', '11', '13');
+  fs.mkdirSync(day, { recursive: true });
+  // An lsof listing that names every process asked for but ends with an error, as one cut short does.
+  const cut = await idleLaunched(f, 'cut', { agent: 'codex', sessionId: 'cut-short', pid: 99999999 });
+  fs.writeFileSync(path.join(day, 'rollout-2026-11-13T00-00-00-cut-short.jsonl'), '');
+  assert.equal(await gcReason(f, cut.run), 'ended: its process (pid 99999999) is gone');
+  const bin = path.join(f.root, 'partial-lsof');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'lsof'), '#!/bin/sh\nfor a in "$@"; do last="$a"; done\necho "$last" | tr "," "\\n" | sed "s/^/p/"\nexit 1\n', { mode: 0o755 });
+  assert.equal(await gcReason(f, cut.run, { ...B, PATH: `${bin}:${f.env.PATH}` }), 'ownership refused');
+  // A rollout that is a link to nowhere cannot be matched with the files processes hold open.
+  const dangling = await idleLaunched(f, 'dangling', { agent: 'codex', sessionId: 'dangling-rollout', pid: 99999999 });
+  const link = path.join(day, 'rollout-2026-11-13T00-00-01-dangling-rollout.jsonl');
+  fs.symlinkSync(path.join(f.root, 'no-such-rollout'), link);
+  try {
+    assert.equal(await gcReason(f, dangling.run), 'ownership refused');
+    assert.equal((await f.json(['gc'], { env: B })).runs.find((r) => r.run === dangling.run.id).reason, 'ownership refused');
+    assert.equal(fs.existsSync(dangling.wt.path), true);
+  } finally {
+    // The fixture's own cleanup reads the sessions folder, and stops at a link to nowhere.
+    fs.rmSync(link, { force: true });
+  }
+});

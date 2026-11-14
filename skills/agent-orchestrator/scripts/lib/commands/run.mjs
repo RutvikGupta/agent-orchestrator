@@ -1,11 +1,11 @@
 // `new`, `worktree`, `runs`, and `cleanup`: create a run and its worktrees, list runs, and clean up.
 
-import { collectWorktrees, collectionText } from "../worktree-gc.mjs";
+import { collectWorktrees, collectionText, ensureDisk } from "../worktree-gc.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { RUNS_DIR } from "../config.mjs";
 import { compact, firstLine, slug, stamp, table } from "../format.mjs";
-import { guard, recordChange } from "../ownership.mjs";
+import { guard, recordChange, withHostRoot } from "../ownership.mjs";
 import { detectOrchestrator, listRuns, listTasks, loadRun, loadTask, saveTask, validTask } from "../runs.mjs";
 import { die, emit, git, writeJson } from "../util.mjs";
 import { totals } from "../views.mjs";
@@ -40,8 +40,9 @@ export function cmdNew(args) {
     baseBranch: top ? git(top, ["branch", "--show-current"], { allowFail: true }) || null : null,
     baseCommit: top ? git(top, ["rev-parse", "HEAD"], { allowFail: true }) : null,
     goal: args.goal || null,
-    // lastSeenAt: when its owner last used the run (ownership.mjs, touchOwner).
-    orchestrator: { ...detectOrchestrator({ started: true }), lastSeenAt: createdAt },
+    // lastSeenAt: when its owner last used the run (ownership.mjs, touchOwner). hostRoot: where the
+    // launching session's host keeps its sessions, which tells later whether that session still runs.
+    orchestrator: { ...withHostRoot(detectOrchestrator({ started: true })), lastSeenAt: createdAt },
     createdAt,
   };
   writeJson(path.join(dir, "run.json"), run);
@@ -69,6 +70,10 @@ export async function createWorktree(run, id, { from, branch, path: worktreePath
   if (!from) die(`--from is not a commit in ${run.repo}: ${start}`);
   const wt = path.resolve(worktreePath || (retainedHead && previous.path) || path.join(run.dir, "worktrees", id));
   if (fs.existsSync(wt)) die(`worktree path already exists: ${wt}`);
+  // Every worktree (`worktree`, `dispatch`, a restore) is created here, after the disk check: on a
+  // disk below AGENT_ORCH_MIN_FREE_DISK it collects unused worktrees, then refuses if that was not
+  // enough, before anything is created.
+  await ensureDisk(path.dirname(wt));
   fs.mkdirSync(path.dirname(wt), { recursive: true });
   git(run.repo, retainedHead ? ["worktree", "add", "-q", wt, branch] : ["worktree", "add", "-q", "-b", branch, wt, from]);
   const createdAt = new Date().toISOString();

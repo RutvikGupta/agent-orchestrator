@@ -20,8 +20,9 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH, RUNS_DIR } from "./config.mjs";
-import { agentOfCommand, detectOrchestrator, isParked, listRuns, loadTask, processInfo, processStarted, relayAlive } from "./runs.mjs";
+import { spawnSync } from "node:child_process";
+import { CLAUDE_PROJECTS, CLI_PATH, CODEX_HOME, RUNS_DIR } from "./config.mjs";
+import { agentOfCommand, detectOrchestrator, exists, isParked, listRuns, loadTask, processInfo, processStarted, relayAlive, relayOf } from "./runs.mjs";
 import { die, parseDuration, readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -92,8 +93,13 @@ export function actorOf(caller) {
   return { agent: r.agent, sessionId: r.sessionId || null, pid: r.pid || null, ...(caller.kind === "unknown" ? { unidentified: true } : {}) };
 }
 
+// The actor that automatic worktree collection records (`gc --auto`, and worktree creation on a
+// full disk): nobody asked for that change, so a notice names it rather than the caller.
+export const AUTO_COLLECTOR = Object.freeze({ agent: "orch", auto: "automatic worktree collection" });
+
 export function actorLabel(actor) {
   if (typeof actor === "string") return actor;
+  if (actor?.auto) return actor.auto;
   if (actor?.agent === "delegated-agent") return `task ${actor.task} of run ${actor.run}`;
   return launcherLabel(actor);
 }
@@ -152,6 +158,278 @@ function sessionGone(o) {
   return { gone: false };
 }
 
+// Whether the launcher of link `i` is gone: a session's host process, or an orch task's relay.
+function launcherGone(links, i, broken) {
+  const o = links[i].launcher;
+  if (o?.agent !== "delegated-agent") return sessionGone(o);
+  const parent = links[i + 1]?.run || null;
+  const task = parent ? loadTask(parent, o.parentTask) : null;
+  if (!parent) return { gone: true, why: `its parent run ${broken} is gone` };
+  return !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
+}
+
+// Liveness for `gc`, which removes worktrees on its strength, so it must be certain: "alive",
+// "ended" or "unknown", with why. Unknown (a process that `ps` cannot read, a host registry that
+// cannot be read in full) keeps the run, as alive does. Adoption keeps its own, looser test
+// (launcherGone).
+const ALIVE = { state: "alive", why: null };
+const unknown = (why) => ({ state: "unknown", why });
+
+// What a collection pass reads of the machine, read once and shared by every run it judges: the
+// process table, each host root's session registry, and the rollout files Codex processes hold
+// open. A pass over many runs therefore costs one `ps` and one `lsof`. resetHostView() starts a
+// new pass.
+let hostView = null;
+const view = () => (hostView ??= { table: undefined, claude: new Map(), codex: new Map(), open: undefined });
+export function resetHostView() {
+  hostView = null;
+}
+
+// Every process: a Map from PID to { ppid, state, started, command }, or null when `ps` fails. The
+// start time is written as processStarted() writes it; `state` is ps's (Z for a process that has
+// exited and only awaits its parent).
+function processTable() {
+  const v = view();
+  if (v.table !== undefined) return v.table;
+  const r = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,state=,lstart=,command="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 10000 });
+  if (r.error || r.status !== 0) return (v.table = null);
+  const rows = new Map();
+  for (const line of r.stdout.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s(.*)$/.exec(line);
+    if (m) rows.set(Number(m[1]), { ppid: Number(m[2]), state: m[3], started: m[4].replace(/\s+/g, " "), command: m[5].trim() });
+  }
+  return (v.table = rows);
+}
+
+// One process: its row; null when it certainly does not exist; undefined when it exists but the
+// table cannot say what it is (`ps` failed, or the process is not in the listing).
+function processRow(pid) {
+  if (!pid || !exists(pid)) return null;
+  return processTable()?.get(pid) ?? undefined;
+}
+
+// The folder a host keeps its sessions under: Claude Code's configuration folder, or CODEX_HOME.
+// `new` and --adopt record it with the launcher (hostRoot), so that a collector started with another
+// configuration still looks where that session's host writes.
+export function hostRootOf(agent) {
+  return agent === "claude" ? path.dirname(CLAUDE_PROJECTS) : agent === "codex" ? CODEX_HOME : null;
+}
+
+// A launcher record with its host's root, for a Claude or Codex session: what `new`, --adopt and a
+// resumed owner's first command record.
+export function withHostRoot(record) {
+  const hostRoot = hostRootOf(record?.agent);
+  return hostRoot ? { ...record, hostRoot } : record;
+}
+
+// Folder names, or the error's code. `recorded`: the root is the one the launcher recorded, so a
+// folder missing there is no evidence (unknown); in the collector's own root it means the host runs
+// no session.
+function namesOf(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch (error) {
+    return error.code || "EIO";
+  }
+}
+const missingState = (names, recorded) => (names === "ENOENT" && !recorded ? "ended" : "unknown");
+
+// Whether Claude Code reports session `id` live under `root`: it writes sessions/<pid>.json, naming
+// its session, for each running session. A file that cannot be read or parsed counts as unknown only
+// while the PID in its name is alive: a dead PID's file names no live session.
+function claudeSessionLive(id, root, recorded) {
+  const v = view();
+  if (!v.claude.has(root)) {
+    const dir = path.join(root, "sessions");
+    const names = namesOf(dir);
+    const registry = { error: null, sessions: new Map(), unreadable: false };
+    if (!Array.isArray(names)) registry.error = names;
+    else {
+      for (const name of names) {
+        const pid = /^(\d+)\.json$/.test(name) ? Number.parseInt(name, 10) : null;
+        if (!pid) continue;
+        let record = null;
+        try {
+          record = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+        } catch {}
+        if (typeof record?.sessionId === "string") registry.sessions.set(record.sessionId, [...(registry.sessions.get(record.sessionId) || []), pid]);
+        else if (processRow(pid) !== null) registry.unreadable = true;
+      }
+    }
+    v.claude.set(root, registry);
+  }
+  const registry = v.claude.get(root);
+  if (registry.error) return missingState(registry.error, recorded);
+  let state = registry.unreadable ? "unknown" : "ended";
+  for (const pid of registry.sessions.get(id) || []) {
+    const row = processRow(pid);
+    if (row === undefined) state = "unknown";
+    else if (row && agentOfCommand(row.command) === "claude") return "alive";
+  }
+  return state;
+}
+
+// `lsof` for some processes, into `listing` ({ calls, asked, output }): true when every one of them
+// that still lives is covered by a listing that ended without error. `lsof` also ends with an error
+// when a process it was asked about has just gone, as a Codex session's short-lived children do, and
+// its output then proves nothing: the processes are asked about again in two halves, down to a
+// single one, which is settled by whether it still exists (one that is gone holds no file). The
+// number of calls is bounded; past it, nothing is proved.
+const LSOF_CALLS = 8;
+function listOpenFiles(pids, listing) {
+  const asked = pids.filter(exists);
+  if (!asked.length) return true;
+  if (listing.calls >= LSOF_CALLS) return false;
+  listing.calls += 1;
+  const r = spawnSync("lsof", ["-nP", "-Fn", "-p", asked.join(",")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15000 });
+  if (r.error || r.signal) return false;
+  if (r.status === 0) {
+    listing.asked.push(...asked);
+    listing.output.push(r.stdout || "");
+    return true;
+  }
+  if (asked.length === 1) return !exists(asked[0]);
+  const half = asked.length >> 1;
+  return listOpenFiles(asked.slice(0, half), listing) && listOpenFiles(asked.slice(half), listing);
+}
+
+// The rollout files that live Codex processes (and their children) hold open, as real paths, read
+// once for the whole pass. Null unless the listing is known to be complete: when the process table
+// or `lsof` cannot be read, when `lsof` is cut short or keeps ending with an error, when it says
+// nothing of a Codex process that still lives, or when a rollout it names cannot be resolved.
+function openRollouts() {
+  const v = view();
+  if (v.open !== undefined) return v.open;
+  const table = processTable();
+  if (!table) return (v.open = null);
+  // A process that has exited and awaits its parent (state Z) holds no file, and lsof lists none.
+  const running = [...table].filter(([, row]) => !row.state.startsWith("Z"));
+  const hosts = running.filter(([, row]) => agentOfCommand(row.command) === "codex").map(([pid]) => pid);
+  const pids = [...new Set([...hosts, ...running.filter(([, row]) => hosts.includes(row.ppid)).map(([pid]) => pid)])];
+  const listing = { calls: 0, asked: [], output: [] };
+  if (!listOpenFiles(pids, listing)) return (v.open = null);
+  const open = new Set(), listed = new Set();
+  for (const line of listing.output.join("\n").split("\n")) {
+    if (line.startsWith("p")) listed.add(Number(line.slice(1)));
+    else if (line.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) {
+      try {
+        open.add(fs.realpathSync(line.slice(1)));
+      } catch {
+        return (v.open = null);
+      }
+    }
+  }
+  if (listing.asked.some((pid) => hosts.includes(pid) && !listed.has(pid))) return (v.open = null);
+  return (v.open = open);
+}
+
+// Whether a Codex process holds session `id`'s rollout file open under `root`, as a running Codex
+// session does. A date folder that cannot be listed may hold the session's rollout, so the answer
+// is then unknown unless the session is found alive.
+function codexSessionLive(id, root, recorded) {
+  const v = view();
+  if (!v.codex.has(root)) {
+    const listing = { error: null, files: [], partial: false };
+    const walk = (dir, depth) => {
+      const names = namesOf(dir);
+      if (!Array.isArray(names)) {
+        if (depth === 0) listing.error = names;
+        else listing.partial = true;
+        return;
+      }
+      for (const name of names) {
+        if (depth < 3) {
+          if (/^\d+$/.test(name)) walk(path.join(dir, name), depth + 1);
+        } else if (name.endsWith(".jsonl")) listing.files.push(path.join(dir, name));
+      }
+    };
+    walk(path.join(root, "sessions"), 0);
+    v.codex.set(root, listing);
+  }
+  const listing = v.codex.get(root);
+  if (listing.error) return missingState(listing.error, recorded);
+  const files = listing.files.filter((f) => f.endsWith(`-${id}.jsonl`));
+  const absent = listing.partial ? "unknown" : "ended";
+  if (!files.length) return absent;
+  const open = openRollouts();
+  if (!open) return "unknown";
+  // A rollout whose path cannot be resolved cannot be matched with the open files: unknown.
+  let state = absent;
+  for (const f of files) {
+    try {
+      if (open.has(fs.realpathSync(f))) return "alive";
+    } catch {
+      state = "unknown";
+    }
+  }
+  return state;
+}
+
+// A session launcher: alive while its recorded process runs, or while the host reports its session
+// live in another process; ended only when neither is so; unknown when either cannot be read, or
+// when no process was recorded for it. The host's report is read under the root the launcher
+// recorded (hostRoot), or, for a run recorded before roots were, under the collector's own.
+function sessionLiveness(o) {
+  if (!o?.pid) return unknown("no process was recorded for its session");
+  const row = processRow(o.pid);
+  if (row === undefined) return unknown(`its process (pid ${o.pid}) could not be read`);
+  const why = row === null ? `its process (pid ${o.pid}) is gone`
+    : !agentOfCommand(row.command) ? `pid ${o.pid} now runs another program`
+      : o.started && row.started !== o.started ? `pid ${o.pid} now belongs to a process started at another time` : null;
+  if (!why) return ALIVE;
+  if (!o.sessionId) return { state: "ended", why };
+  const recorded = typeof o.hostRoot === "string" && o.hostRoot ? o.hostRoot : null;
+  const root = recorded || hostRootOf(o.agent);
+  const live = !root ? "unknown" : o.agent === "claude" ? claudeSessionLive(o.sessionId, root, Boolean(recorded)) : codexSessionLive(o.sessionId, root, Boolean(recorded));
+  if (live === "alive") return { state: "alive", why: `session ${o.sessionId} runs in another process` };
+  if (live === "unknown") return unknown(`${why}, and whether session ${o.sessionId} runs in another process could not be read`);
+  return { state: "ended", why };
+}
+
+// An orch task launcher: alive while its relay runs or it is parked; ended once its relay's process
+// is gone or runs something else. Unknown when its relay cannot be read, or when its run or task
+// record is gone, so nothing tells whose it was.
+function taskLiveness(parent, o, broken) {
+  if (!parent) return unknown(`its parent run ${broken} is gone, so its launchers cannot be checked`);
+  const task = loadTask(parent, o.parentTask);
+  if (!task) return unknown(`task ${o.parentTask} of run ${o.parentRun} has no record`);
+  const stopped = { state: "ended", why: `task ${o.parentTask} of run ${o.parentRun} is not running` };
+  if (isParked(parent, task)) return ALIVE;
+  if (!task.pid) return stopped;
+  const row = processRow(task.pid);
+  if (row === undefined) return unknown(`the relay of task ${o.parentTask} of run ${o.parentRun} (pid ${task.pid}) could not be read`);
+  if (row === null) return stopped;
+  if (row.command.includes("relay.mjs")) return !task.outDir || relayOf(row.command, task.outDir) ? ALIVE : stopped;
+  // Right after `start` forks it, a relay still shows its parent's command for a moment.
+  const age = task.startedAt ? Date.now() - Date.parse(task.startedAt) : Infinity;
+  return age >= 0 && age < 10000 ? ALIVE : stopped;
+}
+
+// Whether every launcher up the run's chain has certainly ended: { ended, state, why }. `gc`
+// collects such a run's worktrees for anyone, under its own safety rules, since no session is left
+// to do it. A run launched from a terminal never has ended. `state` is the chain's: ended, or
+// alive or unknown with the first link that is so.
+const endedCache = new WeakMap();
+export function sessionsEnded(own) {
+  if (endedCache.has(own)) return endedCache.get(own);
+  let state = { ended: false, state: "alive", why: null };
+  if (!own.mine && !own.userOwned) {
+    const states = own.links.map((link, i) => link.launcher?.agent === "delegated-agent"
+      ? taskLiveness(own.links[i + 1]?.run || null, link.launcher, own.broken)
+      : sessionLiveness(link.launcher));
+    const live = states.find((s) => s.state !== "ended");
+    state = live ? { ended: false, ...live } : { ended: true, state: "ended", why: states.at(-1).why };
+  }
+  endedCache.set(own, state);
+  return state;
+}
+
+// How long since any launcher up the run's chain last used it (or the run was created, when no use
+// is recorded), in milliseconds: the least of them.
+export function sinceLastUse(own, now = Date.now()) {
+  return Math.min(...own.links.map((l) => now - (Date.parse(l.launcher?.lastSeenAt || l.run.createdAt) || 0)));
+}
+
 // Whether every owner up the chain has gone: each link's launcher (a session's host process, an
 // orch task's relay) is gone, and has not used the run for AGENT_ORCH_ADOPT_AFTER. `recent` is set
 // when the run's own launcher is gone but used it lately, as a session resumed elsewhere does.
@@ -159,14 +437,7 @@ function orphanState(links, broken) {
   const after = adoptAfter();
   const states = links.map((link, i) => {
     const o = link.launcher;
-    let gone;
-    if (o?.agent === "delegated-agent") {
-      const parent = links[i + 1]?.run || null;
-      const task = parent ? loadTask(parent, o.parentTask) : null;
-      gone = !parent
-        ? { gone: true, why: `its parent run ${broken} is gone` }
-        : !task || (!relayAlive(task.pid, task.startedAt, task.outDir) && !isParked(parent, task)) ? { gone: true, why: `task ${o.parentTask} of run ${o.parentRun} is not running` } : { gone: false };
-    } else gone = sessionGone(o);
+    const gone = launcherGone(links, i, broken);
     const seen = Date.parse(o?.lastSeenAt || link.run.createdAt) || 0;
     return { ...gone, seenAt: seen ? new Date(seen).toISOString() : null, stale: Date.now() - seen > after };
   });
@@ -203,7 +474,7 @@ export function ownershipOf(run, caller = callerIdentity()) {
   const matched = links.find((l) => (me && sameLauncher(l.launcher, me)) || userRun(l.launcher)) || null;
   const top = links.at(-1).launcher;
   const userOwned = !broken && top?.agent !== "delegated-agent" && !AGENT_HOSTS.has(top?.agent);
-  const own = { run: run.id, caller, links, matched, mine: Boolean(matched), direct: links[0].launcher, top, userOwned };
+  const own = { run: run.id, caller, links, matched, mine: Boolean(matched), direct: links[0].launcher, top, userOwned, broken };
   let state = null;
   const lazy = () => (state ??= own.mine || userOwned ? { orphaned: false, why: null, recent: null } : orphanState(links, broken));
   for (const key of ["orphaned", "why", "recent"]) Object.defineProperty(own, key, { get: () => lazy()[key], enumerable: true });
@@ -228,7 +499,7 @@ export function touchOwner(run, caller = callerIdentity()) {
   if (!o || !sameLauncher(o, me)) return;
   const moved = AGENT_HOSTS.has(o.agent) && Boolean(me.pid) && (me.pid !== o.pid || Boolean(me.started && o.started && me.started !== o.started));
   if (!moved && Date.now() - (Date.parse(o.lastSeenAt) || 0) < TOUCH_MS) return;
-  const orchestrator = { ...o, ...(moved ? { pid: me.pid, started: me.started || processStarted(me.pid) } : {}), lastSeenAt: new Date().toISOString() };
+  const orchestrator = { ...o, ...(moved ? withHostRoot({ agent: o.agent, pid: me.pid, started: me.started || processStarted(me.pid) }) : {}), lastSeenAt: new Date().toISOString() };
   try {
     writeJson(file, { ...current, orchestrator });
     link.run.orchestrator = orchestrator;
@@ -284,9 +555,10 @@ function refusalText(run, own, what, refused) {
 // tasks of run R"), and `refused` (a list, or a function that builds it) names what a refusal
 // leaves alone. Returns { actor, owned, own, adopted }: the actor to record, and whether the caller
 // owns the run (a change by anyone else leaves the owner a notice: recordChange). A refusal exits 4.
+// `ended`: also allow a run whose launching sessions have all ended (sessionsEnded), as `gc` does.
 // The command's own caller is checked once per run: a later call returns the same answer.
 const decisions = new Map();
-export function guard(run, what, { adopt = false, refused = [], caller = null } = {}) {
+export function guard(run, what, { adopt = false, refused = [], caller = null, ended = false } = {}) {
   const ours = !caller;
   if (ours && decisions.has(run.dir)) return decisions.get(run.dir);
   caller ??= callerIdentity();
@@ -295,7 +567,7 @@ export function guard(run, what, { adopt = false, refused = [], caller = null } 
   let g;
   if (own.mine) g = { actor, owned: true, own, adopted: false };
   else if (adopt) g = adoptRun(run, own, actor, what);
-  else if (mayAct(own)) g = { actor, owned: false, own, adopted: false };
+  else if (mayAct(own) || (ended && sessionsEnded(own).ended)) g = { actor, owned: false, own, adopted: false };
   else die(refusalText(run, own, what, typeof refused === "function" ? refused() : refused), REFUSED);
   if (ours) decisions.set(run.dir, g);
   return g;
@@ -345,7 +617,7 @@ function adoptRun(run, own, actor, what) {
   const file = path.join(run.dir, "run.json");
   const current = readJson(file) || {};
   const now = new Date().toISOString();
-  const record = { ...(caller.kind === "task" ? caller.record : detectOrchestrator({ started: true })), lastSeenAt: now };
+  const record = withHostRoot({ ...(caller.kind === "task" ? caller.record : detectOrchestrator({ started: true })), lastSeenAt: now });
   const previousOrchestrators = [...(current.previousOrchestrators || []), { ...(current.orchestrator || {}), replacedAt: now, replacedBy: actor }];
   writeJson(file, { ...current, orchestrator: record, previousOrchestrators });
   Object.assign(run, { orchestrator: record, previousOrchestrators });
@@ -377,7 +649,10 @@ export function noticeText(n) {
 // and message an owning orch task. `g` is guard()'s answer.
 export function recordChange(run, g, { task = null, attempt = null, action }) {
   if (!g || g.owned) return null;
-  const owners = g.own.links.map((l) => l.launcher).filter((o) => o?.agent);
+  let owners = g.own.links.map((l) => l.launcher).filter((o) => o?.agent);
+  // A run that records no launcher is the user's (ownershipOf): the change is recorded in the run for
+  // the user at a terminal, whose `status` shows it. No other session is told.
+  if (!owners.length && g.own.userOwned) owners = [{ agent: "terminal", sessionId: null }];
   if (!owners.length) return null;
   const notice = {
     id: randomUUID().slice(0, 8), time: new Date().toISOString(), run: run.id, task, attempt, action,
@@ -427,7 +702,10 @@ export function unseenNotices(run, caller = null) {
   const reader = readerKey(caller.record);
   if (!reader) return [];
   const seen = new Set(readLines(path.join(run.dir, SEEN_FILE)).filter((s) => s.reader === reader).map((s) => s.id));
-  return readLines(noticesFile(run)).filter((n) => typeof n?.id === "string" && !seen.has(n.id) && (n.owners || []).some((o) => sameLauncher(o, caller.record)));
+  // A notice for the user at a terminal reaches any caller that is the user, whatever host process
+  // its terminal runs under.
+  const mine = (o) => sameLauncher(o, caller.record) || (caller.kind === "user" && o?.agent === "terminal");
+  return readLines(noticesFile(run)).filter((n) => typeof n?.id === "string" && !seen.has(n.id) && (n.owners || []).some(mine));
 }
 
 export function markNoticesSeen(run, notices, caller = callerIdentity()) {

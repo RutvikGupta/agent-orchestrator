@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +26,7 @@ import { eventually, fixture, readJson } from './helpers.mjs';
 // it read the board, until ctl/release; ctl/blocked names the hold. ctl/crash makes builds exit 7,
 // ctl/fail makes them fail with its text, and ctl/ignoreterm makes workers started while it exists
 // ignore SIGTERM.
-const TIMERS = ['overdueBuild', 'killWorker', 'pacedBuild', 'answerWaitingRead'];
+const TIMERS = ['overdueBuild', 'killWorker', 'pacedBuild', 'answerWaitingRead', 'autoCollect'];
 const PRELOAD = String.raw`
 const fs = require('node:fs');
 const path = require('node:path');
@@ -324,7 +325,7 @@ test('health answers during the first build; state waits 10 seconds for the firs
     },
   });
   await eventually(() => b.exists('blocked'), 'the first build did not start');
-  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [30_000], 'the default build deadline is 30 seconds');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [300_000], 'the default first-build deadline is 5 minutes');
   const first = b.get('/api/state');
   const [wait] = await eventually(() => b.pending('answerWaitingRead').length && b.pending('answerWaitingRead'), 'the read did not wait');
   assert.equal(wait.ms, 10_000);
@@ -649,4 +650,160 @@ test('when the first build fails, state answers 503 with the reason at once, not
   assert.equal(r.headers.get('x-orch-error'), 'cannot read runs');
   assert.deepEqual(await r.json(), { error: 'cannot read runs' });
   assert.deepEqual(b.pending('answerWaitingRead'), [], 'a read waited although the reason was known');
+});
+
+test('a bad AGENT_ORCH_FIRST_BUILD_TIMEOUT stops startup with the usage code', async (t) => {
+  const f = await fixture(t);
+  const result = await f.command(['dashboard', '--host', '127.0.0.1', '--port', '0'], { code: 2, env: { AGENT_ORCH_FIRST_BUILD_TIMEOUT: 'later' } });
+  assert.match(result.stderr, /bad duration "later"/);
+  assert.equal(fs.existsSync(path.join(f.state, 'dashboard.json')), false);
+});
+
+test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT; the first limit is never the shorter', async (t) => {
+  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
+  await eventually(() => b.exists('blocked'), 'the first build did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
+  // A read waits for the first board, through the lost build and its replacement.
+  const waiting = b.get('/api/state');
+  await eventually(() => b.pending('answerWaitingRead').length === 1, 'the read did not wait for the first board');
+  await b.control('fire overdueBuild');
+  await eventually(() => b.output().includes('state build timed out after 90s'), `the first build was not stopped at its deadline:\n${b.output()}`);
+  // Its replacement is a first build too.
+  await eventually(() => b.builds().length === 2 && b.pending('overdueBuild').length === 1, 'the replacement did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
+  assert.equal((await waiting).status, 200, 'the waiting read did not get the first board');
+  await b.settled();
+  await eventually(() => fs.existsSync(path.join(b.f.state, 'dashboard.json')), 'the dashboard was not announced after its first board');
+  b.remove('blocked');
+  b.touch('hang');
+  await b.rebuild();
+  await eventually(() => b.exists('blocked'), 'the later build did not hang');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000]);
+  b.touch('release');
+  await b.settled();
+
+  // A later-build limit longer than the first-build default applies to the first build too.
+  const long = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '10m' }, prepare: async (b) => b.touch('hang') });
+  await eventually(() => long.exists('blocked'), 'the first build did not start');
+  assert.deepEqual(long.pending('overdueBuild').map((x) => x.ms), [600_000]);
+  long.touch('release');
+  await long.settled();
+});
+
+// A run whose launching session has ended (its PID names no process), idle for three hours, with a
+// closed task's clean worktree; or, with `live`, one that this test's own process launched.
+async function idleRun(b, name, { live = false } = {}) {
+  const run = await b.f.newRun(name);
+  const wt = await b.f.json(['worktree', run.id, 'old', '--no-prep']);
+  const old = new Date(Date.now() - 3 * 3600000).toISOString();
+  const file = b.f.taskFile(run, 'old');
+  fs.writeFileSync(file, JSON.stringify({ ...readJson(file), createdAt: old, closedAt: old, closedExplicitlyAttempt: 0 }));
+  fs.utimesSync(file, new Date(old), new Date(old));
+  const runFile = path.join(run.dir, 'run.json');
+  fs.writeFileSync(runFile, JSON.stringify({ ...readJson(runFile), createdAt: old, orchestrator: { agent: live ? 'codex' : 'claude', sessionId: live ? 'dashboard-session' : 'ended-session', pid: live ? process.pid : 99999999, lastSeenAt: old } }));
+  return { run, wt };
+}
+
+test('the automatic collection runs five minutes after each pass, as the user whoever started the dashboard, and logs each worktree; AGENT_ORCH_AUTO_GC=off turns it off', async (t) => {
+  let ended, live;
+  // The dashboard runs in a live session's environment; its collection must not take that
+  // session's run for its own. The disk is low, so one hour of rest is enough.
+  const session = { CLAUDE_CODE_SESSION_ID: 'dashboard-session', CODEX_THREAD_ID: 'dashboard-session' };
+  const b = await setup(t, {
+    env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB', ...session },
+    prepare: async (b) => { ended = await idleRun(b, 'ended'); live = await idleRun(b, 'live', { live: true }); },
+  });
+  // The server sets its timers after it announces itself, and prints its address after them.
+  await eventually(() => b.output().includes('dashboard: http'), 'the dashboard did not finish starting');
+  assert.deepEqual(b.pending('autoCollect').map((x) => x.ms), [300_000]);
+  await b.control('fire autoCollect');
+  await eventually(() => b.output().includes('auto gc freed'), `the collection did not run:\n${b.output()}`);
+  // Once the pass has ended, the next one waits five minutes again.
+  await eventually(() => b.pending('autoCollect').length === 1, 'the next collection was not scheduled');
+  assert.deepEqual(b.pending('autoCollect').map((x) => x.ms), [300_000]);
+  assert.ok(b.output().includes(`orch: auto gc removed worktree ${ended.wt.path} (run ${ended.run.id}, task old, `), b.output());
+  assert.match(b.output(), /orch: auto gc freed \S+ \S+ from 1 worktree; disk 20 GB free\n/);
+  assert.equal(fs.existsSync(ended.wt.path), false);
+  assert.equal(fs.existsSync(live.wt.path), true, 'the collection took the live session\'s worktree');
+
+  const off = await setup(t, { env: { AGENT_ORCH_AUTO_GC: 'off' } });
+  await eventually(() => off.output().includes('dashboard: http'), 'the dashboard did not finish starting');
+  assert.deepEqual(off.pending('autoCollect'), []);
+});
+
+// `dashboard --detach` on `port`, with a server whose first build hangs. Both the waiting command and
+// the server load PRELOAD: their clocks stand still unless ctl/clock moves them. `stop(pid)` names
+// the server for the cleanup: it is no child of this test, so it is stopped by its PID, and it
+// kills its worker as it exits.
+async function detached(t, port) {
+  let server = null, ctl = null;
+  // Registered before the fixture's own cleanup, which removes the folders, so it runs first.
+  t.after(async () => {
+    if (ctl) fs.writeFileSync(path.join(ctl, 'release'), '');
+    if (server && alive(server)) process.kill(server, 'SIGTERM');
+    if (server) await eventually(() => !alive(server), 'the detached dashboard did not exit');
+    for (const line of ctl && fs.existsSync(path.join(ctl, 'workers')) ? fs.readFileSync(path.join(ctl, 'workers'), 'utf8').split('\n').filter(Boolean) : []) {
+      const pid = Number(line.split(' ')[0]);
+      if (isWorker(pid)) process.kill(pid, 'SIGKILL');
+      await eventually(() => !alive(pid), `worker ${pid} outlived the test`);
+    }
+  });
+  const f = await fixture(t);
+  ctl = path.join(f.root, 'ctl');
+  fs.mkdirSync(ctl);
+  const preload = path.join(f.root, 'board-preload.cjs');
+  fs.writeFileSync(preload, PRELOAD);
+  fs.writeFileSync(path.join(ctl, 'hang'), '');
+  const env = { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_BOARD_CTL: ctl, TEST_BOARD_RUNS: path.join(f.state, 'runs'), AGENT_ORCH_RECLAIM: 'off', AGENT_ORCH_AUTO_GC: 'off', AGENT_ORCH_NOTIFY: 'off' };
+  const command = spawn(process.execPath, [cli, 'dashboard', '--detach', '--host', '127.0.0.1', '--port', String(port)], { cwd: f.repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  command.stdout.on('data', (chunk) => { output += chunk; });
+  command.stderr.on('data', (chunk) => { output += chunk; });
+  const exited = new Promise((resolve) => command.on('exit', (code) => resolve(code)));
+  await eventually(() => fs.existsSync(path.join(ctl, 'blocked')), 'the server\'s first build did not start');
+  return {
+    f, ctl, exited, output: () => output,
+    // The server's health on a port, once it answers; it is then also named for the cleanup.
+    async health(at) {
+      const answer = await eventually(async () => {
+        try { const r = await fetch(`http://127.0.0.1:${at}/api/health`, { signal: AbortSignal.timeout(1000) }); return r.ok && r.json(); } catch { return false; }
+      }, 'the server did not answer while building');
+      server = answer.pid;
+      return answer;
+    },
+    // A minute passes for the waiting command, and the first board is still not built.
+    minutePasses() { fs.writeFileSync(path.join(ctl, 'clock'), '61000'); },
+  };
+}
+
+test('dashboard --detach reports a server still building its first board after a minute as starting, not as failed', async (t) => {
+  const port = await freePort();
+  const d = await detached(t, port);
+  const { pid } = await d.health(port);
+  d.minutePasses();
+  assert.equal(await d.exited, 0, d.output());
+  assert.match(d.output(), new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port}/  \\(background pid ${pid}, still building its first board\\)\\n`));
+  assert.doesNotMatch(d.output(), /did not start/);
+  assert.ok(alive(pid), 'the server stopped');
+  assert.equal(fs.existsSync(path.join(d.f.state, 'dashboard.json')), false, 'the server recorded itself before its first board');
+});
+
+test('dashboard --detach never takes another server that names its dashboard\'s PID for the dashboard: the send key goes only to a port that process listens on', async (t) => {
+  // Something else holds the asked port, so the dashboard listens on the next one. It answers the
+  // health check with the dashboard's PID, which anyone can read.
+  const port = await freePort();
+  let real = null;
+  const impostor = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ pid: real, url: `http://127.0.0.1:${port}/`, tabs: 0, pageAgoMs: null }));
+  });
+  await new Promise((resolve, reject) => { impostor.once('error', reject); impostor.listen(port, '127.0.0.1', resolve); });
+  t.after(() => new Promise((resolve) => { impostor.closeAllConnections?.(); impostor.close(resolve); }));
+  const d = await detached(t, port);
+  real = (await d.health(port + 1)).pid;
+  assert.notEqual(real, process.pid);
+  d.minutePasses();
+  assert.equal(await d.exited, 0, d.output());
+  assert.doesNotMatch(d.output(), new RegExp(`127\\.0\\.0\\.1:${port}/`), `the impostor's address was reported:\n${d.output()}`);
+  assert.match(d.output(), new RegExp(`^dashboard: http://127\\.0\\.0\\.1:${port + 1}/  \\(background pid ${real}, still building its first board\\)\\n`));
 });

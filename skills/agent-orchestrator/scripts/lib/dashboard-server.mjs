@@ -12,6 +12,7 @@ import { createEscalator, escalationCheckMs } from "./escalate.mjs";
 import { codexLimits, limitsText } from "./limits.mjs";
 import { SendError, deliverMessage, steerQueued } from "./commands/inbox.mjs";
 import { DASHBOARD_CALLER } from "./ownership.mjs";
+import { diskLevelText, diskState, diskSummary, freeSpaceCommands } from "./disk.mjs";
 import { loadTask, readProcessesInBackground } from "./runs.mjs";
 import { readVendorStatusInBackground } from "./vendor-status.mjs";
 import { die, parseDuration, readJson, writeJson } from "./util.mjs";
@@ -155,10 +156,31 @@ async function readBrief(runDir, taskId, attempt) {
   }
 }
 
+// The free disk space for /api/health and the page's header: diskState's fields, the header's words
+// ("disk 42 GB free") and its tooltip, with the commands that free space.
+function diskReading() {
+  try {
+    const disk = diskState();
+    return { ...disk, summary: diskSummary(disk), title: `${diskLevelText(disk)}. Worktrees are refused below the minimum. Free space with:\n${freeSpaceCommands().join("\n")}` };
+  } catch (error) {
+    return { error: error.message, low: false, critical: false, summary: "disk unknown", title: error.message };
+  }
+}
+
+// This environment without the session variables, so a child acts as the user at a terminal.
+function userEnv() {
+  const env = { ...process.env };
+  for (const name of ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "AGENT_ORCH_DEPTH", "AGENT_ORCH_RUN", "AGENT_ORCH_TASK"]) delete env[name];
+  return env;
+}
+
 // Serve the dashboard on host:port (or the next free port) until the process exits.
 export async function serveDashboard({ host, port, args }) {
   const http = await import("node:http");
   const buildTimeoutMs = parseDuration(process.env.AGENT_ORCH_BUILD_TIMEOUT || "30s");
+  // Until a first board exists every build is cold (no caches, often on a machine still busy after
+  // a restart), so it gets its own, longer limit, never shorter than the later builds' one.
+  const firstBuildTimeoutMs = Math.max(buildTimeoutMs, parseDuration(process.env.AGENT_ORCH_FIRST_BUILD_TIMEOUT || "5m"));
   readVendorStatusInBackground();
   readProcessesInBackground();
   const page = loadPage();
@@ -168,8 +190,9 @@ export async function serveDashboard({ host, port, args }) {
   const tabs = new Set(); // presence streams of the open tabs
   // Only a worker process (dashboard-worker.mjs) builds the board, so a slow build never holds up
   // HTTP: reads get the last board at once. One build runs at a time, and there is never more than
-  // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_TIMEOUT (30s), gets
-  // SIGTERM, then SIGKILL 2 seconds later, and the next one starts only once it has exited.
+  // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_TIMEOUT (30s), or
+  // AGENT_ORCH_FIRST_BUILD_TIMEOUT (5m) while no board has been built yet, gets SIGTERM, then
+  // SIGKILL 2 seconds later, and the next one starts only once it has exited.
   // A message or a steer rebuilds at once (`changed`), and so does a lost build's replacement. An
   // escalation check, a read of a board older than 2 seconds, and a file write while someone views
   // the board (`viewing`) ask for a background build (`later`): at most one a second, and never
@@ -179,7 +202,7 @@ export async function serveDashboard({ host, port, args }) {
   let snapshot = null; // the last board built: { body, heavyBody, ids, running, heavyAt, startedAt, builtAt }
   let failure = null; // why the latest build failed, until one succeeds
   let worker = null; // { child, retiring, gone, killTimer }: the one worker, until it has exited
-  let build = null; // the build in flight: { id, startedAt, timer }
+  let build = null; // the build in flight: { id, startedAt, limitMs, timer }
   let builds = 0, again = false; // builds started; whether one must start as soon as the worker is free
   let failedInRow = 0;
   let lastStart = 0, lastEnd = 0, lastTook = 0;
@@ -301,13 +324,13 @@ export async function serveDashboard({ host, port, args }) {
     wantRead = wantFile = wantCheck = false;
     clearTimeout(laterTimer);
     laterTimer = null;
-    const w = worker, current = { id: ++builds, startedAt: Date.now() };
+    const w = worker, current = { id: ++builds, startedAt: Date.now(), limitMs: snapshot ? buildTimeoutMs : firstBuildTimeoutMs };
     build = current;
     lastStart = current.startedAt;
     const overdueBuild = () => {
-      if (build === current) retire(w, new Error(`state build timed out after ${buildTimeoutMs / 1000}s`), true);
+      if (build === current) retire(w, new Error(`state build timed out after ${current.limitMs / 1000}s`), true);
     };
-    current.timer = setTimeout(overdueBuild, buildTimeoutMs);
+    current.timer = setTimeout(overdueBuild, current.limitMs);
     try {
       w.child.send("build", (error) => { if (error) retire(w, error); });
     } catch (error) {
@@ -493,7 +516,7 @@ export async function serveDashboard({ host, port, args }) {
       const asset = page.get(url.pathname);
       if (asset) return send(200, asset.type, asset.body);
       if (url.pathname === "/api/health") {
-        return send(200, "application/json", JSON.stringify({ pid: process.pid, url: address, startedAt, pageAgoMs: lastPage ? Date.now() - lastPage : null, tabs: tabs.size }));
+        return send(200, "application/json", JSON.stringify({ pid: process.pid, url: address, startedAt, pageAgoMs: lastPage ? Date.now() - lastPage : null, tabs: tabs.size, disk: diskReading() }));
       }
       if (url.pathname === "/api/presence") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", "x-orch-server": startedAt });
@@ -518,7 +541,7 @@ export async function serveDashboard({ host, port, args }) {
         // age in seconds and the problem's first line, as printable ASCII so no error text can
         // make the header invalid.
         const board = () => {
-          const overdue = build && Date.now() - build.startedAt >= buildTimeoutMs ? `state build timed out after ${buildTimeoutMs / 1000}s` : null;
+          const overdue = build && Date.now() - build.startedAt >= build.limitMs ? `state build timed out after ${build.limitMs / 1000}s` : null;
           const problem = overdue || failure?.message;
           send(200, "application/json", snapshot.body, {
             "x-orch-heavy": snapshot.heavyBody,
@@ -668,19 +691,56 @@ export async function serveDashboard({ host, port, args }) {
     setInterval(checkAttention, escalationCheckMs());
   }
 
-  // Reclaim in a child so lsof and the termination grace do not block HTTP requests.
-  // Do not wait for other sessions: the reclaim command checks each workspace's owners.
-  let reclaimer = null;
+  // Housekeeping runs in children, one at a time, so lsof, du and git never block HTTP requests:
+  // every five minutes it reclaims orphaned build daemons (`reclaim`; AGENT_ORCH_RECLAIM=off turns it
+  // off), and five minutes after each pass it collects unused worktrees (`gc --auto`;
+  // AGENT_ORCH_AUTO_GC=off turns it off), so a long collection never runs back to back. Neither
+  // waits for other sessions: `reclaim` checks each workspace's owners, and `gc --auto` collects only
+  // the user's own runs and runs whose session has ended. `gc --auto` runs as the user, without the
+  // session variables of whoever started this server, so which runs it collects never depends on that.
+  let housekeeper = null; // the chore whose child runs: { chore, child }
+  const queue = [];
+  const pump = () => {
+    if (housekeeper || !queue.length) return;
+    const chore = queue.shift();
+    const child = spawn(process.execPath, [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
+    housekeeper = { chore, child };
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      housekeeper = null;
+      chore.after?.();
+      pump();
+    };
+    child.on("error", (error) => { process.stderr.write(`orch: ${chore.name} failed: ${error.message}\n`); finish(); });
+    child.on("close", finish);
+  };
+  const runChore = (chore) => {
+    if (housekeeper?.chore === chore || queue.includes(chore)) return;
+    queue.push(chore);
+    pump();
+  };
+  let reclaimTimer = null, collectTimer = null;
   if (process.env.AGENT_ORCH_RECLAIM !== "off") {
-    const timer = setInterval(() => {
-      if (reclaimer) return;
-      reclaimer = spawn(process.execPath, [CLI_PATH, "reclaim"], { stdio: ["ignore", "inherit", "inherit"] });
-      reclaimer.on("error", (error) => { process.stderr.write(`orch: reclaim failed: ${error.message}\n`); });
-      reclaimer.on("close", () => { reclaimer = null; });
-    }, 5 * 60000);
-    timer.unref();
-    process.on("exit", () => { clearInterval(timer); reclaimer?.kill("SIGTERM"); });
+    const reclaim = { name: "reclaim", argv: ["reclaim"], env: process.env };
+    reclaimTimer = setInterval(() => runChore(reclaim), 5 * 60000);
+    reclaimTimer.unref();
   }
+  if (process.env.AGENT_ORCH_AUTO_GC !== "off") {
+    const collection = { name: "automatic worktree collection", argv: ["gc", "--auto"], env: userEnv() };
+    const autoCollect = () => runChore(collection);
+    collection.after = () => {
+      collectTimer = setTimeout(autoCollect, 5 * 60000);
+      collectTimer.unref();
+    };
+    collection.after();
+  }
+  process.on("exit", () => {
+    clearInterval(reclaimTimer);
+    clearTimeout(collectTimer);
+    housekeeper?.child.kill("SIGTERM");
+  });
 
   // In the background, exit once nothing is running and no browser tab has polled for a while.
   if (args["idle-exit"]) {

@@ -6,10 +6,24 @@ act on. `SKILL.md` step 5 says when to open it.
 ## The server
 
 - `$ORCH dashboard --detach --open` starts a web server on `127.0.0.1:4777`, or reuses the running
-  one, and opens it unless a tab already shows it.
+  one, and opens it unless a tab already shows it. It waits up to a minute for a new server's first
+  board. A server still building it then is reported as "still building its first board" and
+  opened anyway; the tab shows the board once it is built. The address is used only when the
+  server's own process listens on it, since the page gets the send key. When no such address is
+  found yet, the command says the dashboard is starting and opens nothing.
 - It exits by itself once no task is running and no tab has shown it for 30 minutes.
   `$ORCH dashboard --stop` stops it sooner.
 - `$ORCH watch` shows the same tree in a terminal, for a user who asks for it.
+- The board is built in a separate worker process. A build that runs past
+  `AGENT_ORCH_BUILD_TIMEOUT` (default `30s`) is stopped and started again. Until the first board
+  is built, each build gets `AGENT_ORCH_FIRST_BUILD_TIMEOUT` instead (default `5m`, never less than
+  the other limit): a first build reads everything with cold caches, often on a machine that is
+  still busy after a restart.
+- Every five minutes it stops orphaned build daemons (`reclaim`; `AGENT_ORCH_RECLAIM=off` turns it
+  off). Five minutes after it starts, and five minutes after each pass ends, it collects unused
+  worktrees (`gc --auto`; `AGENT_ORCH_AUTO_GC=off` turns it off). The two never run at the same
+  time. `references/worktrees.md` ("Automatic collection") says what it collects. Their lines go to
+  the dashboard's output, which for `--detach` is `dashboard.log` under the state root.
 
 ## What it shows
 
@@ -20,7 +34,12 @@ act on. `SKILL.md` step 5 says when to open it.
 - For a task, the panel also shows its receipts: its brief, one line per attempt (clicking one shows
   that attempt's log), each check's saved evidence, and your `verify` runs, `verdict` rounds and
   acceptance.
-- The header shows both agents' usage limits.
+- The header shows both agents' usage limits, and the free disk space on the volume that holds
+  the state root, for example "disk 42 GB free". It turns amber, with "· low", below twice
+  `AGENT_ORCH_MIN_FREE_DISK` (default `15GB`), and red, with "· below minimum", below the minimum,
+  when no worktree can be created. Its tooltip gives the volume's size and the commands that free
+  space. `/api/health` carries the same reading as `disk`: `freeBytes`, `totalBytes`, `minBytes`,
+  `low`, `critical`, `summary` and `title`.
 - A main session's state comes from `claude agents --json` when Claude Code reports that session
   (`stateSource` on the row), and from its transcript otherwise. Codex's app server is read only with
   `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see threads another Codex

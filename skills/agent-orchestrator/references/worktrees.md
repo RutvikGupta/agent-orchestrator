@@ -1,7 +1,13 @@
 # Worktrees, preparation and cleanup
 
 Read this before you start a write task by hand, when a gate fails in a worktree, when a task's
-folder is gone, and before you run `gc` or `cleanup`.
+folder is gone, when a worktree is refused for lack of disk space, and before you run `gc` or
+`cleanup`.
+
+**Remove every worktree you make by hand as soon as you are done with it**
+(`git -C <repo> worktree remove <path>`), for example one made for a review. Each one can take
+hundreds of megabytes, and nothing collects it for you: the orchestrator collects only the
+worktrees under a run's folder. A disk filled with forgotten worktrees can crash the machine.
 
 ## Who gets a worktree
 
@@ -15,6 +21,7 @@ folder is gone, and before you run `gc` or `cleanup`.
     integrated work. A branch name is fixed to the commit it points at when you run `worktree`.
   - `--branch` names the new branch. `--path` puts the folder somewhere else.
   - It refuses a task that already has a worktree, and a `--path` that already exists.
+  - It refuses when the disk is too full ("Free disk space" below).
 - A single writer, or a sequential queue, may use the main checkout when it is clean.
 - Read-only tasks may share any checkout.
 - `start` refuses a second writer in the same directory unless you pass `--force`.
@@ -46,6 +53,31 @@ repository's `.worktreeinclude`, or add them or the setup to the user's recipe, 
 gets them. For this one, install them in the worktree, or name the gate in the brief as one it
 cannot run.
 
+## Free disk space
+
+Every worktree is created after one check of the free space on the volume that will hold it:
+`worktree`, `dispatch`, and restoring a collected worktree all go through it.
+
+- The minimum is `AGENT_ORCH_MIN_FREE_DISK`, by default `15GB`. It takes bytes or a size such as
+  `500MB`, `15GB` or `20GiB` (`MB` and `GB` count in thousands, `MiB` and `GiB` in 1024s). `0`
+  turns the check off.
+- Below the minimum, the command first runs the automatic collection ("Automatic collection"
+  below, with the 1-hour age), then reads the disk again. If it is still below the minimum, it
+  refuses with exit code 1 and creates nothing: no folder, no branch. The message gives the free
+  space, the minimum, and the commands that free space: `gc --dry-run`, `gc`,
+  `close RUN TASK...`, and `git worktree remove` for a worktree made by hand. `dispatch` reports it
+  as that task's refusal.
+- That collection stops after `AGENT_ORCH_COLLECT_TIMEOUT` (default `60s`). Each slow step of the
+  worktree in hand (a `teardown` command, a `git` check, measuring) gets only the time left. A
+  worktree whose step runs out of time is kept, with "not removed: the collection ran out of
+  time", and no removal starts after the limit. A removal already started is allowed to finish.
+  Worktrees and runs not reached are left alone ("not checked: the collection ran out of time"),
+  and the message says how many runs. The disk is then judged on what was freed. `gc` and the
+  dashboard's own pass have no such limit.
+- No option bypasses the check. Only the setting changes it.
+- The disk counts as low below twice the minimum. The dashboard's header then shows the free space
+  as a warning, and the automatic collection collects sooner (`references/dashboard.md`).
+
 ## Cleanup
 
 Worktrees are collected automatically, so you rarely run anything. Collecting removes the folder
@@ -64,7 +96,8 @@ When it happens:
   Plain `wait <run>` leaves closed preparations out. Naming one with `wait <run> <task>` reports
   "closed before it started" and exits 0.
 - `integrate` collects the integrated task's worktree right after the merge.
-- `gc` collects what is left in idle runs (below).
+- `gc` collects what is left in idle runs (below). The dashboard runs it on its own every five
+  minutes ("Automatic collection").
 - `cleanup <run>` collects the run's worktrees now, by the same rules as `close` and `integrate`.
   Its `--force` and `--delete-branches` options do nothing: it prints a notice and goes on.
 
@@ -81,6 +114,18 @@ with the reason:
 - Its commits, and the task's accepted commit, are reachable from its branch or the run's base
   branch.
 - It is a worktree of the run's repository, and not the repository's own checkout.
+- For `gc` and the automatic collection only: its real path is inside the run's folder. A folder
+  made elsewhere with `worktree --path`, or reached through a link that leads out of the run
+  folder, is kept with the reason "worktree is outside the run folder". `close`, `integrate` and
+  `cleanup` still collect such a folder.
+- The folder is still the one that was checked. Just before removal, the path must lead to the
+  same real path, device and inode as at the first check, and removal names that real path. A
+  folder moved or swapped for a link meanwhile is kept, with "worktree folder changed while it
+  was being collected".
+
+A `git` check that runs longer than 30 seconds counts as failed, which keeps the worktree.
+Measuring the folder with `du` is not a safety check: when it fails or takes longer than 30
+seconds, the size is reported as unknown and the worktree is removed all the same.
 
 Before it removes a worktree, it runs the recipe's `teardown` there. A failed `teardown` is
 reported and does not keep the worktree. A `teardown` that leaves tracked changes does.
@@ -88,12 +133,32 @@ reported and does not keep the worktree. A `teardown` that leaves tracked change
 ### `gc`
 
 ```bash
-$ORCH gc [--dry-run] [--older-than DUR] [--json]
+$ORCH gc [--dry-run] [--older-than DUR] [--auto] [--json]
 ```
 
 - It takes no run. It looks at the runs the caller may act on (`references/ownership.md`): at a
   terminal, any run; in a session or a delegated agent, the runs it launched and their nested
   runs; with no identity, none.
+- It also collects, for any caller with an identity, a run whose launching session has certainly
+  ended. Nobody else is left to collect it. The report says "its session has ended" for such a
+  run. Other commands, such as `cleanup` or `close`, still refuse such a run without `--adopt`.
+  - A session has ended when its recorded process is gone (or that PID now runs something else),
+    and the host reports no other process for its session id: Claude Code's
+    `sessions/<pid>.json` files name no live Claude process for it, and no Codex process holds
+    the session's rollout file open. A session resumed under a new process is therefore alive.
+  - The host's report is read under the host root the run recorded: `new` and `--adopt` save the
+    launcher's Claude configuration folder or `CODEX_HOME` as `hostRoot` in `run.json`. A session
+    started with another `CLAUDE_CONFIG_DIR` or `CODEX_HOME` than the collector's is therefore
+    still found. A run recorded before this uses the collector's own root.
+  - An orch task that launched a nested run has ended when its relay's process is gone. For a
+    nested run, every launcher up its chain must have ended.
+  - When any of this cannot be read, the run is kept, as if alive: `ps` or `lsof` fails, a
+    recorded host root is missing or unreadable, a session file of a live process cannot be read
+    or parsed, a Codex date folder cannot be listed, `lsof` ends with an error (its list may be
+    cut short), a rollout's path does not resolve, no process was recorded, or the parent run is
+    gone.
+  - A run whose session is alive stays that session's to collect. A run launched from a terminal
+    never counts as ended.
 - A run is collected only when no task in it runs or is parked and it has had no activity for 24
   hours. `--older-than DUR` changes that (`12h`, `7d`). For any other run `gc` keeps every
   worktree and says why: `ownership refused`, `run has running tasks` or `run is too recent`.
@@ -108,6 +173,35 @@ $ORCH gc [--dry-run] [--older-than DUR] [--json]
   recreates it), the kept ones with their reasons, any `teardown` failures, and the disk freed.
   `--json` gives the same as data, with totals: removed, kept, kept by reason, expired, bytes
   freed.
+
+### Automatic collection
+
+`gc --auto` is the collection that runs without anyone asking. The dashboard runs it five minutes
+after it starts, then five minutes after each pass ends, for as long as it runs.
+`AGENT_ORCH_AUTO_GC=off` turns that off. Worktree creation also runs it on a disk below the minimum
+("Free disk space").
+
+- It follows every rule of `gc` above: only worktrees of closed or integrated tasks, nothing
+  uncommitted, commits kept on a branch, and never a run with a running task.
+- It collects only the caller's own runs and the runs whose session has ended, never a live
+  session's run, even for the user. The dashboard runs it as the user at a terminal, whoever
+  started the dashboard, so it collects the user's own runs and the runs of ended sessions.
+- It treats a run as ended only once no launcher up its chain has used the run for an hour.
+- It collects a run once it has had no activity for 24 hours, or for 1 hour while the disk is low
+  (below twice `AGENT_ORCH_MIN_FREE_DISK`). `--older-than DUR` sets another age.
+- It prints one line per worktree removed and per task expired, then the space freed and the free
+  space left, and nothing when it changed nothing. The dashboard's log
+  (`<state root>/dashboard.log` for a background dashboard) keeps these lines.
+- The owner of each run it changed gets a notice that "automatic worktree collection" made the
+  change, even when the caller owns the run: nobody asked for the change. A run with no launcher
+  record is the user's: the notice is kept in the run, and the user's `status` shows it.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `AGENT_ORCH_MIN_FREE_DISK` | `15GB` | The least free space for creating a worktree; `0` turns the check off. Low means below twice this |
+| `AGENT_ORCH_AUTO_GC` | on | `off` stops the dashboard's automatic collection |
+| `AGENT_ORCH_COLLECT_TIMEOUT` | `60s` | How long worktree creation waits for the collection it runs on a full disk |
+| `AGENT_ORCH_EXPIRE` | `7d` | When an unread finished task expires, in `gc` and `gc --auto` |
 
 ## Restoring a collected worktree
 

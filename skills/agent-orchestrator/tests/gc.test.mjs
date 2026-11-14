@@ -368,7 +368,8 @@ function idleRun(f, run, days = 3) {
 
 for (const closure of ['result', 'legacy']) test(`round two: idle gc collects ${closure} closure and worktree restores retained commits`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
-  const wt = await f.json(['worktree', run.id, 'restore', '--branch', 'retained-feature', '--path', path.join(f.root, 'custom-folder'), '--no-prep']);
+  // A folder of its own name, inside the run's folder: gc collects only worktrees there.
+  const wt = await f.json(['worktree', run.id, 'restore', '--branch', 'retained-feature', '--path', path.join(run.dir, 'custom-folder'), '--no-prep']);
   const tip = await commit(f, wt);
   finished(f, run, 'restore', 3);
   if (closure === 'result') await f.command(['result', run.id, 'restore']);
@@ -591,4 +592,183 @@ test('a refused run names its owner, and a main session collects the runs its ow
   const mine = await f.json(['gc'], { env: A });
   assert.deepEqual(mine.runs.find((r) => r.run === nested.id).removed.map((r) => r.task), ['kid']);
   assert.equal(fs.existsSync(wt.path), false);
+});
+
+// Who launched a run, as gc finds it: a session whose PID names no process (it has ended), or this
+// test's own process, which shows as a live `codex` host (helpers.mjs sets its title).
+function launchedBy(run, { live = false } = {}) {
+  const file = path.join(run.dir, 'run.json');
+  const record = readJson(file);
+  writeJson(file, { ...record, orchestrator: { ...record.orchestrator, agent: live ? 'codex' : 'claude', sessionId: live ? 'live-session' : 'ended-session', pid: live ? process.pid : 99999999 } });
+}
+const notices = (run) => fs.readFileSync(path.join(run.dir, 'owner-notices.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+
+test('gc collects a run whose launching session has ended, for another session and under every safety rule; a live session keeps its run', async (t) => {
+  const f = await fixture(t);
+  const ended = await f.newRun('ended');
+  const clean = await worktree(f, ended, 'clean', { closedAt: daysAgo(3) });
+  const dirty = await worktree(f, ended, 'dirty', { closedAt: daysAgo(3) });
+  fs.writeFileSync(path.join(dirty.path, 'precious'), 'Uncommitted work');
+  const open = await worktree(f, ended, 'open');
+  launchedBy(ended);
+  idleRun(f, ended);
+  const live = await f.newRun('live');
+  const kept = await worktree(f, live, 'closed', { closedAt: daysAgo(3) });
+  launchedBy(live, { live: true });
+  idleRun(f, live);
+  const B = { CLAUDE_CODE_SESSION_ID: 'session-b', CODEX_THREAD_ID: 'session-b' };
+
+  const preview = await f.command(['gc', '--dry-run'], { env: B });
+  assert.match(preview.stdout, new RegExp(`${ended.id}: its session has ended \\(its process \\(pid 99999999\\) is gone\\)\\n  would expire|${ended.id}: its session has ended \\(its process \\(pid 99999999\\) is gone\\)\\nwould remove`));
+  assert.match(preview.stdout, new RegExp(`${live.id}: ownership refused \\(belongs to codex session live-session`));
+  assert.equal(fs.existsSync(clean.path), true);
+
+  const report = await f.json(['gc'], { env: B });
+  const collected = report.runs.find((r) => r.run === ended.id);
+  assert.deepEqual(collected.removed.map((r) => r.task), ['clean']);
+  assert.deepEqual(Object.fromEntries(collected.kept.map((r) => [r.task, r.reason])), { dirty: 'uncommitted changes', open: 'task is not closed or accepted and integrated' });
+  assert.equal(collected.sessionEnded, 'its process (pid 99999999) is gone');
+  assert.equal(report.runs.find((r) => r.run === live.id).reason, 'ownership refused');
+  assert.equal(fs.existsSync(clean.path), false);
+  assert.ok(await f.git(['branch', '--list', clean.branch]), 'the collected worktree lost its branch');
+  for (const wt of [dirty, open, kept]) assert.equal(fs.existsSync(wt.path), true);
+  // The run's owner, should its session come back, learns who removed the worktree.
+  assert.deepEqual(notices(ended).map((n) => n.action), ['worktree removed']);
+  assert.match(notices(ended)[0].byLabel, /session session-b/);
+  // Only gc widens: other commands still refuse such a run until --adopt takes it over.
+  const refused = await f.command(['cleanup', ended.id], { code: 4, env: B });
+  assert.match(refused.stderr, /refusing to clean up run/);
+  assert.equal(fs.existsSync(dirty.path), true);
+});
+
+test('gc --auto collects the caller\'s own and ended sessions\' idle runs, never a live session\'s, after 24 hours or 1 hour on a low disk, and logs only what it changed', async (t) => {
+  const f = await fixture(t);
+  const own = await f.newRun('own');
+  const ownWt = await worktree(f, own, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, own, 3 / 24);
+  const ended = await f.newRun('ended');
+  const endedWt = await worktree(f, ended, 'old', { closedAt: daysAgo(3) });
+  launchedBy(ended);
+  idleRun(f, ended, 3 / 24);
+  const live = await f.newRun('live');
+  const liveWt = await worktree(f, live, 'old', { closedAt: daysAgo(3) });
+  launchedBy(live, { live: true });
+  idleRun(f, live, 3);
+  const plenty = { AGENT_ORCH_DISK_FREE_BYTES: '100GB' }, low = { AGENT_ORCH_DISK_FREE_BYTES: '20GB' };
+
+  // With space to spare, three hours of rest is too recent, and the live session's run is its own.
+  assert.equal((await f.command(['gc', '--auto'], { env: plenty })).stdout, '', 'a collection that changed nothing printed something');
+  const quiet = await f.json(['gc', '--auto', '--dry-run'], { env: plenty });
+  assert.equal(quiet.olderThan, 24 * 3600000);
+  assert.deepEqual(quiet.disk.low, false);
+  assert.deepEqual(Object.fromEntries(quiet.runs.map((r) => [r.run, r.reason])), { [own.id]: 'run is too recent', [ended.id]: 'run is too recent', [live.id]: 'ownership refused' });
+
+  // On a low disk the age is one hour.
+  assert.equal((await f.json(['gc', '--auto', '--dry-run'], { env: low })).olderThan, 3600000);
+  const run = await f.command(['gc', '--auto'], { env: low });
+  const lines = run.stdout.trim().split('\n');
+  assert.equal(lines.length, 3, run.stdout);
+  for (const [r, wt] of [[own, ownWt], [ended, endedWt]]) {
+    assert.ok(lines.some((line) => line.startsWith(`orch: auto gc removed worktree ${wt.path} (run ${r.id}, task old, `) && line.endsWith(`; branch kept: ${wt.branch})`)), run.stdout);
+    assert.equal(fs.existsSync(wt.path), false);
+  }
+  assert.match(lines[2], /^orch: auto gc freed \S+ \S+ from 2 worktrees; disk 20 GB free$/);
+  assert.equal(fs.existsSync(liveWt.path), true, 'automatic collection took a live session\'s worktree');
+  // Nobody asked for an automatic change, so every run's owner is told, the caller's own included.
+  for (const r of [ended, own]) assert.deepEqual(notices(r).map((n) => [n.action, n.byLabel]), [['worktree removed', 'automatic worktree collection']]);
+  // An explicit gc from a terminal still collects any run, the live session's too.
+  assert.deepEqual((await f.json(['gc'])).runs.find((r) => r.run === live.id).removed.map((r) => r.task), ['old']);
+});
+
+test('gc keeps a worktree whose real path is outside its run folder: one made with --path elsewhere, and one reached through a link that leads out', async (t) => {
+  const f = await fixture(t), run = await f.newRun('outside');
+  const inside = await worktree(f, run, 'inside', { closedAt: daysAgo(3) });
+  const elsewhere = await f.json(['worktree', run.id, 'elsewhere', '--no-prep', '--path', path.join(f.root, 'review-elsewhere')]);
+  patch(f, run, 'elsewhere', { closedAt: daysAgo(3), closedExplicitlyAttempt: 0 });
+  // A link inside the run folder whose target is outside it.
+  const target = await f.json(['worktree', run.id, 'linked', '--no-prep', '--path', path.join(f.root, 'linked-target')]);
+  const link = path.join(run.dir, 'worktrees', 'linked');
+  fs.symlinkSync(target.path, link);
+  patch(f, run, 'linked', { closedAt: daysAgo(3), closedExplicitlyAttempt: 0, worktree: { ...readJson(f.taskFile(run, 'linked')).worktree, path: link } });
+  idleRun(f, run);
+  const outside = 'worktree is outside the run folder';
+
+  const preview = await f.json(['gc', '--dry-run']);
+  const planned = preview.runs.find((r) => r.run === run.id);
+  assert.deepEqual(planned.removed.map((r) => r.task), ['inside']);
+  assert.deepEqual(Object.fromEntries(planned.kept.map((r) => [r.task, r.reason])), { elsewhere: outside, linked: outside });
+  const report = await f.json(['gc']);
+  assert.deepEqual(Object.fromEntries(report.runs.find((r) => r.run === run.id).kept.map((r) => [r.task, r.reason])), { elsewhere: outside, linked: outside });
+  assert.equal(fs.existsSync(inside.path), false);
+  for (const wt of [elsewhere, target]) assert.equal(fs.existsSync(path.join(wt.path, '.git')), true, `${wt.path} was removed`);
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+  // The automatic collection keeps them too, on a low disk.
+  const auto = await f.json(['gc', '--auto', '--older-than', '0s'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.deepEqual(auto.runs.find((r) => r.run === run.id).kept.map((r) => r.reason), [outside, outside]);
+  for (const wt of [elsewhere, target]) assert.equal(fs.existsSync(path.join(wt.path, '.git')), true);
+});
+
+test('gc --auto leaves a run whose session ended under an hour ago; an explicit gc collects it', async (t) => {
+  const f = await fixture(t), run = await f.newRun('recent');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  launchedBy(run);
+  idleRun(f, run);
+  const file = path.join(run.dir, 'run.json');
+  writeJson(file, { ...readJson(file), orchestrator: { ...readJson(file).orchestrator, lastSeenAt: new Date(Date.now() - 10 * 60000).toISOString() } });
+  const auto = await f.json(['gc', '--auto', '--older-than', '0s'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.equal(auto.runs.find((r) => r.run === run.id).reason, 'ownership refused');
+  assert.equal(fs.existsSync(wt.path), true);
+  const B = { CLAUDE_CODE_SESSION_ID: 'session-b', CODEX_THREAD_ID: 'session-b' };
+  const explicit = await f.json(['gc', '--older-than', '0s'], { env: B });
+  assert.deepEqual(explicit.runs.find((r) => r.run === run.id).removed.map((r) => r.task), ['old']);
+});
+
+test('a worktree whose folder is moved away and replaced by a link while it is measured is kept: removal never follows the link', async (t) => {
+  const f = await fixture(t), run = await f.newRun('swap');
+  await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  // A `du` that, when gc measures the worktree (its last slow step), moves the run's worktrees
+  // folder out of the run and leaves a link to it in its place.
+  const bin = path.join(f.root, 'swapping-du');
+  fs.mkdirSync(bin);
+  const from = path.join(run.dir, 'worktrees'), to = path.join(f.root, 'moved-worktrees');
+  fs.writeFileSync(path.join(bin, 'du'), `#!/bin/sh\nif [ ! -L "${from}" ]; then mv "${from}" "${to}" && ln -s "${to}" "${from}"; fi\nprintf '8\\t%s\\n' "$2"\n`, { mode: 0o755 });
+  const report = await f.json(['gc'], { env: { PATH: `${bin}:${f.env.PATH}` } });
+  assert.equal(fs.lstatSync(from).isSymbolicLink(), true, 'the swap did not happen');
+  const mine = report.runs.find((r) => r.run === run.id);
+  assert.deepEqual(mine.removed, []);
+  assert.deepEqual(mine.kept.map((r) => [r.task, r.reason]), [['old', 'worktree folder changed while it was being collected']]);
+  assert.equal(fs.existsSync(path.join(to, 'old', '.git')), true, 'the folder now outside the run was removed through the link');
+  assert.ok(readJson(f.taskFile(run, 'old')).worktree, 'the task lost its worktree record');
+});
+
+test('gc --auto records its change in a run with no launcher record, and the user\'s status shows it', async (t) => {
+  const f = await fixture(t), run = await f.newRun('legacy');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  const file = path.join(run.dir, 'run.json');
+  const { orchestrator, ...legacy } = readJson(file);
+  writeJson(file, legacy);
+  await f.command(['gc', '--auto'], { env: { AGENT_ORCH_DISK_FREE_BYTES: '20GB' } });
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.deepEqual(notices(run).map((n) => [n.task, n.action, n.byLabel, n.owners.map((o) => o.agent)]), [['old', 'worktree removed', 'automatic worktree collection', ['terminal']]]);
+  const status = await f.json(['status', run.id]);
+  assert.deepEqual((status.changedByOthers || []).map((n) => [n.task, n.action]), [['old', 'worktree removed']]);
+  assert.match(status.changedByOthers[0].text, /worktree removed by automatic worktree collection/);
+});
+
+test('a worktree that cannot be measured is still removed, its size unknown: only the git checks keep a worktree', async (t) => {
+  const f = await fixture(t), run = await f.newRun('unmeasured');
+  const wt = await worktree(f, run, 'old', { closedAt: daysAgo(3) });
+  idleRun(f, run);
+  // A `du` that fails, as one stopped at its time limit does.
+  const bin = path.join(f.root, 'failing-du');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'du'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const collected = await f.command(['gc'], { env: { PATH: `${bin}:${f.env.PATH}` } });
+  assert.match(collected.stdout, /freed 0 bytes \(some sizes unavailable\)/);
+  assert.match(collected.stdout, /removed 1 worktree and freed 0 bytes; kept 0;/);
+  assert.equal(fs.existsSync(wt.path), false);
+  assert.ok(await f.git(['branch', '--list', wt.branch]), 'the removed worktree lost its branch');
+  assert.equal(readJson(f.taskFile(run, 'old')).worktree, undefined);
 });
