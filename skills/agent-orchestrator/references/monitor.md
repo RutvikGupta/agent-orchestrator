@@ -91,6 +91,26 @@ holds:
   does a task that a stop ended);
 - a task runs with no live `wait`.
 
+## Question dialogs
+
+In Claude Code, a question dialog (the `AskUserQuestion` tool, which asks the user to pick an
+option) stops your session until the user answers it. While it is open, nothing reaches you: a
+`wait` that exits stays queued, scheduled prompts do not fire, the `Stop` hook does not run, and
+messages wait. If the user is away, your tasks' results sit unread for hours.
+
+So while your tasks run, never stop to wait for the user:
+
+- Ask in your reply instead: the question, the options and your recommendation. If the user may be
+  away, also send them a message.
+- Go on with your recommended option, or with work that does not depend on the answer.
+- Keep `wait` running.
+
+The hook `scripts/hooks/orch-ask.mjs` (set up in `integrations/claude/settings.example.json`)
+refuses the dialog, and says what is in flight, while one of your tasks runs or is parked, a result
+is unread, or a question or decision waits on you. Inside an orch task it always refuses, since
+nobody answers a dialog there: decide what the brief covers, and hand back the rest with `ask` or
+`NEEDS DECISION:`. `AGENT_ORCH_ASK_HOOK=off` turns it off.
+
 ## Automatic retry
 
 When a task fails with a transient provider or network error, `wait` resumes it once in the same

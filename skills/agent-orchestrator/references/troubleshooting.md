@@ -10,6 +10,7 @@ you find a bug in the skill itself ("Report a bug in this skill", below).
 | `failed`, with auth errors in the log | Ask the user to log in: `claude auth login` or `codex login` |
 | `USAGE LIMIT` in `wait` or `result` | The agent's usage window is used up: ping the user and resume on the other agent (`SKILL.md`, "Usage limits") |
 | You lost track of what runs (restart, compaction) | `$ORCH recover`, then act on what it lists (`SKILL.md`, "Setup") |
+| Results sat unread while the session was alive (the notice says it "is not reading its results") | The session was stopped in a question dialog or a long turn: nothing reaches a Claude Code session while a dialog is open. Answer the dialog, then have the session run `$ORCH recover` and handle what it lists. Register `scripts/hooks/orch-ask.mjs` (`integrations/claude/settings.example.json`), which refuses the dialog while tasks run (`references/monitor.md`, "Question dialogs") |
 | Claude reports that it is logged out when the orchestrator is Codex | Codex's sandbox blocks the macOS Keychain; re-run the `$ORCH` command with escalated permissions |
 | A read-only Codex task cannot run network-dependent commands | Its read-only sandbox has no network; run it as a write task with a brief that forbids edits |
 | A `--sandbox` Claude task reports `deny network-outbound <host> (user denied)` | The task ran with `--offline`, or the relay patch is missing (`start` printed a note, and `agents` warns). Re-apply the patch with the command that the note prints, then resume the task |

@@ -283,13 +283,16 @@ test('an item of a stopped task\'s sub-agent goes to the session above it while 
   const waited = await f.command(['wait', top.id, '--timeout', '30s'], { env: owner });
   assert.ok(waited.stdout.includes(`\n${kids.id}/kid: failed — Build failed (passed on: task ${top.id}/lead is not running)`), waited.stdout);
 
-  // Once the session has had no wait on its run for 20 minutes, it is gone, and the item is the user's.
+  // Once the session has had no wait on its run for 20 minutes, the item is the user's. The session's
+  // commands recorded its host process (the test runner's fake host), which is alive, so the item
+  // says that the session is not reading its results, rather than that it is gone.
   writeJson(path.join(top.dir, 'main-wait.json'), { pid: 1, at: minutesAgo(20) });
   const gone = await eventually(async () => {
     const now = await item();
     return now?.to === 'user' ? now : null;
-  }, 'the item did not go to the user once the session was gone');
-  assert.deepEqual([gone.agent, gone.gone, gone.passed], ['orchestrator session abovesn1', 'no wait on its run for 20m', passed]);
+  }, 'the item did not go to the user once the session stopped waiting');
+  assert.deepEqual([gone.agent, gone.gone, gone.passed], ['orchestrator session abovesn1', null, passed]);
+  assert.match(gone.agentState, /^is not reading its results: its process is alive \(pid \d+\) but has had no wait on this run for 20m; it may be stopped in a question dialog or a long turn$/);
 });
 
 // Races the walk below a stopped task must survive. Each test holds a process at an exact point with
