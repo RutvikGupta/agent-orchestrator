@@ -269,14 +269,34 @@ function claudeSessionLive(id, root, recorded) {
   return state;
 }
 
+// `lsof` for some processes, into `listing` ({ calls, asked, output }): true when every one of them
+// that still lives is covered by a listing that ended without error. `lsof` also ends with an error
+// when a process it was asked about has just gone, as a Codex session's short-lived children do, and
+// its output then proves nothing: the processes are asked about again in two halves, down to a
+// single one, which is settled by whether it still exists (one that is gone holds no file). The
+// number of calls is bounded; past it, nothing is proved.
+const LSOF_CALLS = 8;
+function listOpenFiles(pids, listing) {
+  const asked = pids.filter(exists);
+  if (!asked.length) return true;
+  if (listing.calls >= LSOF_CALLS) return false;
+  listing.calls += 1;
+  const r = spawnSync("lsof", ["-nP", "-Fn", "-p", asked.join(",")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15000 });
+  if (r.error || r.signal) return false;
+  if (r.status === 0) {
+    listing.asked.push(...asked);
+    listing.output.push(r.stdout || "");
+    return true;
+  }
+  if (asked.length === 1) return !exists(asked[0]);
+  const half = asked.length >> 1;
+  return listOpenFiles(asked.slice(0, half), listing) && listOpenFiles(asked.slice(half), listing);
+}
+
 // The rollout files that live Codex processes (and their children) hold open, as real paths, read
 // once for the whole pass. Null unless the listing is known to be complete: when the process table
-// or `lsof` cannot be read, when `lsof` is cut short or ends with an error, when it says nothing of
-// a Codex process that still lives, or when a rollout it names cannot be resolved. `lsof` also ends
-// with an error when a process it was asked about has just gone, as a Codex session's short-lived
-// children do; it is then asked again about the ones that remain, a few times at most, and only a
-// listing that ended without error counts.
-const LSOF_TRIES = 3;
+// or `lsof` cannot be read, when `lsof` is cut short or keeps ending with an error, when it says
+// nothing of a Codex process that still lives, or when a rollout it names cannot be resolved.
 function openRollouts() {
   const v = view();
   if (v.open !== undefined) return v.open;
@@ -286,28 +306,21 @@ function openRollouts() {
   const running = [...table].filter(([, row]) => !row.state.startsWith("Z"));
   const hosts = running.filter(([, row]) => agentOfCommand(row.command) === "codex").map(([pid]) => pid);
   const pids = [...new Set([...hosts, ...running.filter(([, row]) => hosts.includes(row.ppid)).map(([pid]) => pid)])];
-  for (let attempt = 0; attempt < LSOF_TRIES; attempt++) {
-    const asked = pids.filter(exists);
-    const open = new Set();
-    if (!asked.length) return (v.open = open);
-    const r = spawnSync("lsof", ["-nP", "-Fn", "-p", asked.join(",")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15000 });
-    if (r.error || r.signal) return (v.open = null);
-    if (r.status !== 0) continue;
-    const listed = new Set();
-    for (const line of (r.stdout || "").split("\n")) {
-      if (line.startsWith("p")) listed.add(Number(line.slice(1)));
-      else if (line.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) {
-        try {
-          open.add(fs.realpathSync(line.slice(1)));
-        } catch {
-          return (v.open = null);
-        }
+  const listing = { calls: 0, asked: [], output: [] };
+  if (!listOpenFiles(pids, listing)) return (v.open = null);
+  const open = new Set(), listed = new Set();
+  for (const line of listing.output.join("\n").split("\n")) {
+    if (line.startsWith("p")) listed.add(Number(line.slice(1)));
+    else if (line.startsWith("n") && /[/\\]rollout-[^/\\]*\.jsonl$/.test(line)) {
+      try {
+        open.add(fs.realpathSync(line.slice(1)));
+      } catch {
+        return (v.open = null);
       }
     }
-    if (asked.some((pid) => hosts.includes(pid) && !listed.has(pid))) return (v.open = null);
-    return (v.open = open);
   }
-  return (v.open = null);
+  if (listing.asked.some((pid) => hosts.includes(pid) && !listed.has(pid))) return (v.open = null);
+  return (v.open = open);
 }
 
 // Whether a Codex process holds session `id`'s rollout file open under `root`, as a running Codex

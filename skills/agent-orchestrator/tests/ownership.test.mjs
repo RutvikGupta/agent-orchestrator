@@ -724,8 +724,8 @@ test('one lsof listing serves a whole collection pass, however many Codex sessio
   const day = path.join(f.codex, 'sessions', '2026', '11', '13');
   fs.mkdirSync(day, { recursive: true });
   const runs = [];
-  for (const n of [1, 2, 3, 4, 5, 6]) {
-    fs.writeFileSync(path.join(day, `rollout-2026-11-13T00-00-0${n}-many-${n}.jsonl`), '');
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    fs.writeFileSync(path.join(day, `rollout-2026-11-13T00-00-${String(n).padStart(2, '0')}-many-${n}.jsonl`), '');
     runs.push(await idleLaunched(f, `many-${n}`, { agent: 'codex', sessionId: `many-${n}`, pid: 99999999 }));
   }
   // An `lsof` that records each call, then runs the real one.
@@ -736,11 +736,11 @@ test('one lsof listing serves a whole collection pass, however many Codex sessio
   fs.writeFileSync(path.join(bin, 'lsof'), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${real}" "$@"\n`, { mode: 0o755 });
   const report = await f.json(['gc', '--dry-run'], { env: { ...B, PATH: `${bin}:${f.env.PATH}` } });
   for (const r of runs) assert.equal(report.runs.find((x) => x.run === r.run.id).sessionEnded, 'its process (pid 99999999) is gone');
-  // Calls that ask which files are open (not the ones that ask for working directories). The listing
-  // is asked for again only when a process went while it was read, three times at most: never once
-  // per session.
+  // Calls that ask which files are open (not the ones that ask for working directories). A listing
+  // is asked for again, in parts, only when a process went while it was read, eight calls at most:
+  // never one per session.
   const probes = fs.readFileSync(log, 'utf8').split('\n').filter((line) => line && !line.includes('-d cwd'));
-  assert.ok(probes.length >= 1 && probes.length <= 3, `${probes.length} lsof calls for six sessions:\n${probes.join('\n')}`);
+  assert.ok(probes.length >= 1 && probes.length <= 8, `${probes.length} lsof calls for ten sessions:\n${probes.join('\n')}`);
 });
 
 test('Codex evidence that is not known to be complete is not an ended session: an lsof that exits with an error, a rollout whose path does not resolve', async (t) => {
