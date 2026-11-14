@@ -763,7 +763,7 @@ const LIVE = { className: 'live', text: '' };
 test('a cached board shows "stale: <reason>" in place of live, and a fresh one restores live', async () => {
   const page = await ready();
   assert.deepEqual({ className: page.stamp().className, text: page.stamp().text }, LIVE);
-  assert.match(page.stamp().title, /^updated /);
+  assert.equal(page.stamp().title, '', 'a current board has no tooltip');
   page.board.goStale(42, 'cannot read the run state');
   await page.poll();
   assert.deepEqual([page.stamp().className, page.stamp().text], ['live off', 'stale: cannot read the run state']);
@@ -777,7 +777,7 @@ test('a cached board shows "stale: <reason>" in place of live, and a fresh one r
   page.board.goFresh();
   await page.poll();
   assert.deepEqual({ className: page.stamp().className, text: page.stamp().text }, LIVE);
-  assert.match(page.stamp().title, /^updated /);
+  assert.equal(page.stamp().title, '', 'a current board has no tooltip');
 });
 
 test('only the first line of the reason shows, and a cached board without a reason still says it is stale', async () => {

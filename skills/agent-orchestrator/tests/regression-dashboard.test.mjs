@@ -517,3 +517,18 @@ test('a section heading shows a short title, cut at a word, and keeps a short on
   assert.equal(context.shortTitle('x'.repeat(60)), 'x'.repeat(60), 'a title at the limit is whole');
   assert.equal(context.shortTitle('y'.repeat(80)), `${'y'.repeat(60)}…`, 'one long word is cut at the limit');
 });
+
+test('elapsed time shows seconds only under a minute, and only a running row counts up', () => {
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet('function elapsedText(', '// A section\'s heading shows')};this.elapsedText=elapsedText;this.shortElapsed=shortElapsed;this.ticking=ticking;`, context);
+  const { elapsedText, shortElapsed, ticking } = context;
+  assert.deepEqual([0, 59_000, 60_000, 61_000, 3_599_000].map(elapsedText), ['0s', '59s', '1m', '1m', '59m']);
+  assert.deepEqual([3_600_000, 3_900_000, 86_400_000 * 18 + 3_600_000 * 5].map(elapsedText), ['1h00m', '1h05m', '18d5h']);
+  // What the board sends for a row that is not counted here: its seconds are dropped past a minute.
+  assert.deepEqual(['45s', '27m18s', '1h05m', '18d0h', '-'].map(shortElapsed), ['45s', '27m', '1h05m', '18d0h', '-']);
+  const at = '2026-01-01T00:00:00.000Z';
+  assert.equal(ticking({ state: 'running', startedAt: at }), true);
+  assert.equal(ticking({ state: 'running', phase: 'parked', startedAt: at }), false, 'a parked babysitter does not count up');
+  assert.equal(ticking({ state: 'completed', startedAt: at }), false);
+  assert.equal(ticking({ state: 'running' }), false, 'no start time, nothing to count from');
+});

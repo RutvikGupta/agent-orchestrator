@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+- The dashboard's elapsed time counts up live for a running row and shows no seconds past one
+  minute. The page's hover pop-ups that explained a control or summed up a row are gone; the few
+  left hold a value shown nowhere else or cut short (a stale board's reason, a warning's detail,
+  usage reset times, a link's address).
 - The dashboard's state column shows the state only (the attempt counts are in its tooltip), and
   a section's heading shows at most about 60 characters of its title, and the whole title under
-  it once the pointer rests on it. The run's details moved to the tooltip of the heading's summary.
+  it once the pointer rests on it. The heading's tooltip with the run's details is gone.
 - The dashboard's tree is easier to follow: one line per parent, centred under its arrow and drawn
   to the bottom of its last child's row; each stretch, and each arrow, has the status colour of
   its row.

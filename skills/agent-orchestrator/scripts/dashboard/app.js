@@ -54,6 +54,12 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
     else if(Math.abs(dy)>1)b.animate([{transform:"translateY("+dy+"px)"},{transform:"none"}],{duration:550,easing:"cubic-bezier(.2,.8,.2,1)"})}};
 const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run"))for(const a of d.getAnimations())a.startTime=0};
 const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="closed"||s==="parked"?"":"d-bad"};
+// A row's elapsed time in the board's own format, but with no seconds once it passes a minute. A
+// running row's is counted here from its start, every second (tick), so it moves between board
+// reads; any other row shows what the board sent. A parked babysitter does not count up.
+function elapsedText(ms){const s=Math.max(0,Math.round(ms/1000)),p=n=>String(n).padStart(2,"0"),d=Math.floor(s/86400);
+  return s<60?s+"s":s<3600?Math.floor(s/60)+"m":s<86400?Math.floor(s/3600)+"h"+p(Math.floor(s%3600/60))+"m":d<30?d+"d"+Math.floor(s%86400/3600)+"h":d<365?Math.floor(d/30)+"mo"+d%30+"d":Math.floor(d/365)+"y"+Math.floor(d%365/30)+"mo"}
+const shortElapsed=text=>String(text??"").replace(/^(\d+m)\d+s$/,"$1"),ticking=t=>t.state==="running"&&t.phase!=="parked"&&Number.isFinite(Date.parse(t.startedAt));
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A section's heading shows at most about 60 characters of its title, cut at a word, so a long goal
 // does not push the tables down; the whole title shows under it once the pointer rests on it.
@@ -115,14 +121,14 @@ async function refresh(){
   // Reads overlap (a click, a push and the timer all start one). One that started earlier but answers
   // after a newer one is dropped, so the board never steps back to a state before a message was stored.
   const mine=refresh.sent=(refresh.sent||0)+1;
-  let text,heavy={running:0,waiting:0},stale=null;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="is orch.mjs dashboard still running?";return}
+  let text,heavy={running:0,waiting:0},stale=null;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="";return}
   if(mine<(refresh.applied||0))return;refresh.applied=mine;
   // The mark follows every answer, whether or not the board changed: a green dot while the board is
   // current, red "stale: <reason>" while it is a cached one (or the server has none to send yet).
   const st=document.getElementById("stamp"),now=new Date().toLocaleTimeString();
   if(stale){st.className="live off";st.textContent="stale: "+(stale.why.length>100?stale.why.slice(0,99)+"…":stale.why);
     st.title=(stale.failed?"no board from the server":"showing a cached board"+(stale.age==null?"":", "+dur(stale.age*1000)+" old"))+": "+stale.why+" · checked "+now}
-  else{st.className="live";st.textContent="";st.title="updated "+now}
+  else{st.className="live";st.textContent="";st.title=""}
   if(stale?.failed)return; // an error body is not a board: the one on the page stays
   const heavyText=" · heavy: "+heavy.running+" running, "+heavy.waiting+" waiting";
   const grand=document.getElementById("grand");grand.textContent=grand.textContent.replace(/ · heavy:.*$/, "")+heavyText;
@@ -141,14 +147,14 @@ async function refresh(){
   const lane=state.flatMap(run=>(run.attention||[]).map(a=>({...a,run,k:run.id+"/"+a.key}))).sort((a,b)=>a.rank-b.rank||a.sinceMs-b.sinceMs);
   const forUser=lane.filter(a=>a.to!=="agent"),theirs=lane.filter(a=>a.to==="agent");
   const need=document.getElementById("need");need.hidden=!forUser.length;need.textContent=forUser.length+(forUser.length===1?" needs":" need")+" attention";
-  const attn=a=>$("div",{class:"attn a-"+a.kind+(a.to==="agent"?" for-agent":"")+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",title:a.reason,...(a.to==="agent"?{style:"opacity:.6"}:{})},
-    $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)",title:"Asked while it keeps working: answer in the box under its details"}:{})},a.label),$("b",a.name?{title:"task "+a.id}:{},a.name||a.id),$("span",{class:"where",...(a.runId?{title:"run "+a.runId}:{})},a.runGoal||(a.runId?a.runId.replace(/^\d{8}-\d{6}-/,""):sectionTitle(a.run))),
-    a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs),title:"waiting since "+new Date(a.sinceMs).toLocaleTimeString()},dur(Date.now()-a.sinceMs)):null,
+  const attn=a=>$("div",{class:"attn a-"+a.kind+(a.to==="agent"?" for-agent":"")+(sel===a.k?" sel":""),"data-key":a.k,tabindex:"0",role:"button",...(a.to==="agent"?{style:"opacity:.6"}:{})},
+    $("span",{class:"tag",...(a.kind==="question"?{style:"color:var(--ask)"}:{})},a.label),$("b",{},a.name||a.id),$("span",{class:"where"},a.runGoal||(a.runId?a.runId.replace(/^\d{8}-\d{6}-/,""):sectionTitle(a.run))),
+    a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs)},dur(Date.now()-a.sinceMs)):null,
     $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,"")),
-    a.to==="agent"?$("span",{class:"muted",style:"flex:none",title:"It reaches "+a.agent+" through its inbox or its wait; you get it only if that agent is gone"},"for "+a.agent)
+    a.to==="agent"?$("span",{class:"muted",style:"flex:none"},"for "+a.agent)
       :a.gone&&a.agent?$("span",{style:"flex:none;color:var(--bad)",title:a.agent+" is gone: "+a.gone},a.agent+" is gone"):null);
   if(lane.length)root.append($("div",{class:"lane"},...(forUser.length?[$("h2",{},"Needs attention"),...forUser.map(attn)]:[]),
-    ...(theirs.length?[$("h2",{class:"muted",title:"Agents are told about these; none needs you"},"For agents"),...theirs.map(attn)]:[])));
+    ...(theirs.length?[$("h2",{class:"muted"},"For agents"),...theirs.map(attn)]:[])));
   tick();
   for(const run of state){tin+=run.totals.tokensIn;tout+=run.totals.tokensOut;running+=run.totals.running;root.append(sectionView(run))}
   refocus(root,focus);
@@ -168,7 +174,6 @@ function staleNote(r,body){const age=r.headers.get("x-orch-stale"),head=r.header
 // One section of the board: its header and its session tree. A task that `rename` named shows its name,
 // with its id in the tooltip; the id stays the row's key. Only orch.mjs tasks have names.
 function sectionView(run){
-  const by=run.orchestrator?.agent?("launched by "+run.orchestrator.agent+(run.orchestrator.sessionId?" session "+run.orchestrator.sessionId.slice(0,8):"")):"";
   // One <tbody> per session, so its row and its activity line hover and select as one item.
   const byKey=new Map(run.tasks.map(t=>[t.key,t])),open=autoOpen(run.tasks);
   for(const t of run.tasks)live.set(run.id+"/"+t.key,open.has(t.key));
@@ -184,24 +189,22 @@ function sectionView(run){
     const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
     const indent=(w,second)=>({class:"name",style:"padding-left:"+(6+t.depth*IND+w)+"px;--pad:"+(4+t.depth*IND)+"px"+guideLayers(t.depth,guides.get(t.key),second)});
     return $("tbody",{class:c,"data-key":key,tabindex:"0"},$("tr",{},
-      $("td",{...indent(0),title:t.native&&t.parent!=="orchestrator"?"started by "+t.parent:""},
-        nk?$("span",{class:"caret "+dotClass(t),"data-key":key,title:shut?"expand":"collapse"},shut?"▶":"▼"):$("span",{class:"caret blank"}),
-        $("span",{class:"dot "+dotClass(t),title:outcome(t)}),t.main?$("b",{},"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id,
+      $("td",{...indent(0)},
+        nk?$("span",{class:"caret "+dotClass(t),"data-key":key},shut?"▶":"▼"):$("span",{class:"caret blank"}),
+        $("span",{class:"dot "+dotClass(t)}),t.main?$("b",{},"main session"):t.name?$("span",{},t.name):t.id,
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
-        t.inbox?.unread>0?$("span",{class:"mail",title:"messages the agent has not read yet:\n"+(t.inbox.unreadMessages||[]).map(m=>new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+"  "+senderOf(m)+": "+m.text).join("\n")},"✉ "+t.inbox.unread+" waiting"):null,
-        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")):null),$("td",{title:(t.command?"$ "+t.command+"\n":"")+(t.why||"")},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
-      $("td",{class:"state "+cls(outcome(t)),title:[t.attempt>1?t.attempt+" attempts":null,startedIn(t,byKey.get(t.parentKey))?"started in attempt "+startedIn(t,byKey.get(t.parentKey))+" of its parent":null].filter(Boolean).join(" · ")},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")),$("td",{class:"num"},t.elapsed),$("td",{class:"num"},t.steps),
+        t.inbox?.unread>0?$("span",{class:"mail"},"✉ "+t.inbox.unread+" waiting"):null,
+        shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")):null),$("td",{},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
+      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")),$("td",ticking(t)?{class:"num el","data-start":String(Date.parse(t.startedAt))}:{class:"num"},ticking(t)?elapsedText(Date.now()-Date.parse(t.startedAt)):shortElapsed(t.elapsed)),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
       $("tr",{class:"nowrow"},$("td",{...indent(32,true),colspan:"10"},nowText(t))))});
-  // The run's goal as its title, with a short status after it; run id, launcher, and branch are in
-  // the status's tooltip, so that the title shows only its own text when the pointer is on it.
+  // The run's goal as its title, with a short status after it. The heading has no tooltip.
   const clock=ms=>{const d=new Date(ms),t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});return d.toDateString()===new Date().toDateString()?t:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t};
   const tt=run.totals,ap=tt.exact?"":"~",started=clock(Date.parse(run.createdAt)),awaiting=(run.attention||[]).filter(a=>a.kind==="awaiting-review").length;
   const summary=[tt.running?tt.running+" running":null,tt.finished?tt.finished+" finished":null,awaiting?awaiting+" awaiting review":null,ap+fmt(tt.tokensIn)+" in / "+ap+fmt(tt.tokensOut)+" out","started "+started,!run.running&&run.activeMs?"last active "+clock(run.activeMs):null].filter(Boolean).join(" · ");
-  const tip=[[run.id,by,[(run.repo||"").split("/").pop(),run.baseBranch].filter(Boolean).join(" @ ")].filter(Boolean).join(" · "),...((run.runs||[]).length>1?["runs:",...run.runs.map(r=>"  "+(r.goal||r.id))]:[]),"token counts leave out the main session"].filter(Boolean).join("\n");
-  const toggle=older.size?$("button",{class:"older","data-run":run.id,title:showOlder?"fold away the finished rows that have been quiet a while":"list the finished rows that have been quiet a while"},showOlder?"hide older":"show "+older.size+" older"):null;
-  return $("div",{class:"run","data-run":run.id},$("h2",{},sectionTitle(run).length>TITLE_MAX?$("span",{class:"ttl"},shortTitle(sectionTitle(run)),$("span",{class:"full"},sectionTitle(run))):sectionTitle(run),$("span",{class:"sub",title:tip}," · "+summary),toggle),
+  const toggle=older.size?$("button",{class:"older","data-run":run.id},showOlder?"hide older":"show "+older.size+" older"):null;
+  return $("div",{class:"run","data-run":run.id},$("h2",{},sectionTitle(run).length>TITLE_MAX?$("span",{class:"ttl"},shortTitle(sectionTitle(run)),$("span",{class:"full"},sectionTitle(run))):sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
     $("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
       $("th",{class:"num"},"steps"),$("th",{class:"num"},"tokens in"),$("th",{class:"num"},"out"),$("th",{},"session"))),...(rows.length?rows:[$("tbody",{},$("tr",{},$("td",{colspan:"10",class:"muted"},older.size?"every row is older; show them from the header":"no tasks yet")))])),
   )}
@@ -316,7 +319,7 @@ const eventView=e=>$("div",{class:"ev "+e.kind},$("span",{class:"k"},e.kind),e.k
 const agentList=(key,t)=>(state.find(r=>r.id===key.split("/")[0])?.tasks||[]).filter(x=>x.taskAgent&&x.parentKey===t.key);
 function agentsView(key,t){const list=agentList(key,t);if(!list.length)return[];
   return[$("p",{class:"ctx"},$("span",{class:"k"},"Agents it started"),
-    ...list.flatMap((x,i)=>[i?", ":"",$("button",{type:"button",class:"agentlink","data-key":key.split("/")[0]+"/"+x.key,title:"Show its row and its events",onclick:()=>reveal(key.split("/")[0]+"/"+x.key)},
+    ...list.flatMap((x,i)=>[i?", ":"",$("button",{type:"button",class:"agentlink","data-key":key.split("/")[0]+"/"+x.key,onclick:()=>reveal(key.split("/")[0]+"/"+x.key)},
       x.kind+" · "+(x.model||"model unknown")+" · "+x.state+(startedIn(x,t)?" · attempt "+startedIn(x,t):""))]))]}
 // `ev` is null while the row's first log is still loading; it must be the log of the attempt the
 // panel shows (logKey). `keep` holds the scroll position as it is, after a click inside the panel.
@@ -331,7 +334,7 @@ function paint(key,t,ext,ev,keep){
   const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},(t.name||t.id)+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
-      $("button",{class:"close",title:"Close the details (Esc)","aria-label":"Close the details",onclick:closeDetail},"×")),
+      $("button",{class:"close","aria-label":"Close the details",onclick:closeDetail},"×")),
     $("dl",{},...[["id",t.name?t.id:null],["earlier names",[...new Set((t.names||[]).map(n=>n&&n.name).filter(n=>n&&n!==t.name))].join(", ")],["state",(t.phase==="parked"?"parked":t.state)+(t.exitCode!=null?" (exit "+t.exitCode+")":"")],["phase",t.phase!==t.state&&t.phase!=="parked"?t.phase:null],["parked",t.parked?t.parked.waitsFor+" · watcher "+t.parked.watcher+(t.parked.lastCheckAt?" · checked "+timeText(t.parked.lastCheckAt):""):null],["health",t.health!=="ok"?t.health:null],["session",t.session],["model",t.model?t.model+(t.tier?" ("+t.tier+" tier)":""):t.command?"none":null],["command",t.command?"$ "+t.command:null],["runs",t.runs?t.runs.map(a=>a.kind+" · "+(a.modelLabel||"model not known yet")+" · "+a.state+(a.session?" · "+a.session.slice(0,8):"")).join("\n"):null],["why this agent",t.why],["attempt",t.attempt],["started in",startedIn(t,up)?"attempt "+startedIn(t,up)+" of its task":null],["mode",t.mode],
       ["working dir",own?null:t.cd],["branch",own?null:t.branch],["tokens",fmt(t.tokensIn)+" in ("+fmt(t.tokensCached)+" cached) / "+fmt(t.tokensOut)+" out"],
       ["touched files",t.touchedFiles?t.touchedFiles.join("  "):null],[ext?"transcript":"artifacts",t.outDir]].filter(([,v])=>v!=null&&v!=="").flatMap(([k,v])=>[$("dt",{},k),$("dd",{},v)])),
@@ -400,7 +403,7 @@ const attemptEnd=a=>a.state==="completed"?"completed":a.state==="needs-decision"
 function attemptsView(key,t,n){const list=t.attempts||[];if(!list.length)return[];
   return[$("h3",{},"Attempts"),$("div",{class:"attempts"},...list.map(a=>{const on=a.n===n,end=attemptEnd(a);
     const time=a.state==="running"&&a.n===t.attempt?t.elapsed:a.durationMs!=null?dur(a.durationMs):null;
-    const tip=[on?"Its events are shown below":"Show this attempt's events",a.session?"session "+a.session:null,a.startedAt?"started "+timeText(a.startedAt):null,end].filter(Boolean).join("\n");
+    const tip=[a.session?"session "+a.session:null,a.startedAt?"started "+timeText(a.startedAt):null,end].filter(Boolean).join("\n");
     return $("button",{type:"button",class:"att"+(on?" on":""),"data-n":String(a.n),"aria-pressed":String(on),title:tip,onclick:()=>showAttempt(key,a.n)},
       $("b",{},"#"+a.n),$("span",{class:"muted"},a.reason||"-"),$("span",{},[a.agent,a.model].filter(Boolean).join(" · ")||"-"),
       time?$("span",{class:"num"},time):null,$("span",{class:"num"},fmt(a.tokensIn)+" in / "+fmt(a.tokensOut)+" out"),
@@ -472,8 +475,8 @@ function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t)
   const items=[...sent.map(m=>({id:key+"|"+(m.id||m.time),text:m.text+pic(m.images),m})),...mine.map(e=>({id:key+"|l"+e.lid,text:e.text+pic(e.images),e}))];
   const open=i=>msgFold.has(i.id)?msgFold.get(i.id):!longText(i.text),long=items.filter(i=>longText(i.text)),anyOpen=long.some(open);
   const flip=(list,to)=>{for(const i of list)msgFold.set(i.id,to);repaint(key)};
-  const arrow=i=>longText(i.text)?$("button",{type:"button",class:"mt "+(open(i)?"open":"shut"),title:open(i)?"fold this message":"show the whole message","aria-expanded":String(open(i)),onclick:()=>flip([i],!open(i))}):null;
-  return[$("h3",{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),title:anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
+  const arrow=i=>longText(i.text)?$("button",{type:"button",class:"mt "+(open(i)?"open":"shut"),"aria-label":open(i)?"fold this message":"show the whole message","aria-expanded":String(open(i)),onclick:()=>flip([i],!open(i))}):null;
+  return[$("h3",{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),"aria-label":anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
     ...items.map(i=>i.m?$("div",{class:"msg"+(i.m.from==="user"?" you":"")+(open(i)?"":" shut")},
       $("span",{class:"k"},arrow(i),(i.m.from==="user"?"you":"orchestrator")+" · "+hhmm(i.m.time)+" · "+(i.m.read?"read":"queued")+(!open(i)&&i.m.replies?.length?" · "+i.m.replies.length+(i.m.replies.length===1?" reply":" replies"):"")),$("pre",{},i.text),
       ...(i.m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+hhmm(r.time)),rich(r.text))))
@@ -483,7 +486,7 @@ function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t)
 // The free disk space under the state root, from /api/health: amber below twice the minimum, red below
 // it (worktrees are then refused); the tooltip names the commands that free space.
 async function diskSpace(){try{const d=(await (await fetch("api/health")).json()).disk,el=document.getElementById("disk");if(!d||!el)return;
-  el.className="disk"+(d.critical?" critical":d.low?" low":"");el.textContent=d.summary+(d.critical?" · below minimum":d.low?" · low":"");el.title=d.title||""}catch{}}
+  el.className="disk"+(d.critical?" critical":d.low?" low":"");el.textContent=d.summary+(d.critical?" · below minimum":d.low?" · low":"");}catch{}}
 async function limits(){try{const u=await (await fetch("api/usage")).json();
   document.getElementById("limits").replaceChildren(...["claude","codex"].map(k=>$("span",{class:"limit"+(u[k]&&u[k].max>=80?" hot":""),title:u[k]?u[k].full:"no reading yet"},
     $("b",{},k[0].toUpperCase()+k.slice(1))," "+(u[k]?u[k].short:"unknown"))))}catch{}}
@@ -502,7 +505,7 @@ const MAX_IMAGES=4,MAX_IMAGE_BYTES=5*1024*1024,IMAGE_TYPES=["image/png","image/j
 // Images waiting to go with the next message, shown as thumbnails that can be removed.
 function showFiles(){const box=document.getElementById("compose-files");for(const img of box.querySelectorAll("img"))URL.revokeObjectURL(img.src);
   box.replaceChildren(...files.map((file,i)=>$("div",{class:"f",title:file.name||"pasted image"},$("img",{src:URL.createObjectURL(file),alt:file.name||"pasted image"}),
-    $("button",{type:"button",title:"Remove this image","aria-label":"Remove this image",onclick:()=>{files=files.filter((_,j)=>j!==i);showFiles()}},"×"))));
+    $("button",{type:"button","aria-label":"Remove this image",onclick:()=>{files=files.filter((_,j)=>j!==i);showFiles()}},"×"))));
   box.hidden=!files.length}
 function addFiles(list){const status=document.getElementById("compose-status"),skipped=[];
   for(const file of list){if(!IMAGE_TYPES.includes(file.type))skipped.push((file.name||"a file")+" is not a PNG, JPEG, GIF or WebP image");
@@ -529,7 +532,7 @@ function rich(text){const box=$("div",{class:"rich"});let list=null,para=[];
 const closedReplies=new Set((()=>{try{return JSON.parse(localStorage.getItem("orchClosedReplies")||"[]")}catch{return[]}})());
 function showReply(t){const box=document.getElementById("compose-reply"),r=t?.inbox?.lastReply,id=r&&t.key+"@"+r.time;
   if(!r||closedReplies.has(id)){box.replaceChildren();box.hidden=true;return}
-  box.replaceChildren($("button",{type:"button",class:"x",title:"Close","aria-label":"Close the reply",onclick:()=>{closedReplies.add(id);
+  box.replaceChildren($("button",{type:"button",class:"x","aria-label":"Close the reply",onclick:()=>{closedReplies.add(id);
       try{localStorage.setItem("orchClosedReplies",JSON.stringify([...closedReplies].slice(-200)))}catch{}showReply(t)}},"×"),
     $("span",{class:"rh"},(t.name||t.id)+" replied · "+new Date(r.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})),rich(r.text));box.hidden=false}
 // The messages that wait for the agent, above the message box: every unread message on the board, oldest
@@ -550,13 +553,13 @@ function showQueue(t,key){const box=document.getElementById("compose-queue"),row
   hintDue=due!=null&&!late?due:null;
   const shut=queueShut();
   box.replaceChildren(...(rows.length?[$("div",{class:"qh"},
-      $("button",{type:"button",class:"qt "+(shut?"shut":"open"),"aria-expanded":String(!shut),"aria-label":shut?"Show the waiting messages":"Hide the waiting messages",title:shut?"Show the waiting messages":"Hide the waiting messages; the count stays",onclick:()=>{setQueueShut(!shut);showQueue(t,key)}}),
+      $("button",{type:"button",class:"qt "+(shut?"shut":"open"),"aria-expanded":String(!shut),"aria-label":shut?"Show the waiting messages":"Hide the waiting messages",onclick:()=>{setQueueShut(!shut);showQueue(t,key)}}),
       "Waiting for the agent ("+rows.length+")",
-      queued.length?$("button",{type:"button",class:"now",title:"Stop the agent's current shell command so it reads these now (never a commit, push or other publishing command). Not in a shell command: its session is stopped and resumed with them.",onclick:()=>sendNow(t)},"Send now"):null),
+      queued.length?$("button",{type:"button",class:"now",onclick:()=>sendNow(t)},"Send now"):null),
     ...(when&&!shut?[$("p",{class:"muted qd"},when)]:[]),
     ...(late&&!when&&!shut?[$("p",{class:"muted qhint"},HINT)]:[]),
     ...(shut?[]:[$("div",{class:"ql"},...rows.map(m=>{const at=new Date(m.time).getTime();
-      return $("div",{class:"q",title:m.text},$("span",{class:"t"},m.sender+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":" · "),
+      return $("div",{class:"q"},$("span",{class:"t"},m.sender+" · "+hhmm(m.time)+(m.status==="sending"?" · sending…":" · "),
           ...(m.status==="sending"?[]:[$("span",{class:"waited","data-since":String(at)},"waited "+dur(Date.now()-at))])),
         $("span",{class:"x"},m.text.trim()+(m.images?" ("+imageCount(m.images)+")":"")))}))])]:[]));
   box.hidden=!rows.length}
@@ -649,7 +652,7 @@ new ResizeObserver(()=>{const box=document.getElementById("compose");document.do
   sp.addEventListener("dblclick",()=>{localStorage.removeItem("orchDetailWidth");set(0)})})();
 // Waiting timers tick together once a second from their absolute start, between redraws too.
 function dur(ms){const t=Math.max(0,Math.floor(ms/1000)),d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60),x=t%60,p=n=>String(n).padStart(2,"0");if(d>=365)return Math.floor(d/365)+"y "+Math.floor(d%365/30)+"mo";if(d>=30)return Math.floor(d/30)+"mo "+d%30+"d";if(d)return d+"d "+h+"h";return h?h+"h "+p(m)+"m":m?m+"m "+p(x)+"s":x+"s"}
-function tick(){const now=Date.now();for(const el of document.querySelectorAll(".tick[data-since],.waited[data-since]"))el.textContent=(el.classList.contains("waited")?"waited ":"")+dur(now-Number(el.dataset.since));
+function tick(){const now=Date.now();for(const el of document.querySelectorAll("td.el[data-start]"))el.textContent=elapsedText(now-Number(el.dataset.start));for(const el of document.querySelectorAll(".tick[data-since],.waited[data-since]"))el.textContent=(el.classList.contains("waited")?"waited ":"")+dur(now-Number(el.dataset.since));
   if(hintDue!=null&&now>=hintDue)compose()}
 setTimeout(()=>{tick();setInterval(tick,1000)},1000-Date.now()%1000);
 // A new dashboard server reloads the page. Keep the chosen row, the panel and the typed drafts in
