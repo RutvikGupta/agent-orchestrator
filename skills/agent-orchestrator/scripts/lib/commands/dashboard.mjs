@@ -105,17 +105,21 @@ export async function cmdDashboard(args) {
     fs.mkdirSync(STATE_ROOT, { recursive: true });
     const logPath = path.join(STATE_ROOT, "dashboard.log");
     // Detached, and on macOS started through launchd, outside the terminal application (detach.mjs).
-    const { pid } = startDetached({
-      command: process.execPath,
-      args: [self, "dashboard", "--host", host, "--port", String(port), "--idle-exit", idle],
-      cwd: process.cwd(),
-      env: process.env,
-      stdout: logPath,
-    });
+    let pid;
+    try {
+      ({ pid } = startDetached({
+        command: process.execPath,
+        args: [self, "dashboard", "--host", host, "--port", String(port), "--idle-exit", idle],
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: logPath,
+      }));
+    } catch (error) {
+      die(`the background dashboard did not start: ${error.message}`);
+    }
     // Whether the server has exited, from its PID, since launchd rather than this process may be its
     // parent. A direct child that exits is reaped by Node while this loop waits, so its PID is gone.
     const exited = () => {
-      if (!pid) return true;
       try {
         process.kill(pid, 0);
         return false;

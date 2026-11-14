@@ -498,7 +498,10 @@ function prepareStart(args, extra = {}) {
       started = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
     } catch (error) {
       giveBack();
-      throw error;
+      if (error instanceof AdmissionRevoked) throw error;
+      // The relay did not start, by either way (detach.mjs): nothing is recorded as started.
+      fs.rmSync(outDir, { recursive: true, force: true });
+      refuse(`task ${id} did not start: ${error.message}`);
     }
     task.pid = started.pid;
     task.launch = started.launch;
@@ -574,7 +577,7 @@ function readAgentEnv() {
 // Start a relay detached, in its own process group (on macOS through launchd, outside the terminal
 // application; detach.mjs), writing its output to the attempt's relay.log, with the variables that
 // link what it runs to the task. Returns { pid, launch }: its PID, and how it started, which the
-// task records for its attempt.
+// task records for its attempt. Throws when it could not start.
 function spawnRelay(run, id, relay, relayArgs, outDir, cd, env) {
   const log = path.join(outDir, "relay.log");
   return startDetached({
@@ -697,7 +700,8 @@ function startCommand(run, id, args, extra) {
     started = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
   } catch (error) {
     claim?.release();
-    throw error;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    refuse(`task ${id} did not start: ${error.message}`);
   }
   task.pid = started.pid;
   task.launch = started.launch;
