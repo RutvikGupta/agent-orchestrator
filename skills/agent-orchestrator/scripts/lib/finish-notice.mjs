@@ -92,6 +92,7 @@ export function watchForFinish(run, task) {
       command: "/bin/sh",
       args: ["-c", WAIT_SCRIPT, "finish-notice", String(task.pid), "", ...send],
       cwd: run.dir,
+      near: [run.repo, task.cd],
       env: process.env,
       stdout: path.join(task.outDir, NOTICE_LOG),
     }).pid;

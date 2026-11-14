@@ -138,9 +138,17 @@ an interrupt's resume helper, and `dashboard --detach`.
   folder is missing or its program is not an executable file, the start fails the same way through
   launchd or directly:
   `start` exits 1 with `task <id> did not start: <why>`, and records nothing.
+- **Folders macOS guards.** macOS asks once for each application before a process reads Desktop,
+  Documents, Downloads, iCloud Drive, other cloud storage or another volume. A process under the
+  terminal uses the terminal's answer. One that launchd started has none: its first read there
+  waits for a prompt that names `node`, and nothing answers it while you are away. So a task whose
+  folder or repository is in such a folder starts directly, as before, and quitting the terminal
+  ends it. A task that works elsewhere and only reads such a folder still meets the prompt, once
+  for each folder: answer Allow, or allow `node` under Privacy & Security, Files and Folders.
 - **Settings.** `AGENT_ORCH_LAUNCHD=off` turns this off: every start is direct, and nothing calls
-  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a start waits
-  for the answer.
+  `launchctl`. `AGENT_ORCH_LAUNCHD=on` starts through launchd in a guarded folder too, once you
+  have allowed `node` there. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a
+  start waits for the answer.
 - **What still ends with the terminal.** The session that you run in the terminal, and that
   launched the agents, still ends when you quit it. Its agents keep running. Resume that session,
   then run `$ORCH recover`: it lists the agents the session launched, so you can follow them again.

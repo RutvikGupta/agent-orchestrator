@@ -76,7 +76,7 @@ export function cmdAgents(args) {
     claudeRelay && !networkReady ? `\n\nnote: Claude tasks run without network until references/claude-delegate-network.patch is re-applied to ${claudeRelay}` : "";
   const machine = machineStatus();
   // Whether quitting the terminal application ends the agents started from here (detach.mjs).
-  const outside = outsideTerminal();
+  const outside = outsideTerminal(process.env, process.platform, [process.cwd()]);
   emit(
     args,
     { agents: rows, machine, outsideTerminal: outside, policy, policyPath: POLICY_PATH, tierEvidence: evidence, usage, claudeNetwork: networkReady, skillRoots: SKILL_ROOTS, stateRoot: STATE_ROOT },

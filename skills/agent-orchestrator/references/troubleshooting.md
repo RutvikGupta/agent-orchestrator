@@ -59,7 +59,9 @@ watchers and the detached dashboard through a one-off launchd job, so they survi
 (`references/agents.md`, "Agents outlive the terminal").
 
 - Run `$ORCH agents`. If its "agents outside the terminal" line says `no: AGENT_ORCH_LAUNCHD=off`,
-  remove that setting. If it says `no: launchctl was not found`, put `/bin` back on `PATH`.
+  remove that setting. If it says `no: launchctl was not found`, put `/bin` back on `PATH`. If it
+  names a folder macOS guards, the repository is in Desktop, Documents, Downloads, iCloud Drive or
+  on another volume: move it, or allow `node` there and set `AGENT_ORCH_LAUNCHD=on`.
 - `$ORCH result <run> <task>` shows `launch: direct, not through launchd (<reason>)` when an
   attempt fell back to a direct start.
 - The terminal session that launched the agents always ends with the terminal. Resume it, run
@@ -67,3 +69,15 @@ watchers and the detached dashboard through a one-off launchd job, so they survi
 - To keep the dashboard up through a quit, run it under launchd yourself (a job with `KeepAlive`
   that runs `orch.mjs dashboard` in the foreground), not with `dashboard --detach` from a terminal
   that may be quit before the first agent starts.
+
+## A command hangs, or fails with "Operation not permitted", in Desktop, Documents or Downloads
+
+On macOS an agent started through launchd does not have the terminal's access to the folders
+macOS guards (`references/agents.md`, "Agents outlive the terminal"). Its first read of one waits
+for a prompt, "node would like to access files in your ... folder", and fails with `Operation not
+permitted` if the answer was Don't Allow.
+
+- Answer Allow, once for each folder. To change an earlier answer, open System Settings, Privacy &
+  Security, Files and Folders, and turn the folder on for `node`.
+- To keep every agent under the terminal instead, set `AGENT_ORCH_LAUNCHD=off`. Quitting the
+  terminal then ends the agents.

@@ -45,6 +45,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { STATE_ROOT } from "./config.mjs";
@@ -97,23 +98,62 @@ export function launchdWait(value = process.env.AGENT_ORCH_LAUNCHD_WAIT) {
   return Math.min(MAX_WAIT_MS, m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000 }[m[2] || "s"] : 10_000);
 }
 
+// The folder macOS guards that `file` is in, as the user knows it ("~/Documents"), or null. macOS
+// asks once for each application before a process reads Desktop, Documents, Downloads, iCloud Drive,
+// other cloud storage or another volume (Privacy & Security, Files and Folders). A process started
+// under the terminal application uses the terminal's answer. One that launchd starts has none: its
+// first read there waits until the user answers a prompt that names the program launchd ran, node.
+export function guardedFolder(file, home = os.homedir()) {
+  // The real path of the longest part that exists, then the rest: a folder that is not there yet,
+  // or no longer, is still judged by the links above it.
+  const real = (p) => {
+    const rest = [];
+    for (let at = path.resolve(String(p)); ; ) {
+      try {
+        return path.join(fs.realpathSync(at), ...rest);
+      } catch {
+        const up = path.dirname(at);
+        if (up === at) return path.resolve(String(p));
+        rest.unshift(path.basename(at));
+        at = up;
+      }
+    }
+  };
+  const at = real(file);
+  const base = real(home);
+  for (const name of ["Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage"]) {
+    const dir = path.join(base, name);
+    if (at === dir || at.startsWith(dir + path.sep)) return `~/${name}`;
+  }
+  // The start-up volume's own name under /Volumes is a link to "/", which the real path follows.
+  return /^\/Volumes\/[^/]+/.exec(at)?.[0] || null;
+}
+
 // How a start goes from a process with environment `env`: { how: "launchd" }, or { how: "direct",
 // reason, outside }, where `outside` says that this process already runs outside the terminal
-// application, so what it starts directly does too.
-export function launchPlan(env = process.env, platform = process.platform) {
+// application, so what it starts directly does too. `near` lists the folders the process works in
+// (its own, its repository): when macOS guards one of them, the start is direct, so that the process
+// keeps the terminal's access instead of waiting for a privacy prompt nobody may see.
+// AGENT_ORCH_LAUNCHD=on starts through launchd there too, for a user who has allowed node.
+export function launchPlan(env = process.env, platform = process.platform, near = []) {
   if (platform !== "darwin") return { how: "direct", reason: "not macOS", outside: false };
   if (env.AGENT_ORCH_OUTSIDE === "1") return { how: "direct", reason: "already outside the terminal application (AGENT_ORCH_OUTSIDE=1)", outside: true };
   if (env.AGENT_ORCH_LAUNCHD === "off") return { how: "direct", reason: "AGENT_ORCH_LAUNCHD=off", outside: false };
+  if (env.AGENT_ORCH_LAUNCHD !== "on") {
+    const folder = near.filter(Boolean).map((file) => guardedFolder(file, env.HOME || os.homedir())).find(Boolean);
+    if (folder) return { how: "direct", reason: `${folder} is a folder macOS guards, where a process started through launchd waits for a privacy prompt; AGENT_ORCH_LAUNCHD=on starts through launchd anyway`, outside: false };
+  }
   return { how: "launchd" };
 }
 
 // Whether agents started from this process run outside the terminal application, for `agents`:
 // { outside: true | false | null, how, text }. It loads no job: launchctl only has to be on PATH.
-export function outsideTerminal(env = process.env, platform = process.platform) {
-  const plan = launchPlan(env, platform);
+// `near` is as for launchPlan: the answer is for agents that work in those folders.
+export function outsideTerminal(env = process.env, platform = process.platform, near = []) {
+  const plan = launchPlan(env, platform, near);
   if (plan.how === "launchd") {
     return onPath("launchctl", env.PATH)
-      ? { outside: true, how: "launchd", text: "yes: each agent starts through a one-off launchd job, so quitting the terminal application does not end it" }
+      ? { outside: true, how: "launchd", text: "yes: each agent starts through a one-off launchd job, so quitting the terminal application does not end it (a task that works in a folder macOS guards, such as Documents, starts directly)" }
       : { outside: false, how: "direct", text: "no: launchctl was not found, so agents start directly and quitting the terminal application ends them" };
   }
   if (plan.outside) return { outside: true, how: "direct", text: "yes: this command already runs outside the terminal application, and so does what it starts" };
@@ -149,9 +189,9 @@ export function startProblem(command, cwd, env = process.env) {
 // its output to the files `stdout` and `stderr` (by default the same file). Returns { pid, launch }:
 // its PID, and how it started, { how: "launchd", label } or { how: "direct", reason }. Throws when it
 // cannot start, the same error whichever way it went: it never returns without a PID.
-export function startDetached({ command, args = [], cwd = process.cwd(), env = process.env, stdout, stderr = stdout }) {
+export function startDetached({ command, args = [], cwd = process.cwd(), env = process.env, stdout, stderr = stdout, near = [] }) {
   const spec = { command, args: args.map(String), cwd, stdout, stderr };
-  const plan = launchPlan();
+  const plan = launchPlan(process.env, process.platform, [cwd, ...near]);
   if (plan.how === "launchd") {
     const job = throughLaunchd({ ...spec, env: { ...env, AGENT_ORCH_OUTSIDE: "1" }, umask: process.umask() });
     if (job.pid) return { pid: job.pid, launch: { how: "launchd", label: job.label } };

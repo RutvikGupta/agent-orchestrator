@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { eventually, fixture, readJson } from './helpers.mjs';
 // A constant, the shell that claims a launchd start's answer, run here with chosen arguments; and
 // functions that only read their arguments and, for startProblem, the files they name.
-import { CLAIM_SCRIPT, claimWords, launchdWait, startProblem } from '../scripts/lib/detach.mjs';
+import { CLAIM_SCRIPT, claimWords, guardedFolder, launchdWait, launchPlan, startProblem } from '../scripts/lib/detach.mjs';
 
 // Starts through launchd (scripts/lib/detach.mjs), against a fake `launchctl` first on PATH. Only the
 // last test, opt-in, loads a job into the real launchd.
@@ -326,6 +326,64 @@ test('without a gui domain, as in an SSH login, the job goes to the user domain'
   assert.ok(fake.calls().some((c) => c.verb === 'bootout' && c.target === `user/${uid}/${task.launch.label}`));
   assert.deepEqual(listJobs(f), []);
   await finish(f, run, task, command);
+});
+
+test('a folder macOS guards makes the start direct, unless AGENT_ORCH_LAUNCHD=on', (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'guard-')));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, 'Documents', 'code', 'repo'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'code'));
+  fs.symlinkSync(path.join(home, 'Documents', 'code'), path.join(home, 'link'));
+  assert.equal(guardedFolder(path.join(home, 'Documents', 'code', 'repo'), home), '~/Documents');
+  assert.equal(guardedFolder(path.join(home, 'Documents'), home), '~/Documents');
+  assert.equal(guardedFolder(path.join(home, 'Downloads', 'not-there'), home), '~/Downloads');
+  assert.equal(guardedFolder(path.join(home, 'Library', 'Mobile Documents', 'x'), home), '~/Library/Mobile Documents');
+  // A link into a guarded folder is in it; a name that only starts the same is not.
+  assert.equal(guardedFolder(path.join(home, 'link', 'repo'), home), '~/Documents');
+  assert.equal(guardedFolder(path.join(home, 'link', 'gone', 'deeper'), home), '~/Documents');
+  assert.equal(guardedFolder(path.join(home, 'code', 'gone'), home), null);
+  assert.equal(guardedFolder(path.join(home, 'Documents-old'), home), null);
+  assert.equal(guardedFolder(path.join(home, 'code'), home), null);
+  assert.equal(guardedFolder('/Volumes/Backup/repo', home), '/Volumes/Backup');
+  assert.equal(guardedFolder('/usr/local', home), null);
+
+  const env = { HOME: home };
+  const inside = path.join(home, 'Documents', 'code', 'repo');
+  assert.deepEqual(launchPlan(env, 'darwin', [path.join(home, 'code')]), { how: 'launchd' });
+  const plan = launchPlan(env, 'darwin', [path.join(home, 'code'), undefined, inside]);
+  assert.equal(plan.how, 'direct');
+  assert.equal(plan.outside, false);
+  assert.match(plan.reason, /^~\/Documents is a folder macOS guards, .* AGENT_ORCH_LAUNCHD=on starts through launchd anyway$/);
+  assert.deepEqual(launchPlan({ ...env, AGENT_ORCH_LAUNCHD: 'on' }, 'darwin', [inside]), { how: 'launchd' });
+  assert.equal(launchPlan({ ...env, AGENT_ORCH_LAUNCHD: 'off' }, 'darwin', [inside]).reason, 'AGENT_ORCH_LAUNCHD=off');
+  // What already runs outside the terminal cannot go back under it.
+  assert.equal(launchPlan({ ...env, AGENT_ORCH_OUTSIDE: '1' }, 'darwin', [inside]).outside, true);
+  assert.equal(launchPlan(env, 'linux', [inside]).reason, 'not macOS');
+});
+
+test('a task that works in a folder macOS guards starts directly and says why; AGENT_ORCH_LAUNCHD=on sends it through launchd', { skip: launchdOnly }, async (t) => {
+  const f = await fixture(t);
+  const fake = fakeLaunchd(f);
+  const work = path.join(f.env.HOME, 'Documents', 'work');
+  fs.mkdirSync(work, { recursive: true });
+  const run = await f.newRun('guarded');
+  const start = async (id, env) => {
+    const command = held(f, id);
+    const task = JSON.parse((await f.command([...startArgs(run, id, command).slice(0, -1 - command.argv.length), '--cd', work, '--', ...command.argv], { env })).stdout);
+    await command.ready();
+    return { task, command };
+  };
+  const direct = await start('kept', fake.env);
+  assert.equal(direct.task.launch.how, 'direct');
+  assert.match(direct.task.launch.reason, /^~\/Documents is a folder macOS guards/);
+  assert.match(fs.readFileSync(path.join(direct.task.outDir, 'relay.log'), 'utf8'), /^outside=$/m);
+  assert.equal(fake.calls().length, 0, 'launchctl was called for a start that stays under the terminal');
+  assert.match((await f.command(['result', run.id, 'kept'])).stdout, /^launch: direct, not through launchd \(~\/Documents is a folder macOS guards.+\)$/m);
+  await finish(f, run, direct.task, direct.command);
+
+  const forced = await start('forced', { ...fake.env, AGENT_ORCH_LAUNCHD: 'on' });
+  assert.equal(forced.task.launch.how, 'launchd', JSON.stringify(forced.task.launch));
+  await finish(f, run, forced.task, forced.command);
 });
 
 // Each way the launchd path can fail ends in one direct start, recorded with its reason.

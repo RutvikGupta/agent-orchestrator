@@ -519,6 +519,7 @@ export function launchInterrupt(run, task, claim) {
       command: process.execPath,
       args: [SCRIPT, "resume", run.dir, task.id, String(task.attempt), String(claim.generation)],
       cwd: run.dir,
+      near: [run.repo, task.cd],
       env: parkEnv(task),
       stdout: path.join(task.outDir, INTERRUPT_LOG),
     });

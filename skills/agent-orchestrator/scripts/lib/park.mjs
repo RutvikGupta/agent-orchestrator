@@ -212,6 +212,7 @@ export function spawnParkWatcher(run, task, { by = "park", table = null } = {}) 
       command: "/bin/sh",
       args: ["-c", PARK_SCRIPT, "park-watch", process.execPath, SCRIPT, dir, String(generation), inbox, String(seconds), String(Math.min(5, seconds))],
       cwd: dir,
+      near: [run.repo, task.cd],
       env: parkEnv(task),
       stdout: path.join(dir, LOG),
     });

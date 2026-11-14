@@ -591,6 +591,7 @@ function spawnRelay(run, id, relay, relayArgs, outDir, cd, env) {
     command: process.execPath,
     args: [relay, ...relayArgs],
     cwd: cd,
+    near: [run.repo],
     stdout: log,
     env: {
       ...process.env,
