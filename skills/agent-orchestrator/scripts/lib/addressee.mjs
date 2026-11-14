@@ -103,17 +103,22 @@ export function waitLive(run, table) {
 // better answer (dashboard-state.mjs, from ownership.mjs, which also finds a resumed session).
 export const pidLiveness = (run, session) => (session?.pid && !exists(session.pid) ? { state: "ended" } : { state: "unknown" });
 
-// Why the main session does not take its items, or null while it does: { state, why, text }. It takes
-// them while one of its waits on the run is live: recorded within the grace (agentGraceMs), or seen
-// in `ps`, which also finds a wait parked in its shell. A run's age stands in for a wait that never
-// ran. Past that, `liveness(run, session)` says whether its process lives, as { state, pid }:
+// Why the main session does not take its items, or null while it does: { state, why, gone, text }.
 //
-// - "ended": it is gone, at once: why "its process has ended".
-// - "alive", once no wait has been live for the grace: it is not reading its results, though its
-//   process lives (pid N, or a new process for a resumed session); it may be stopped in a question
-//   dialog or a long turn. Its items still go to the user.
-// - "unknown", once no wait has been live for the grace: only that is said, as why "no wait on its
-//   run for 3h".
+// Who gets the items is decided first, by the rule alone (sessionGone): the session takes them while
+// one of its waits on the run is live, recorded within the grace (agentGraceMs) or seen in `ps`,
+// which also finds a wait parked in its shell. Past that, it no longer takes them once its recorded
+// PID is gone, or once no wait has been live for the grace; a run's age stands in for a wait that
+// never ran. `why` is that rule's reason: "its process has ended", or "no wait on its run for 3h".
+//
+// Only then does `liveness(run, session)`, as { state, pid }, choose the words; it never changes who
+// gets the items, which then go to the user:
+//
+// - "alive": it is not reading its results, though its process lives (pid N, or a new process for a
+//   resumed session); it may be stopped in a question dialog or a long turn. `gone` is null.
+// - "ended": it is gone, and `gone` is "its process has ended".
+// - "unknown": only what is known is said: how long it has had no wait, and that its recorded process
+//   ended, when it did. `gone` is the rule's reason.
 //
 // `text` is what the board and the notice say after the session's label ("orchestrator session
 // 425c2bc2 is gone (its process has ended)"). `table` is a process table from processCommands();
@@ -123,30 +128,29 @@ export function sessionAbsence(run, session = mainSession(run), now = Date.now()
   const seen = mainWaitSeenMs(run);
   if (seen && now - seen < grace) return null;
   if (waitLive(run, table === undefined ? processCommands() : table)) return null;
+  const pidEnded = Boolean(session?.pid) && !exists(session.pid);
   const since = seen ?? (Date.parse(run.createdAt) || now);
-  const quiet = now - since >= grace;
-  // Within the grace only a process that has ended counts, so liveness is read only when the recorded
-  // PID is gone.
-  if (!quiet && !(session?.pid && !exists(session.pid))) return null;
+  if (!pidEnded && now - since < grace) return null;
+  const noWait = (where) => (seen ? `no wait on ${where} for ${minutes(now - seen)}` : `no wait on ${where} in ${minutes(now - since)}`);
+  const why = pidEnded ? "its process has ended" : noWait("its run");
   let live;
   try {
     live = liveness(run, session) || { state: "unknown" };
   } catch {
     live = { state: "unknown" };
   }
-  if (live.state === "ended") return { state: "ended", why: "its process has ended", text: "is gone (its process has ended)" };
-  if (!quiet) return null;
-  const noWait = (where) => (seen ? `no wait on ${where} for ${minutes(now - seen)}` : `no wait on ${where} in ${minutes(now - since)}`);
   if (live.state === "alive") {
-    const why = `its process is alive (${live.pid ? `pid ${live.pid}` : "resumed in a new process"}) but has had ${noWait("this run")}`;
-    return { state: "alive", why, text: `is not reading its results: ${why}; it may be stopped in a question dialog or a long turn` };
+    const state = `its process is alive (${live.pid ? `pid ${live.pid}` : "resumed in a new process"}) but has had ${noWait("this run")}`;
+    return { state: "alive", why, gone: null, text: `is not reading its results: ${state}; it may be stopped in a question dialog or a long turn` };
   }
-  return { state: "unknown", why: noWait("its run"), text: `has had ${noWait("its run")}` };
+  if (live.state === "ended") return { state: "ended", why, gone: "its process has ended", text: "is gone (its process has ended)" };
+  return { state: "unknown", why, gone: why, text: `has had ${noWait("its run")}${pidEnded ? `, and its recorded process (pid ${session.pid}) has ended` : ""}` };
 }
 
-// Why the main session no longer takes its items, or null while it does (sessionAbsence's `why`).
-export function sessionGone(run, session = mainSession(run), now = Date.now(), table = undefined, liveness = pidLiveness) {
-  return sessionAbsence(run, session, now, table, liveness)?.why ?? null;
+// Why the main session no longer takes its items, or null while it does: the rule alone, whatever
+// its process's liveness.
+export function sessionGone(run, session = mainSession(run), now = Date.now(), table = undefined) {
+  return sessionAbsence(run, session, now, table, pidLiveness)?.why ?? null;
 }
 
 // The JSON lines of a file. A missing file has none, and a torn or corrupt line is skipped.

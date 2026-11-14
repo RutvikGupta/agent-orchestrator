@@ -97,14 +97,15 @@ review, and silent, stuck or unreachable tasks (`references/monitor.md`).
   <run>/<task> is not running)", and `/api/state` lists them in the item's `passed`. The session
   sees such items in its `wait` (`references/monitor.md`, "What wakes `wait`").
 - The user's items are usage limits, `ask --user`, and items whose chain ends at a run started from
-  a terminal or at an agent that is gone.
-- An agent is gone when its run is gone, or when it is a session whose process ended.
-- A session that has had no live `wait` on its run (parked ones count) for `AGENT_ORCH_AGENT_GRACE`
-  (default 15m, at least twice `AGENT_ORCH_PARK_MAX`) no longer takes its items either, and they go
-  to the user. While its process is alive, it is not called gone: its items say that it is not
-  reading its results, and `/api/state` gives them no `gone`. A resumed session counts as alive
-  while its new process runs. When the board cannot tell whether the process lives, the items say
-  only that the session has had no wait. Each item's `agentState` holds what is said.
+  a terminal or at an agent that no longer takes them.
+- An agent no longer takes its items when its run is gone, or when it is a session with no live
+  `wait` on its run (parked ones count): at once when its recorded process has ended, otherwise
+  after `AGENT_ORCH_AGENT_GRACE` (default 15m, at least twice `AGENT_ORCH_PARK_MAX`).
+- Whether that session's process still lives changes only what its items say, never who gets them.
+  While it is alive, also as a resumed session in a new process, it is not called gone: its items
+  say that it is not reading its results, and `/api/state` gives them no `gone`. When the board
+  cannot tell, they say only what is known: how long the session has had no wait, and that its
+  recorded process ended, if it did. Each item's `agentState` holds what is said.
 - A task that a stop ended reads `stopped` and has no item: it did not fail.
 - A decision handed back in a top-level run goes to its session first.
 - A babysitter never awaits review.

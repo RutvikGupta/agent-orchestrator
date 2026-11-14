@@ -240,6 +240,79 @@ test('an item from a session that reads no results says whether its process is a
   assert.deepEqual([after.to, after.gone, after.agentState], ['user', 'its process has ended', 'is gone (its process has ended)']);
 });
 
+test('liveness changes only what an item says, never who gets it: a dead recorded PID sends it to the user within the grace', async (t) => {
+  const f = await fixture(t);
+  // A one-minute-old run with no wait, whose recorded process has exited and whose recorded host
+  // folder is missing, so liveness cannot be read: the item is the user's, as on the base rule.
+  const lost = await f.newRun('lost');
+  setOrchestrator(lost, { agent: 'claude', sessionId: 'lostsn01-0001', pid: spawnSync('true').pid, hostRoot: path.join(f.root, 'missing-claude') });
+  writeJson(path.join(lost.dir, 'run.json'), { ...readJson(path.join(lost.dir, 'run.json')), createdAt: minutesAgo(1) });
+  await finish(f, lost, 'unread');
+  // The same, but Claude Code reports the session live in a new process: still the user's, and it
+  // says that the session runs in a new process and has had no wait.
+  const host = await claudeStandIn(t, f);
+  const moved = await f.newRun('moved');
+  setOrchestrator(moved, { agent: 'claude', sessionId: 'movedsn1-0001', pid: spawnSync('true').pid });
+  writeJson(path.join(moved.dir, 'run.json'), { ...readJson(path.join(moved.dir, 'run.json')), createdAt: minutesAgo(1) });
+  fs.mkdirSync(path.join(f.claude, 'sessions'), { recursive: true });
+  writeJson(path.join(f.claude, 'sessions', `${host.pid}.json`), { pid: host.pid, sessionId: 'movedsn1-0001' });
+  await finish(f, moved, 'resumed');
+
+  const lane = await laneOf(await f.dashboard());
+  assert.deepEqual([lane.unread.to, lane.unread.agent, lane.unread.gone], ['user', 'orchestrator session lostsn01', 'its process has ended']);
+  assert.match(lane.unread.agentState, /^has had no wait on its run in \d+m, and its recorded process \(pid \d+\) has ended$/);
+  assert.deepEqual([lane.resumed.to, lane.resumed.agent, lane.resumed.gone], ['user', 'orchestrator session movedsn1', null]);
+  assert.match(lane.resumed.agentState, /^is not reading its results: its process is alive \(resumed in a new process\) but has had no wait on this run in \d+m; it may be stopped in a question dialog or a long turn$/);
+});
+
+test('one board build reads one process listing and one open-file listing, however many sessions it checks', async (t) => {
+  const f = await fixture(t);
+  f.env.AGENT_ORCH_AUTO_GC = 'off';
+  f.env.AGENT_ORCH_RECLAIM = 'off';
+  // A `ps` that records the liveness listing (only ownership.mjs asks for this format) and runs the
+  // real one, and an `lsof` that records each call and lists nothing.
+  const realPs = spawnSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(realPs, 'ps was found');
+  const bin = path.join(f.root, 'bin');
+  const log = path.join(f.root, 'calls.log');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'ps'), `#!/bin/sh\ncase "$*" in *ppid=,state=,lstart=*) echo "$(date +%s) $PPID ps" >> '${log}';; esac\nexec '${realPs}' "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'lsof'), `#!/bin/sh\necho "$(date +%s) $PPID lsof $*" >> '${log}'\nexit 0\n`, { mode: 0o755 });
+  f.env.PATH = `${bin}${path.delimiter}${f.env.PATH}`;
+  // Two runs of a Claude session whose process lives, and two of a Codex session whose recorded
+  // process has exited but whose rollout file exists: each needs the process listing, and the Codex
+  // ones the open-file listing too. None has had a wait for 20 minutes.
+  const host = await claudeStandIn(t, f);
+  const rollout = path.join(f.codex, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-codexsn1-0001.jsonl');
+  fs.mkdirSync(path.dirname(rollout), { recursive: true });
+  fs.writeFileSync(rollout, '');
+  const deadPid = spawnSync('true').pid;
+  for (const [name, orchestrator] of [['c1', { agent: 'claude', sessionId: 'claudsn1-0001', pid: host.pid }], ['c2', { agent: 'claude', sessionId: 'claudsn1-0001', pid: host.pid }],
+    ['x1', { agent: 'codex', sessionId: 'codexsn1-0001', pid: deadPid }], ['x2', { agent: 'codex', sessionId: 'codexsn1-0001', pid: deadPid }]]) {
+    const run = await f.newRun(name);
+    setOrchestrator(run, orchestrator);
+    waitedAgo(run, 20);
+    await finish(f, run, name);
+  }
+  const board = await f.dashboard();
+  await eventually(async () => {
+    const lane = await laneOf(board);
+    return ['c1', 'c2', 'x1', 'x2'].every((id) => lane[id]?.to === 'user' && lane[id].agentState);
+  }, 'the items did not reach the user');
+  // Answers are kept for 15 seconds, so one process reads each listing at most once in any 5 seconds:
+  // twice in a moment means one build read it once per run or per session.
+  const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => line.split(' ')).map(([at, ppid, kind, ...args]) => ({ at: Number(at), ppid, kind, args }))
+    .filter((c) => c.kind === 'ps' || c.args[c.args.indexOf('-p') + 1]?.split(',').includes(String(process.pid)));
+  for (const kind of ['ps', 'lsof']) {
+    const of = calls.filter((c) => c.kind === kind);
+    assert.ok(of.length > 0, `the board read no ${kind} listing`);
+    for (const [i, c] of of.entries()) {
+      const before = of.slice(0, i).filter((b) => b.ppid === c.ppid).at(-1);
+      assert.ok(!before || c.at - before.at >= 5, `two ${kind} listings ${c.at - before?.at}s apart from process ${c.ppid}:\n${fs.readFileSync(log, 'utf8')}`);
+    }
+  }
+});
+
 test('wait reminds once per interval about a finished task left without accept, verdict or close', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
