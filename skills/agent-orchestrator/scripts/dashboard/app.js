@@ -153,7 +153,7 @@ async function refresh(){
     a.sinceMs?$("span",{class:"tick","data-since":String(a.sinceMs)},dur(Date.now()-a.sinceMs)):null,
     $("span",{class:"why"},a.reason.replace(/^(waiting|no events for) [^·]+(· )?/,"")),
     a.to==="agent"?$("span",{class:"muted",style:"flex:none"},"for "+a.agent)
-      :a.gone&&a.agent?$("span",{style:"flex:none;color:var(--bad)",title:a.agent+" is gone: "+a.gone},a.agent+" is gone"):null);
+      :a.gone&&a.agent?$("span",{style:"color:var(--bad)"},a.agent+" "+(a.agentState||"is gone")):null);
   if(lane.length)root.append($("div",{class:"lane"},...(forUser.length?[$("h2",{},"Needs attention"),...forUser.map(attn)]:[]),
     ...(theirs.length?[$("h2",{class:"muted"},"For agents"),...theirs.map(attn)]:[])));
   tick();

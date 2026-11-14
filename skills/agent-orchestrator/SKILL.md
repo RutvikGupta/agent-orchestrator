@@ -75,14 +75,14 @@ An agent is usable only when `agents` shows `READY` as `yes` (`references/agents
 
 - **Claude Code as orchestrator.** `start` and `dispatch` return at once. Run `$ORCH wait <run>
   --timeout 0` with the Bash tool's `run_in_background: true`, keep working, and when it exits,
-  handle what it names (steps 5 and 6) and start it again. Keep one `wait` per run. Never
-  `sleep`-poll, or start it with `&`, `nohup` or `disown`, which the task-stop tool cannot stop.
+  handle what it names (steps 5 and 6) and start it again. Keep one `wait` per run; never
+  `sleep`-poll or start it with `&`, `nohup` or `disown`. While tasks run, never open a question
+  dialog or stop to wait for the user: ask in your reply and go on (`references/monitor.md`).
 - **Codex as orchestrator.** Before your first `$ORCH` command, read `references/monitor.md`,
   "Waiting from Codex": every command runs outside the sandbox, and you wait in 9-minute calls.
-- **Skill changes.** When a command prints that the skill changed, read again what it names, then
-  run `$ORCH skill --loaded` (`references/monitor.md`, "Skill changes").
-- **Skill bugs.** Report a bug in this skill to the session that maintains it, and do not edit the
-  skill yourself (`references/troubleshooting.md`, "Report a bug in this skill").
+- **Skill changes and bugs.** When a command prints that the skill changed, read again what it
+  names, then run `$ORCH skill --loaded` (`references/monitor.md`). Report a bug in this skill to
+  the session that maintains it; do not edit the skill (`references/troubleshooting.md`).
 - **Recover first.** After a restart, a context compaction, or any doubt about what runs, run
   `$ORCH recover [<run>] [--all]` and act on it before you dispatch anything.
 - **Tests, builds and containers:** read `references/memory.md` before you run or brief one.

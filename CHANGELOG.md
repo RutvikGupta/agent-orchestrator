@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A Claude Code hook, `scripts/hooks/orch-ask.mjs`, refuses a question dialog while the session's
+  tasks run or wait on it, and always inside an orch task (`AGENT_ORCH_ASK_HOOK=off`): a dialog
+  stops the session, and task results, messages and scheduled prompts do not reach it meanwhile.
+  The board and notices no longer call a session gone while its process is alive.
 - The dashboard's elapsed time counts up live for a running row and shows no seconds past one
   minute. The page's hover pop-ups that explained a control or summed up a row are gone; the few
   left hold a value shown nowhere else or cut short (a stale board's reason, a warning's detail,
