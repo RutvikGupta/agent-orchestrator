@@ -285,7 +285,7 @@ babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>
 | `references/plan.md` | Before you write or change a plan (steps 1 and 2) |
 | `references/tiers.md` | Before you choose Claude `frontier`, or when cost or a tier's measured results bear on a choice |
 | `references/agents.md` | Before you brief or start an agent whose abilities, modes, flags or model ceiling matter, and before your first command task |
-| `references/worktrees.md` | Before you start a write task by hand, when a gate fails in a worktree or a task's folder is gone, and before `gc` or `cleanup` |
+| `references/worktrees.md` | Before you start a write task by hand, when a gate fails in a worktree or a task's folder is gone, and before `gc` or `cleanup`; a worktree is refused while free disk is under `AGENT_ORCH_MIN_FREE_DISK` (15GB), after an automatic collection, so remove any worktree you make by hand as soon as you are done |
 | `references/briefing.md` | Before you write your first brief in a session (step 3) |
 | `references/dispatch.md` | Before your first `dispatch` or `start` in a session, and when `start` refuses a task the plan does not allow (step 4) |
 | `references/monitor.md` | When `wait` exits 5, or shows a state you do not know (step 5); after `recover`, to read its summary; in Codex, before your first command |

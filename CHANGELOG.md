@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Worktree creation refuses below `AGENT_ORCH_MIN_FREE_DISK` (default 15GB) of free disk, after
+  first collecting unused worktrees; that collection stops at `AGENT_ORCH_COLLECT_TIMEOUT` (60s).
+- `gc` also collects runs whose launching session has certainly ended, and only worktrees inside a
+  run's folder. The dashboard runs `gc --auto` (24h idle, 1h on a low disk; `AGENT_ORCH_AUTO_GC=off`).
+- The dashboard header shows free disk, amber when low and red below the minimum, and its first
+  build gets `AGENT_ORCH_FIRST_BUILD_TIMEOUT` (default 5m) instead of 30 seconds.
 - A machine-wide agent limit: `AGENT_ORCH_MAX_TOTAL` (default 75% of RAM in GiB, at least 4) and
   `AGENT_ORCH_MIN_FREE_AGENT` (default 1.5GB). `start` exits 7 or waits with `--wait [DUR]`,
   `dispatch` keeps such tasks ready, and `agents` shows the numbers. The limit is a load control:
