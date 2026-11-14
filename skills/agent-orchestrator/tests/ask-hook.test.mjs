@@ -174,9 +174,14 @@ test('allows for another tool, another session, a session with no run, malformed
   }
   assert.equal(await refused(f, input(), { AGENT_ORCH_ASK_HOOK: 'off' }), null);
   assert.ok(await refused(f, input(), { AGENT_ORCH_ASK_HOOK: 'on' }), 'any other value leaves the hook on');
-  // The environment names the session when the input does not.
-  assert.ok(await refused(f, input({ session_id: undefined }), { CLAUDE_CODE_SESSION_ID: SESSION }));
-  assert.equal(await refused(f, input({ session_id: undefined }), { CLAUDE_CODE_SESSION_ID: 'another-session' }), null);
+  // Only the event's own session_id, a string, names the session: the environment never does, and a
+  // missing, empty, non-string or malformed id allows the dialog.
+  const inherited = { CLAUDE_CODE_SESSION_ID: SESSION, CODEX_THREAD_ID: SESSION };
+  assert.equal(await refused(f, JSON.stringify({ tool_name: 'AskUserQuestion' }), inherited), null);
+  for (const id of [undefined, null, '', [SESSION], { id: SESSION }, 42, true, ` ${SESSION}`, `${SESSION}/..`]) {
+    assert.equal(await refused(f, input({ session_id: id }), inherited), null, `session_id ${JSON.stringify(id)}`);
+  }
+  assert.ok(await refused(f, input(), inherited), 'a valid session_id still refuses');
   // A task another task started reports to that task, not to this session.
   const file = f.taskFile(run, 'work');
   writeJson(file, { ...JSON.parse(fs.readFileSync(file, 'utf8')), startedBy: { run: 'other', task: 'parent' } });

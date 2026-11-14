@@ -18,8 +18,15 @@
 // tool call and shows the reason to the model. To allow, it prints nothing. It always exits 0.
 //
 // It never wedges a session: any error, a malformed or empty input, or more than about 1.8 seconds of
-// work allows the dialog. AGENT_ORCH_ASK_HOOK=off turns it off. It reads files and runs at most one
-// `ps`: no network and no board build.
+// work allows the dialog. Its own timer cannot interrupt a read that stalls inside the file system;
+// the `timeout` of its entry in the settings (10 seconds in integrations/claude/settings.example.json)
+// bounds that case, since Claude Code ends a hook that overruns and lets the call through.
+// AGENT_ORCH_ASK_HOOK=off turns it off. It reads files and runs at most one `ps`: no network and no
+// board build.
+//
+// A main session is named only by the event's own session_id, a string that is a valid id: a missing,
+// empty, non-string or malformed id allows the dialog. The environment is never read for it, since a
+// session can inherit another session's variables.
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/; // a session id, never a path (as session-work.mjs checks)
 const TOOL = "AskUserQuestion";
@@ -90,9 +97,8 @@ async function ask() {
   const input = await readInput();
   if (input.tool_name !== TOOL) return;
   if (process.env.AGENT_ORCH_TASK) return deny(TASK_REASON);
-  // Claude Code sends session_id; the environment names the session when the input does not.
-  const sessionId = String(input.session_id || process.env.CLAUDE_CODE_SESSION_ID || "");
-  if (!NAME.test(sessionId)) return;
+  const sessionId = input.session_id;
+  if (typeof sessionId !== "string" || !NAME.test(sessionId)) return;
   const { sessionWork } = await import("../lib/session-work.mjs");
   const work = sessionWork(sessionId, { deadline: started + BUDGET_MS });
   if (!work || Date.now() - started > BUDGET_MS) return;
