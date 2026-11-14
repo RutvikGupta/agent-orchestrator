@@ -326,7 +326,7 @@ test('the dashboard page shows a name in place of the id, and its id and earlier
   assert.ok(plain.includes('"impl · claude · "'));
   assert.ok(!plain.includes('earlier names') && !plain.includes('"children":["id"]'));
   // The rows, the attention lane, the reply and the message box name a task the same way.
-  for (const use of ['"main session"):t.name?$("span",{title:"task "+t.id},t.name):t.id', '$("b",a.name?{title:"task "+a.id}:{},a.name||a.id)', '(t.name||t.id)+" replied', '"Message "+(t.name||t.id)']) {
+  for (const use of ['"main session"):t.name?$("span",{},t.name):t.id', '$("b",{},a.name||a.id)', '(t.name||t.id)+" replied', '"Message "+(t.name||t.id)']) {
     assert.ok(app.includes(use), `app.js: ${use}`);
   }
 });

@@ -750,7 +750,7 @@ test('after a resume, each agent a task\'s shell started is labelled with the at
   const startedIn = (x, parent) => { context.x = x; context.parent = parent; return vm.runInContext('startedIn(x,parent)', context); };
   const line = () => classed(panel.children, 'agentlink').map(textOf);
   assert.deepEqual(line(), ['claude -p · claude-opus-5-5 · completed · attempt 1', 'claude -p · claude-opus-5-5 · running · attempt 2']);
-  // The agent's own details say it too; the board's row does the same through the same rule.
+  // The agent's own details say it too.
   await choose(context, early);
   assert.match(textOf(panel.children), /started inattempt 1 of its task/);
   assert.equal(startedIn(early, context.state[0].tasks[0]), 1);
@@ -762,5 +762,6 @@ test('after a resume, each agent a task\'s shell started is labelled with the at
   await context.detail();
   assert.deepEqual(line(), ['claude -p · claude-opus-5-5 · running']);
   assert.equal(startedIn(agentRow(), context.state[0].tasks[0]), null);
-  assert.match(app, /startedIn\(t,byKey\.get\(t\.parentKey\)\)/, 'the board\'s row of the agent shows the label');
+  // The board's row shows the state only: the attempt an agent started in is in the details above.
+  assert.doesNotMatch(app, /startedIn\(t,byKey\.get\(t\.parentKey\)\)/, 'the board\'s state column carries no attempt label');
 });
