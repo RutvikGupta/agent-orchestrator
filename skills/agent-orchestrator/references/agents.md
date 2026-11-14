@@ -139,7 +139,8 @@ an interrupt's resume helper, and `dashboard --detach`.
   launchd or directly:
   `start` exits 1 with `task <id> did not start: <why>`, and records nothing.
 - **Settings.** `AGENT_ORCH_LAUNCHD=off` turns this off: every start is direct, and nothing calls
-  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a start waits for the answer.
+  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a start waits
+  for the answer.
 - **What still ends with the terminal.** The session that you run in the terminal, and that
   launched the agents, still ends when you quit it. Its agents keep running. Resume that session,
   then run `$ORCH recover`: it lists the agents the session launched, so you can follow them again.
