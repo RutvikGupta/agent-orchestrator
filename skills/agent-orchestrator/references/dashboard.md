@@ -73,7 +73,8 @@ review, and silent, stuck or unreachable tasks (`references/monitor.md`).
 - **An agent that is not running passes its items up.** When that orch task is not running (it
   was stopped, it ended, or its record is gone), the item goes to whom that task itself reports:
   the task that started it, or the session that launched the top run, and so on up the chain to
-  the first agent that runs. Its reason ends with whom it passed, such as "(passed on: task
+  the first agent that runs, however long the chain. Records that loop back give the item to the
+  user. Its reason ends with whom it passed, such as "(passed on: task
   <run>/<task> is not running)", and `/api/state` lists them in the item's `passed`. The session
   sees such items in its `wait` (`references/monitor.md`, "What wakes `wait`").
 - The user's items are usage limits, `ask --user`, and items whose chain ends at a run started from

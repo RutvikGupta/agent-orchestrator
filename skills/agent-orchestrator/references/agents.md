@@ -62,14 +62,24 @@ These are hard limits of the relays on this machine:
 - **What it stops.** It stops the named task first and waits for its relay to exit, so that the
   agent cannot start more sub-agents or react to theirs ending. Then it stops the tasks below it:
   every running task of each run that the task created (a nested run), then every running task of
-  the runs those tasks created, and so on down, one level at a time. A run records the task that
-  created it, and `status` lists it under "nested runs".
+  the runs those tasks created, and so on down, one level at a time, however deep. A run records
+  the task that created it, and `status` lists it under "nested runs". Each run is visited once, so
+  records that loop back end the walk.
+- **Tasks that were starting.** A task whose `start` was still under way when the walk read its run
+  may be missed by that read. So `stop` reads the runs below again, up to five more times, until a
+  read finds nothing running, and stops what it finds.
 - **How each is stopped.** Each task is stopped as `stop` stops the named one: it is marked stopped
   (`stoppedAt`, `stoppedBy`), its relay's process group gets SIGTERM, a parked babysitter's park
-  ends, and what a command task left running in its process group is ended.
+  ends, and what a command task left running in its process group is ended. A relay that exits just
+  as it is signalled counts as stopped. When a resume saves a new attempt while the task is being
+  stopped, the stop is recorded on that attempt, and its relay is stopped too.
 - **Output.** After the line about the named task, one line lists what else was stopped, by run and
-  task: `also stopped 3 tasks below it: <run>/a, <run>/b, <run>/c`. When the named task is not
-  running, `stop` still stops the tasks below it; with nothing to stop, it fails as before.
+  task: `also stopped 3 tasks below it: <run>/a, <run>/b, <run>/c`. When the last read still found
+  tasks running, another line says so: run `stop` again. When the named task is not running, `stop`
+  still stops the tasks below it; with nothing to stop, it fails as before.
+- **Errors.** A task that cannot be stopped does not keep the others from being stopped. Each such
+  task is named on stderr after the rest (`orch: could not stop <run>/<task>: <error>`), and `stop`
+  exits 1.
 - **Ownership.** Owning the named task's run is enough: the runs below it exist only through it.
 - **`close`.** Closing a task that still runs stops it, then stops the tasks below it the same way.
   It closes only the tasks you named; the ones below are stopped, not closed. Closing a task that
