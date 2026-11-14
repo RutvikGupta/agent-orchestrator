@@ -103,18 +103,24 @@ an interrupt's resume helper, and `dashboard --detach`.
 - **How.** For each start, `orch.mjs` loads a one-off launchd job with `launchctl bootstrap
   gui/<uid>`, or `user/<uid>` when there is no desktop login, as over SSH. The job runs a small
   helper, `scripts/detach-helper.mjs`. The helper starts a shell, detached, which writes its own PID
-  as the job's answer and only then becomes the process. Then `orch.mjs` removes the job with
+  as the job's answer and only then becomes the process. macOS takes every `DYLD_*` variable from
+  that shell, so the shell hands them back to the process through `/usr/bin/env`. Then `orch.mjs`
+  removes the job with
   `launchctl bootout` and checks that it is gone. The process keeps running, with launchd as its
   parent. A start takes a few hundred milliseconds longer.
 - **Exactly one start.** The answer is a file that only one side can create. When no answer comes
   in time, `orch.mjs` creates it itself and starts the process directly. A shell that comes later
-  finds the answer taken, or the job's folder gone, and runs nothing.
+  finds the answer taken, or the job's folder gone, and runs nothing. When `orch.mjs` itself finds
+  the job's folder gone, it cannot know what the job did. Then `start` fails with `task <id>: it is
+  not known whether ... started`, and starts nothing: check `status` before you start the task again.
 - **The environment stays private.** Each job has a folder in `launchd/` under the state root, a
   folder only you can read. The job file names only Node, the helper and a spec file. The spec holds
   the command, its folder, its environment and its output files. The helper deletes the spec as soon
   as it has read it, and `orch.mjs` removes the job's folder once the start is over.
 - **Left-overs.** Before every command, `orch.mjs` looks in `launchd/` for what a start that died
-  left behind. It deletes any spec older than a minute. A job that `launchctl bootout` could not
+  left behind. It deletes any spec older than a minute, and a job's folder after five minutes. A
+  folder stays while the command that made it still runs, or while the process named in its answer
+  does. A job that `launchctl bootout` could not
   remove keeps a file holding only its label, and `orch.mjs` tries to remove the job again, at
   most once a minute. This clean-up takes at most five seconds, and never runs while a start holds
   the machine-wide admission lock.
@@ -129,10 +135,11 @@ an interrupt's resume helper, and `dashboard --detach`.
   not through launchd (<reason>)`. `$ORCH agents` says whether agents start outside the terminal on
   this machine.
 - **A start that cannot start.** When the process cannot start at all, for example because its
-  folder or its program is missing, the start fails the same way through launchd or directly:
+  folder is missing or its program is not an executable file, the start fails the same way through
+  launchd or directly:
   `start` exits 1 with `task <id> did not start: <why>`, and records nothing.
 - **Settings.** `AGENT_ORCH_LAUNCHD=off` turns this off: every start is direct, and nothing calls
-  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`) is how long a start waits for the answer.
+  `launchctl`. `AGENT_ORCH_LAUNCHD_WAIT` (default `10s`, at most `30s`) is how long a start waits for the answer.
 - **What still ends with the terminal.** The session that you run in the terminal, and that
   launched the agents, still ends when you quit it. Its agents keep running. Resume that session,
   then run `$ORCH recover`: it lists the agents the session launched, so you can follow them again.

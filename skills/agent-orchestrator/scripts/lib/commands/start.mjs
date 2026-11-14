@@ -499,9 +499,7 @@ function prepareStart(args, extra = {}) {
     } catch (error) {
       giveBack();
       if (error instanceof AdmissionRevoked) throw error;
-      // The relay did not start, by either way (detach.mjs): nothing is recorded as started.
-      fs.rmSync(outDir, { recursive: true, force: true });
-      refuse(`task ${id} did not start: ${error.message}`);
+      failedStart(id, outDir, error);
     }
     task.pid = started.pid;
     task.launch = started.launch;
@@ -572,6 +570,15 @@ function readAgentEnv() {
     if (error.code !== "ENOENT") process.stderr.write(`orch: ignoring agent environment ${envFile}: ${error instanceof SyntaxError ? "invalid JSON" : error.message}\n`);
     return {};
   }
+}
+
+// Refuse a start whose relay did not start, by either way (detach.mjs): nothing is recorded as
+// started. When it is not known whether the relay started (`unknown`), the attempt's folder stays,
+// since a relay that did start writes there.
+function failedStart(id, outDir, error) {
+  if (error.unknown) refuse(`task ${id}: ${error.message}`);
+  fs.rmSync(outDir, { recursive: true, force: true });
+  refuse(`task ${id} did not start: ${error.message}`);
 }
 
 // Start a relay detached, in its own process group (on macOS through launchd, outside the terminal
@@ -700,8 +707,7 @@ function startCommand(run, id, args, extra) {
     started = spawnRelay(run, id, COMMAND_RELAY, relayArgs, outDir, cd, { ...agentEnv, ...defaults });
   } catch (error) {
     claim?.release();
-    fs.rmSync(outDir, { recursive: true, force: true });
-    refuse(`task ${id} did not start: ${error.message}`);
+    failedStart(id, outDir, error);
   }
   task.pid = started.pid;
   task.launch = started.launch;

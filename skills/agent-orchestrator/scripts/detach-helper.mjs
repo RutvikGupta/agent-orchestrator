@@ -8,7 +8,8 @@
 // the process needs, credentials included, so the helper deletes it as soon as it has read it. The
 // helper does not start the command itself: it starts /bin/sh with CLAIM_SCRIPT, which writes its
 // own PID as the job's answer (result.json, beside the spec) with an exclusive link and only then
-// becomes the command. So the answer exists before any work starts, and a caller that has already
+// becomes the command (through /usr/bin/env when the environment has DYLD_* variables, which macOS
+// takes from the shell). So the answer exists before any work starts, and a caller that has already
 // answered for itself (it stopped waiting) makes the shell start nothing. The helper answers itself,
 // the same exclusive way, only when it cannot start the shell: { error, code, start }, where `start`
 // marks an error that a direct start would hit as well.
@@ -16,7 +17,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { CLAIM_SCRIPT, startProblem } from "./lib/detach.mjs";
+import { CLAIM_SCRIPT, claimWords, startProblem } from "./lib/detach.mjs";
 
 const specFile = process.argv[2] || "";
 const resultFile = path.join(path.dirname(specFile), "result.json");
@@ -84,7 +85,13 @@ function main() {
     return 1;
   }
   try {
-    const shell = spawn("/bin/sh", ["-c", CLAIM_SCRIPT, "detach-start", resultFile, command, ...args], {
+    // The shell loses the DYLD_* variables on macOS; these words give them back to the command.
+    const words = claimWords(command, args, env);
+    if (!words) {
+      answer({ error: `launchd cannot pass DYLD_* variables to a program whose path holds "=": ${command}` });
+      return 1;
+    }
+    const shell = spawn("/bin/sh", ["-c", CLAIM_SCRIPT, "detach-start", resultFile, ...words], {
       cwd, env, detached: true, stdio: ["ignore", fds[0], fds.at(-1)],
     });
     shell.on("error", () => {});

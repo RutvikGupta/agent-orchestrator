@@ -6,8 +6,9 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eventually, fixture, readJson } from './helpers.mjs';
-// A constant: the shell that claims a launchd start's answer, run here with chosen arguments.
-import { CLAIM_SCRIPT } from '../scripts/lib/detach.mjs';
+// A constant, the shell that claims a launchd start's answer, run here with chosen arguments; and
+// functions that only read their arguments and, for startProblem, the files they name.
+import { CLAIM_SCRIPT, claimWords, launchdWait, startProblem } from '../scripts/lib/detach.mjs';
 
 // Starts through launchd (scripts/lib/detach.mjs), against a fake `launchctl` first on PATH. Only the
 // last test, opt-in, loads a job into the real launchd.
@@ -229,6 +230,46 @@ test('the claim script runs the command only when its link creates the answer, w
   assert.equal(r.stderr, '');
   assert.equal(fs.existsSync(out), false);
   assert.deepEqual(fs.readdirSync(dir).sort(), ['result.json']);
+  // A command whose name starts with a dash is a command, not an option of the shell's exec.
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, '-x'), `#!/bin/sh\necho ran > ${JSON.stringify(out)}\n`, { mode: 0o755 });
+  fs.rmSync(result);
+  r = spawnSync('/bin/sh', ['-c', CLAIM_SCRIPT, 'detach-start', result, '-x'], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin` } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'ran\n');
+});
+
+test('only an executable file is a program: a folder is refused before anything starts, on PATH too', (t) => {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || '/tmp'), 'orch-program-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const first = path.join(dir, 'first');
+  const second = path.join(dir, 'second');
+  fs.mkdirSync(path.join(first, 'tool'), { recursive: true }); // a folder named as the program
+  fs.mkdirSync(second);
+  fs.writeFileSync(path.join(second, 'tool'), '#!/bin/sh\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(second, 'plain'), 'text', { mode: 0o644 });
+  assert.equal(startProblem(path.join(second, 'tool'), dir), null);
+  assert.equal(startProblem(first, dir)?.code, 'EACCES');
+  assert.match(startProblem(first, dir).message, /^cannot start .*: it is not a program file$/);
+  assert.equal(startProblem(path.join(second, 'plain'), dir)?.code, 'EACCES');
+  assert.equal(startProblem('tool', dir, { PATH: `${first}:${second}` }), null, 'the lookup stopped at a folder');
+  assert.equal(startProblem('tool', dir, { PATH: first })?.code, 'ENOENT');
+  assert.equal(startProblem(path.join(second, 'tool'), path.join(dir, 'none'))?.code, 'ENOENT');
+});
+
+test('the wait for a launchd answer is at most 30 seconds, and DYLD_* variables go back to the command through env', () => {
+  assert.equal(launchdWait('2m'), 30_000);
+  assert.equal(launchdWait('45s'), 30_000);
+  assert.equal(launchdWait('5s'), 5000);
+  assert.equal(launchdWait('300ms'), 300);
+  assert.equal(launchdWait(undefined), 10_000);
+  assert.equal(launchdWait('soon'), 10_000);
+  assert.deepEqual(claimWords('/bin/tool', ['a b'], { PATH: '/bin' }), ['/bin/tool', 'a b']);
+  assert.deepEqual(claimWords('/bin/tool', ['a b'], { PATH: '/bin', DYLD_LIBRARY_PATH: '/x y', DYLD_OFF: undefined, DYLD_EMPTY: '' }),
+    ['/usr/bin/env', 'DYLD_LIBRARY_PATH=/x y', 'DYLD_EMPTY=', '/bin/tool', 'a b']);
+  // env would read such a program's path as a variable: the launchd path gives up on it.
+  assert.equal(claimWords('/odd=dir/tool', [], { DYLD_LIBRARY_PATH: '/x' }), null);
 });
 
 test('on macOS a relay starts through a one-off launchd job, in its folder, with its environment and output, and leaves no job file', { skip: launchdOnly }, async (t) => {
@@ -424,6 +465,94 @@ test('a launchd job that answers without a PID is a failed start, not a started 
   assert.deepEqual(listJobs(f), []);
 });
 
+test('DYLD_* variables reach the command through launchd as they do directly', { skip: launchdOnly }, async (t) => {
+  const f = await fixture(t);
+  const fake = fakeLaunchd(f);
+  const run = await f.newRun('dyld');
+  const libs = { DYLD_FALLBACK_LIBRARY_PATH: path.join(f.root, 'fallback libs'), DYLD_LIBRARY_PATH: path.join(f.root, 'libs') };
+  for (const dir of Object.values(libs)) fs.mkdirSync(dir);
+  // Node, not a system program: macOS takes these variables from the shell and its like.
+  const argv = [process.execPath, '-e', 'console.log("dyld=" + process.env.DYLD_FALLBACK_LIBRARY_PATH + "|" + process.env.DYLD_LIBRARY_PATH)'];
+  const seen = {};
+  for (const [id, env] of [['direct', {}], ['launchd', fake.env]]) {
+    const task = JSON.parse((await f.command(['start', run.id, id, '--agent', 'command', '--why', WHY, '--json', '--', ...argv], { env: { ...env, ...libs } })).stdout);
+    assert.equal(task.launch.how, id);
+    await f.finished(run, id);
+    seen[id] = fs.readFileSync(path.join(task.outDir, 'relay.log'), 'utf8').split('\n').find((line) => line.startsWith('dyld='));
+  }
+  assert.equal(seen.direct, `dyld=${libs.DYLD_FALLBACK_LIBRARY_PATH}|${libs.DYLD_LIBRARY_PATH}`);
+  assert.equal(seen.launchd, seen.direct);
+});
+
+test('a job folder that is gone leaves the outcome unknown: the start fails, says so, and starts nothing', { skip: launchdOnly }, async (t) => {
+  const f = await fixture(t);
+  const fake = fakeLaunchd(f, 'hang', { AGENT_ORCH_LAUNCHD_WAIT: '3s' });
+  const run = await f.newRun('lost');
+  const command = held(f, 'lost');
+  const starting = f.command(startArgs(run, 'lost', command), { code: 1, env: fake.env });
+  // While the caller waits, the job's folder goes, as when a sweep took it from a caller held up for long.
+  const loaded = await eventually(() => fake.calls().find((c) => c.verb === 'bootstrap'), 'the job was not loaded', 20_000);
+  fs.rmSync(path.join(jobsFolder(f), loaded.label), { recursive: true });
+  const r = await starting;
+  assert.match(r.stderr, /^orch: task lost: it is not known whether \S+ started: its launchd job's folder is gone, and its answer with it\. It may be running: check `status` before you start it again$/m);
+  assert.equal(fs.existsSync(path.join(f.root, 'lost.starts')), false, 'the command was started directly');
+  assert.equal(fs.existsSync(f.taskFile(run, 'lost')), false);
+  // A relay that did start would write there: the attempt's folder stays.
+  assert.equal(fs.existsSync(path.join(run.dir, 'tasks', 'lost', 'attempt-1')), true);
+});
+
+test('the sweep keeps a stale job folder while its caller, or the process it answered with, still runs', async (t) => {
+  const f = await fixture(t);
+  fs.mkdirSync(jobsFolder(f), { mode: 0o700 });
+  const dead = spawnSync(process.execPath, ['-e', '']).pid; // ended, and reaped
+  const jobs = {
+    'agent-orch.0000000000a1': { 'result.json': `{"pid":${process.pid}}\n`, caller: String(dead) }, // its process runs
+    'agent-orch.0000000000a2': { caller: String(process.pid) }, // its caller runs, perhaps held up
+    'agent-orch.0000000000a3': { 'result.json': `{"pid":${dead}}\n`, caller: String(dead) },
+    'agent-orch.0000000000a4': {},
+  };
+  for (const [label, files] of Object.entries(jobs)) {
+    const dir = path.join(jobsFolder(f), label);
+    fs.mkdirSync(dir, { mode: 0o700 });
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text, { mode: 0o600 });
+    minutesAgo(dir, 10);
+  }
+  await f.newRun('keep'); // any command
+  const left = listJobs(f).filter((name) => /^agent-orch\.[0-9a-f]+$/.test(name)).sort();
+  assert.deepEqual(left, ['agent-orch.0000000000a1', 'agent-orch.0000000000a2']);
+  assert.equal(fs.readFileSync(path.join(jobsFolder(f), 'agent-orch.0000000000a1', 'result.json'), 'utf8'), `{"pid":${process.pid}}\n`);
+});
+
+test('the sweep counts its file work in its five seconds, and leaves the rest for the next', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun('slowfiles');
+  fs.mkdirSync(jobsFolder(f), { mode: 0o700 });
+  const specs = [];
+  for (let i = 0; i < 12; i++) {
+    const dir = path.join(jobsFolder(f), `agent-orch.0000000000${i.toString(16)}0`);
+    fs.mkdirSync(dir, { mode: 0o700 });
+    specs.push(path.join(dir, 'spec.json'));
+    fs.writeFileSync(specs.at(-1), '{}', { mode: 0o600 });
+    minutesAgo(specs.at(-1), 2);
+  }
+  // Each look at a file of the jobs' folder takes 750 ms, as on a slow disk.
+  const slow = path.join(f.root, 'slow-stat.cjs');
+  fs.writeFileSync(slow, String.raw`
+const fs = require('node:fs');
+const stat = fs.statSync;
+fs.statSync = function (file, ...rest) {
+  if (String(file).startsWith(process.env.TEST_SLOW_DIR)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 750);
+  return stat.call(this, file, ...rest);
+};
+`);
+  const begun = Date.now();
+  await f.json(['status', run.id], { env: { NODE_OPTIONS: `--require=${slow}`, TEST_SLOW_DIR: jobsFolder(f) } });
+  const took = Date.now() - begun;
+  assert.ok(took < 10_000, `the command took ${took} ms`);
+  const kept = specs.filter((file) => fs.existsSync(file)).length;
+  assert.ok(kept > 0 && kept < specs.length, `${kept} of ${specs.length} specs are left`);
+});
+
 test('every command deletes a spec that a dead caller left for over a minute, with no launchd start', async (t) => {
   const f = await fixture(t);
   fs.mkdirSync(jobsFolder(f), { mode: 0o700 });
@@ -604,4 +733,12 @@ test('the real launchd starts the relay, which launchd then parents, and keeps n
   }
   assert.deepEqual(listJobs(f), []);
   await finish(f, run, task, command);
+  // A DYLD_* variable, which the real /bin/sh loses, still reaches the command.
+  const libs = path.join(f.root, 'libs');
+  fs.mkdirSync(libs);
+  const second = JSON.parse((await f.command(['start', run.id, 'dyld', '--agent', 'command', '--why', WHY, '--json', '--',
+    process.execPath, '-e', 'console.log("dyld=" + process.env.DYLD_FALLBACK_LIBRARY_PATH)'], { env: { AGENT_ORCH_LAUNCHD: undefined, DYLD_FALLBACK_LIBRARY_PATH: libs } })).stdout);
+  assert.equal(second.launch.how, 'launchd', JSON.stringify(second.launch));
+  await f.finished(run, 'dyld');
+  assert.ok(fs.readFileSync(path.join(second.outDir, 'relay.log'), 'utf8').split('\n').includes(`dyld=${libs}`));
 });

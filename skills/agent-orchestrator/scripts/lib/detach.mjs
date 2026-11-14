@@ -18,8 +18,8 @@
 // 3. The helper takes the spec (reads and deletes it) and starts /bin/sh, detached, with the spec's
 //    folder, environment and output files. The shell (CLAIM_SCRIPT) writes its own PID into the
 //    job's answer file, result.json, with an exclusive link, and only then becomes the command.
-// 4. The caller waits for the answer (AGENT_ORCH_LAUNCHD_WAIT, default 10s). When none comes, it
-//    writes its own, "cancelled", with an exclusive create, and starts the process directly. Then it
+// 4. The caller waits for the answer (AGENT_ORCH_LAUNCHD_WAIT, default 10s, at most 30s). When none
+//    comes, it writes its own, "cancelled", with an exclusive create, and starts the process directly. Then it
 //    removes the job's folder, runs `launchctl bootout` for the label, and checks that the job is
 //    gone; a job still loaded leaves a record of its label only, which sweepJobs retries.
 //
@@ -28,6 +28,8 @@
 // only when its link created the answer, so its PID is the command's. The caller starts directly only
 // when its own create did. The folder goes by a rename, so a helper or shell that runs after that
 // finds neither its spec nor a place to answer, and starts nothing. Nothing is ever taken from `ps`.
+// A caller that finds the folder gone cannot know what the job did, so it fails and starts nothing;
+// the sweep keeps a folder while the caller that made it, or the process it answered with, still runs.
 //
 // A start error that a direct start would hit as well (a working directory or program that does not
 // exist, an output file that cannot be opened) is thrown, the same on either path, and is never
@@ -61,20 +63,38 @@ const SPEC_MS = 60_000;
 const STALE_MS = 5 * 60_000;
 // How often the sweep tries again to remove a job that is still loaded.
 const RETRY_MS = 60_000;
+// The longest a start waits for its answer. With the two bootstraps before it (LAUNCHCTL_MS each), a
+// live start needs its spec for under SPEC_MS, so a spec older than that is always abandoned.
+const MAX_WAIT_MS = 30_000;
+// A folder kept for a caller that still runs is removed after this long whatever the PID says.
+const KEEP_MS = 24 * 60 * 60_000;
 // Characters that XML 1.0, and so a property list, cannot hold.
 const NOT_XML = /[\u0000-\u0008\u000b\u000c\u000e-\u001f￾￿]/;
 
 // The shell the helper starts. $1 is the answer file, the command and its arguments follow, as
 // positional parameters, never in this text. It writes its PID to a file of its own, links that file
 // to the answer (the link fails when an answer exists, or when the job's folder is gone), and only
-// then replaces itself with the command, which keeps its PID. Without the link it runs nothing.
-export const CLAIM_SCRIPT = 'r=$1; shift; t="$r.$$.tmp"; { printf \'{"pid":%s}\\n\' "$$" > "$t"; } 2>/dev/null || exit 70; if /bin/ln "$t" "$r" 2>/dev/null; then /bin/rm -f "$t"; exec "$@"; fi; /bin/rm -f "$t"; exit 75';
+// then replaces itself with the command, which keeps its PID. Without the link it runs nothing. `--`
+// ends exec's own options, so a command whose name starts with a dash is still a command.
+export const CLAIM_SCRIPT = 'r=$1; shift; t="$r.$$.tmp"; { printf \'{"pid":%s}\\n\' "$$" > "$t"; } 2>/dev/null || exit 70; if /bin/ln "$t" "$r" 2>/dev/null; then /bin/rm -f "$t"; exec -- "$@"; fi; /bin/rm -f "$t"; exit 75';
+
+// The words the claiming shell runs for `command` and `args` with environment `env`. macOS removes
+// every DYLD_* variable from the environment of a system program such as /bin/sh, so the command
+// would lose them: then /usr/bin/env sets them again, from its own arguments, and becomes the
+// command, with the same PID. Null when that cannot be done: env reads a word with "=" as a variable.
+export function claimWords(command, args, env = {}) {
+  const lost = Object.entries(env || {}).filter(([name, value]) => name.startsWith("DYLD_") && value !== undefined);
+  if (!lost.length) return [command, ...args];
+  if (String(command).includes("=")) return null;
+  return ["/usr/bin/env", ...lost.map(([name, value]) => `${name}=${value}`), command, ...args];
+}
 
 // How long a start waits for the helper's answer: AGENT_ORCH_LAUNCHD_WAIT (300ms, 10s, ...), default
-// 10s. A bad value falls back to the default rather than failing a start.
+// 10s, at most 30s: a longer wait would need a spec for longer than the sweep lets one live. A bad
+// value falls back to the default rather than failing a start.
 export function launchdWait(value = process.env.AGENT_ORCH_LAUNCHD_WAIT) {
   const m = /^(\d+(?:\.\d+)?)(ms|s|m)?$/.exec(String(value ?? "").trim());
-  return m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000 }[m[2] || "s"] : 10_000;
+  return Math.min(MAX_WAIT_MS, m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000 }[m[2] || "s"] : 10_000);
 }
 
 // How a start goes from a process with environment `env`: { how: "launchd" }, or { how: "direct",
@@ -112,9 +132,11 @@ export function startProblem(command, cwd, env = process.env) {
   } catch {
     return startError(command, `its working directory does not exist: ${cwd}`, "ENOENT");
   }
-  const file = String(command).includes("/") ? path.resolve(cwd, command) : findOnPath(command, env?.PATH);
+  // A name without a slash is looked up on PATH, as a spawn does; a folder is no program.
+  const file = String(command).includes("/") ? path.resolve(cwd, command) : findOnPath(command, env?.PATH ?? process.env.PATH);
   if (!file) return startError(command, "no such program on PATH", "ENOENT");
   try {
+    if (!fs.statSync(file).isFile()) return startError(command, "it is not a program file", "EACCES");
     fs.accessSync(file, fs.constants.X_OK);
     return null;
   } catch (error) {
@@ -161,7 +183,7 @@ function startDirect({ command, args, cwd, env, stdout, stderr }) {
 // A job's folder and its files.
 const jobOf = (label) => {
   const dir = path.join(JOBS_DIR, label);
-  return { label, dir, plist: path.join(dir, "job.plist"), spec: path.join(dir, "spec.json"), result: path.join(dir, "result.json"), log: path.join(dir, "helper.log") };
+  return { label, dir, plist: path.join(dir, "job.plist"), spec: path.join(dir, "spec.json"), result: path.join(dir, "result.json"), log: path.join(dir, "helper.log"), caller: path.join(dir, "caller") };
 };
 const domains = () => [`gui/${process.getuid()}`, `user/${process.getuid()}`];
 
@@ -182,6 +204,8 @@ function throughLaunchd(spec) {
   try {
     try {
       fs.mkdirSync(job.dir, { mode: 0o700 });
+      // Who waits for this job's answer: the sweep keeps the folder while this process runs.
+      fs.writeFileSync(job.caller, String(process.pid), { mode: 0o600, flag: "wx" });
       fs.writeFileSync(job.spec, JSON.stringify(spec), { mode: 0o600, flag: "wx" });
       fs.writeFileSync(job.plist, jobFile(job), { mode: 0o600, flag: "wx" });
     } catch (error) {
@@ -208,11 +232,14 @@ function throughLaunchd(spec) {
 
 // What a launchd start came to: { pid } or { reason } for a direct start; throws a start error. When
 // no answer has come, the caller answers itself, exclusively: if it can, no shell of this job can
-// link its own any more, so nothing of the job runs; if an answer came first, that one decides.
+// link its own any more, so nothing of the job runs; if an answer came first, that one decides. When
+// it can do neither, because the job's folder is gone (this caller was held up for long, and the
+// folder was removed meanwhile), the job may have answered and run the command already: what
+// happened is not known, so the caller starts nothing and says so.
 function decide(job, spec, failure) {
   let result = readResult(job.result);
   if (!result) {
-    if (cancel(job.result)) return { reason: `${failure}${helperSaid(job)}` };
+    if (cancel(job.result, spec.command)) return { reason: `${failure}${helperSaid(job)}` };
     result = readResult(job.result);
   }
   if (Number.isInteger(result?.pid) && result.pid > 0) return { pid: result.pid };
@@ -223,14 +250,17 @@ function decide(job, spec, failure) {
   throw startError(spec.command, "the launchd job answered without a PID", "ESPAWN");
 }
 
-// The caller's own answer: true when it created it, so that nothing of the job can start, or when the
-// job's folder is gone, where nothing can answer either.
-function cancel(file) {
+// The caller's own answer: true when it created it, so that nothing of the job can start; false when
+// an answer exists. Anything else, a folder that is gone above all, leaves the outcome unknown: it
+// throws, marked `unknown`, and never lets a direct start go.
+function cancel(file, command) {
   try {
     fs.writeFileSync(file, `${JSON.stringify({ cancelled: true, by: process.pid, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
     return true;
   } catch (error) {
-    return error.code === "ENOENT";
+    if (error.code === "EEXIST") return false;
+    const why = error.code === "ENOENT" ? "its launchd job's folder is gone, and its answer with it" : `its launchd job's answer cannot be read or written (${error.code || error.message})`;
+    throw Object.assign(new Error(`it is not known whether ${command} started: ${why}. It may be running: check \`status\` before you start it again`), { code: "EUNKNOWN", unknown: true });
   }
 }
 
@@ -281,9 +311,11 @@ function stillLoaded(domain, label, ms) {
 
 // Clean the jobs' folder for callers that died: delete every spec older than a minute (it holds an
 // environment), remove the folders of jobs older than five minutes, and try again to remove from
-// launchd the jobs that were still loaded. orch.mjs runs this before every command, so the dashboard's
-// chores run it too. It returns at once when the folder is missing or empty, never throws, and spends
-// at most five seconds, each launchctl call at most three: what it did not reach waits for the next.
+// launchd the jobs that were still loaded. A folder stays while the caller that made it still runs
+// (it may only be held up, and will read the answer), or while the process its answer names does.
+// orch.mjs runs this before every command, so the dashboard's chores run it too. It returns at once
+// when the folder is missing or empty, never throws, and spends at most five seconds, file work
+// included, each launchctl call at most three: what it did not reach waits for the next.
 export function sweepJobs({ budgetMs = SWEEP_MS, callMs = SWEEP_CALL_MS } = {}) {
   try {
     let names;
@@ -304,13 +336,22 @@ export function sweepJobs({ budgetMs = SWEEP_MS, callMs = SWEEP_CALL_MS } = {}) 
     };
     const retries = [];
     for (const name of names) {
+      if (Date.now() >= deadline) return;
       const file = path.join(JOBS_DIR, name);
       if (LABEL.test(name)) {
         if (age(path.join(file, "spec.json")) > SPEC_MS) quietRm(path.join(file, "spec.json"));
-        // Its caller died, perhaps with the job loaded: record it for a check, then remove it.
-        if (age(file) > STALE_MS) {
-          if (!fs.existsSync(recordFile(name))) keepRecord(name, domains());
-          retire(file);
+        // Its caller is gone or held up, perhaps with the job loaded: record the job for a check,
+        // once, and remove the folder unless someone still needs its answer.
+        const old = age(file);
+        if (old > STALE_MS) {
+          const noted = path.join(file, "recorded");
+          if (!fs.existsSync(noted)) {
+            keepRecord(name, domains());
+            try {
+              fs.writeFileSync(noted, "", { mode: 0o600 });
+            } catch {}
+          }
+          if (!needed(file)) retire(file);
         }
       } else if (/\.gone$/.test(name)) {
         quietRm(file);
@@ -342,6 +383,28 @@ export function sweepJobs({ budgetMs = SWEEP_MS, callMs = SWEEP_CALL_MS } = {}) 
       else quietRm(file);
     }
   } catch {}
+}
+
+const runs = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+// Whether a stale job's folder must stay: the process its answer names still runs, or the caller
+// that made it does (for a day at most, since a PID may pass to another process).
+function needed(dir) {
+  if (runs(readResult(path.join(dir, "result.json"))?.pid)) return true;
+  try {
+    const caller = path.join(dir, "caller");
+    return Date.now() - fs.statSync(caller).mtimeMs < KEEP_MS && runs(Number(fs.readFileSync(caller, "utf8")));
+  } catch {
+    return false;
+  }
 }
 
 const xml = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -426,6 +489,7 @@ function waitForResult(job, ms) {
 function findOnPath(bin, searchPath = "") {
   for (const dir of String(searchPath || "").split(path.delimiter).filter(Boolean)) {
     try {
+      if (!fs.statSync(path.join(dir, bin)).isFile()) continue;
       fs.accessSync(path.join(dir, bin), fs.constants.X_OK);
       return path.join(dir, bin);
     } catch {}
