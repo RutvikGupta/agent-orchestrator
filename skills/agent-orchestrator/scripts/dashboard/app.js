@@ -62,7 +62,8 @@ function elapsedText(ms){const s=Math.max(0,Math.round(ms/1000)),p=n=>String(n).
 const shortElapsed=text=>String(text??"").replace(/^(\d+m)\d+s$/,"$1"),ticking=t=>t.state==="running"&&t.phase!=="parked"&&Number.isFinite(Date.parse(t.startedAt));
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A section's heading shows at most about 60 characters of its title, cut at a word, so a long goal
-// does not push the tables down; the whole title shows under it once the pointer rests on it.
+// does not push the tables down; the whole title shows under it once the pointer rests on it
+// (the pointerover listener near the end of this file).
 const TITLE_MAX=60,shortTitle=text=>text.length<=TITLE_MAX?text:text.slice(0,TITLE_MAX).replace(/\s+\S*$/,"").replace(/[\s,;:.(-]+$/,"")+"…";
 // A session's activity line, after a short marker while it is stuck on one failing command.
 const nowText=t=>(t.stuck?"stuck: `"+(t.stuck.command.length>30?t.stuck.command.slice(0,29)+"…":t.stuck.command)+"` failed "+t.stuck.failures+"× · ":"")+(t.now||"");
@@ -204,7 +205,7 @@ function sectionView(run){
   const tt=run.totals,ap=tt.exact?"":"~",started=clock(Date.parse(run.createdAt)),awaiting=(run.attention||[]).filter(a=>a.kind==="awaiting-review").length;
   const summary=[tt.running?tt.running+" running":null,tt.finished?tt.finished+" finished":null,awaiting?awaiting+" awaiting review":null,ap+fmt(tt.tokensIn)+" in / "+ap+fmt(tt.tokensOut)+" out","started "+started,!run.running&&run.activeMs?"last active "+clock(run.activeMs):null].filter(Boolean).join(" · ");
   const toggle=older.size?$("button",{class:"older","data-run":run.id},showOlder?"hide older":"show "+older.size+" older"):null;
-  return $("div",{class:"run","data-run":run.id},$("h2",{},sectionTitle(run).length>TITLE_MAX?$("span",{class:"ttl"},shortTitle(sectionTitle(run)),$("span",{class:"full"},sectionTitle(run))):sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
+  return $("div",{class:"run","data-run":run.id},$("h2",{},sectionTitle(run).length>TITLE_MAX?$("span",{class:"ttl","data-run":run.id,"data-full":sectionTitle(run)},shortTitle(sectionTitle(run))):sectionTitle(run),$("span",{class:"sub"}," · "+summary),toggle),
     $("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
       $("th",{class:"num"},"steps"),$("th",{class:"num"},"tokens in"),$("th",{class:"num"},"out"),$("th",{},"session"))),...(rows.length?rows:[$("tbody",{},$("tr",{},$("td",{colspan:"10",class:"muted"},older.size?"every row is older; show them from the header":"no tasks yet")))])),
   )}
@@ -651,6 +652,17 @@ new ResizeObserver(()=>{const box=document.getElementById("compose");document.do
   addEventListener("pointerup",end);addEventListener("pointercancel",end);
   sp.addEventListener("dblclick",()=>{localStorage.removeItem("orchDetailWidth");set(0)})})();
 // Waiting timers tick together once a second from their absolute start, between redraws too.
+// The whole title of a shortened heading shows in one box outside the board (#title-tip), once the
+// pointer has rested on the title for 0.3s. The board rebuilds every heading whenever anything on
+// it changes, many times a minute, so a box inside a heading would start over at each rebuild: this
+// one is kept by the heading's run, and goes when the pointer is on anything else or the board scrolls.
+let tipRun=null,tipTimer=null;
+function hideTip(){clearTimeout(tipTimer);tipTimer=null;tipRun=null;const box=document.getElementById("title-tip");if(box)box.hidden=true}
+document.addEventListener("pointerover",e=>{const t=e.target?.closest?.(".ttl");if(!t){if(tipRun)hideTip();return}
+  if(tipRun===t.dataset.run)return;hideTip();tipRun=t.dataset.run;
+  tipTimer=setTimeout(()=>{const box=document.getElementById("title-tip"),el=[...document.querySelectorAll(".ttl")].find(x=>x.dataset.run===tipRun);if(!box||!el){hideTip();return}
+    const r=el.getBoundingClientRect();box.textContent=el.dataset.full;box.style.left=Math.max(8,r.left-6)+"px";box.style.top=r.bottom+4+"px";box.hidden=false},300)});
+document.getElementById("runs").addEventListener("scroll",()=>{if(tipRun)hideTip()},{passive:true});
 function dur(ms){const t=Math.max(0,Math.floor(ms/1000)),d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60),x=t%60,p=n=>String(n).padStart(2,"0");if(d>=365)return Math.floor(d/365)+"y "+Math.floor(d%365/30)+"mo";if(d>=30)return Math.floor(d/30)+"mo "+d%30+"d";if(d)return d+"d "+h+"h";return h?h+"h "+p(m)+"m":m?m+"m "+p(x)+"s":x+"s"}
 function tick(){const now=Date.now();for(const el of document.querySelectorAll("td.el[data-start]"))el.textContent=elapsedText(now-Number(el.dataset.start));for(const el of document.querySelectorAll(".tick[data-since],.waited[data-since]"))el.textContent=(el.classList.contains("waited")?"waited ":"")+dur(now-Number(el.dataset.since));
   if(hintDue!=null&&now>=hintDue)compose()}
