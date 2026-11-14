@@ -56,7 +56,7 @@ const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run"))for(c
 const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="closed"||s==="parked"?"":"d-bad"};
 const sectionTitle=run=>run.goal||run.id.replace(/^\d{8}-\d{6}-/,"");
 // A section's heading shows at most about 60 characters of its title, cut at a word, so a long goal
-// does not push the tables down; the whole title is the first line of the heading's tooltip.
+// does not push the tables down; the whole title shows under it once the pointer rests on it.
 const TITLE_MAX=60,shortTitle=text=>text.length<=TITLE_MAX?text:text.slice(0,TITLE_MAX).replace(/\s+\S*$/,"").replace(/[\s,;:.(-]+$/,"")+"…";
 // A session's activity line, after a short marker while it is stuck on one failing command.
 const nowText=t=>(t.stuck?"stuck: `"+(t.stuck.command.length>30?t.stuck.command.slice(0,29)+"…":t.stuck.command)+"` failed "+t.stuck.failures+"× · ":"")+(t.now||"");
@@ -194,13 +194,14 @@ function sectionView(run){
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
       $("tr",{class:"nowrow"},$("td",{...indent(32,true),colspan:"10"},nowText(t))))});
-  // The run's goal as its title, with a short status after it; run id, launcher, and branch are in the tooltip.
+  // The run's goal as its title, with a short status after it; run id, launcher, and branch are in
+  // the status's tooltip, so that the title shows only its own text when the pointer is on it.
   const clock=ms=>{const d=new Date(ms),t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});return d.toDateString()===new Date().toDateString()?t:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t};
   const tt=run.totals,ap=tt.exact?"":"~",started=clock(Date.parse(run.createdAt)),awaiting=(run.attention||[]).filter(a=>a.kind==="awaiting-review").length;
   const summary=[tt.running?tt.running+" running":null,tt.finished?tt.finished+" finished":null,awaiting?awaiting+" awaiting review":null,ap+fmt(tt.tokensIn)+" in / "+ap+fmt(tt.tokensOut)+" out","started "+started,!run.running&&run.activeMs?"last active "+clock(run.activeMs):null].filter(Boolean).join(" · ");
-  const tip=[sectionTitle(run).length>TITLE_MAX?sectionTitle(run):null,[run.id,by,[(run.repo||"").split("/").pop(),run.baseBranch].filter(Boolean).join(" @ ")].filter(Boolean).join(" · "),...((run.runs||[]).length>1?["runs:",...run.runs.map(r=>"  "+(r.goal||r.id))]:[]),"token counts leave out the main session"].filter(Boolean).join("\n");
+  const tip=[[run.id,by,[(run.repo||"").split("/").pop(),run.baseBranch].filter(Boolean).join(" @ ")].filter(Boolean).join(" · "),...((run.runs||[]).length>1?["runs:",...run.runs.map(r=>"  "+(r.goal||r.id))]:[]),"token counts leave out the main session"].filter(Boolean).join("\n");
   const toggle=older.size?$("button",{class:"older","data-run":run.id,title:showOlder?"fold away the finished rows that have been quiet a while":"list the finished rows that have been quiet a while"},showOlder?"hide older":"show "+older.size+" older"):null;
-  return $("div",{class:"run","data-run":run.id},$("h2",{title:tip},shortTitle(sectionTitle(run)),$("span",{class:"sub"}," · "+summary),toggle),
+  return $("div",{class:"run","data-run":run.id},$("h2",{},sectionTitle(run).length>TITLE_MAX?$("span",{class:"ttl"},shortTitle(sectionTitle(run)),$("span",{class:"full"},sectionTitle(run))):sectionTitle(run),$("span",{class:"sub",title:tip}," · "+summary),toggle),
     $("table",{},$("thead",{},$("tr",{},$("th",{},"task"),$("th",{},"agent"),$("th",{},"model"),$("th",{},"mode"),$("th",{},"state"),$("th",{class:"num"},"elapsed"),
       $("th",{class:"num"},"steps"),$("th",{class:"num"},"tokens in"),$("th",{class:"num"},"out"),$("th",{},"session"))),...(rows.length?rows:[$("tbody",{},$("tr",{},$("td",{colspan:"10",class:"muted"},older.size?"every row is older; show them from the header":"no tasks yet")))])),
   )}
