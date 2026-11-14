@@ -3,7 +3,8 @@
 // task, episode; for a question, each question). The user gets a notice only for an item addressed
 // to the user. An orch task gets an inbox message instead; a launching session gets nothing here,
 // since its `wait` wakes on the item. Once that agent is gone, or cannot take the message, the item
-// is the user's, and its notice says so. Pending timers and sent notices survive restarts.
+// is the user's, and its notice says so; a session whose process lives but that reads no results
+// is not called gone. Pending timers and sent notices survive restarts.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,8 +19,11 @@ import { parseDuration, writeJson } from "./util.mjs";
 const WAITS_FOR = { "awaiting-review": "for review", question: "for an answer", "needs-decision": "for a decision", stuck: "while stuck", silent: "while silent", unreachable: "with messages it cannot read", dead: "since its relay died" };
 
 // The notice for an item that went to the user because its agent is gone or cannot take it:
-// "orchestrator session 425c2bc2 is gone (…); review-me has waited 25m for review".
-export function goneText(id, item, waitedMs, state = `is gone (${item.gone})`) {
+// "orchestrator session 425c2bc2 is gone (its process has ended); review-me has waited 25m for
+// review". `state` defaults to what the board says of the agent (its item's agentState): a session
+// whose process is alive "is not reading its results: ...", and one whose liveness cannot be read
+// "has had no wait on its run for 3h".
+export function goneText(id, item, waitedMs, state = item.agentState || `is gone (${item.gone})`) {
   const what = WAITS_FOR[item.kind] || `since it ended (${item.label})`;
   return `${item.agent} ${state}; ${id} has waited ${agoText(waitedMs)} ${what}`;
 }
@@ -181,7 +185,7 @@ export function createEscalator({ url, broadcast }) {
       }
       if (record.escalatedAt != null || !due) continue;
       changed = true;
-      pending.push(notice(item.gone && item.agent ? goneText(task.id, item, now - (item.sinceMs || record.since)) : item.reason));
+      pending.push(notice(item.agent && (item.agentState || item.gone) ? goneText(task.id, item, now - (item.sinceMs || record.since)) : item.reason));
     }
     for (const [key, record] of Object.entries(records)) {
       if (record.escalatedAt == null && record.agentNoticeAt == null && !active.has(key)) {

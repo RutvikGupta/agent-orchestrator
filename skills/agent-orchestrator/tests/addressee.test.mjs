@@ -172,10 +172,72 @@ test('an item goes to the user once its agent is gone, and its notice says so', 
     const sent = Object.fromEntries(notify.messages().map((m) => [m.task, m]));
     return sent.review && sent.kid && sent.decides ? sent : null;
   }, 'the items of gone agents did not reach the user', 20_000);
-  assert.match(by.review.reason, /^orchestrator session gonesess is gone \(no wait on its run for 20m\); review has waited \d+m for review$/);
+  // No process was recorded for the session, so the notice says only what is known.
+  assert.match(by.review.reason, /^orchestrator session gonesess has had no wait on its run for 20m; review has waited \d+m for review$/);
   assert.equal(by.review.kind, 'awaiting-review');
-  assert.match(by.decides.reason, /^orchestrator session gonesess is gone \(no wait on its run for 20m\); decides has waited \d+m for a decision$/);
+  assert.match(by.decides.reason, /^orchestrator session gonesess has had no wait on its run for 20m; decides has waited \d+m for a decision$/);
   assert.ok(by.kid.reason.startsWith(`task ${parent.id}/lead is gone (it is not running); kid has waited `), by.kid.reason);
+});
+
+// A process that `ps` shows as `claude`, as a live Claude Code session's host; stopped by its PID.
+async function claudeStandIn(t, f) {
+  const ready = path.join(f.root, `stand-in-${process.hrtime.bigint()}`);
+  const script = `process.title='claude';require('fs').writeFileSync(${JSON.stringify(ready)},'');setInterval(()=>{},10000);`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
+  const exited = new Promise((resolve) => child.on('close', resolve));
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+  };
+  t.after(stop);
+  await eventually(() => fs.existsSync(ready), 'the stand-in did not start');
+  return { pid: child.pid, stop };
+}
+
+test('an item from a session that reads no results says whether its process is alive, has ended, or cannot be told', async (t) => {
+  const f = await fixture(t);
+  const notify = notifier(f);
+  const host = await claudeStandIn(t, f);
+  // Alive: its recorded process runs, and it has had no wait on its run for 20 minutes.
+  const alive = await f.newRun('alive');
+  setOrchestrator(alive, { agent: 'claude', sessionId: 'alivesn1-0001', pid: host.pid });
+  waitedAgo(alive, 20);
+  await finish(f, alive, 'unread');
+  // Ended: its recorded process has exited, and Claude Code reports no session for it.
+  const ended = await f.newRun('ended');
+  setOrchestrator(ended, { agent: 'claude', sessionId: 'endedsn1-0001', pid: spawnSync('true').pid });
+  await finish(f, ended, 'orphan');
+  // Unknown: no process was recorded for it.
+  const unknown = await f.newRun('unknown');
+  f.launchingSession(unknown, 'unknwsn1-0001');
+  waitedAgo(unknown, 20);
+  await finish(f, unknown, 'stale');
+
+  const board = await f.dashboard();
+  const lane = await laneOf(board);
+  const notReading = `is not reading its results: its process is alive (pid ${host.pid}) but has had no wait on this run for 20m; it may be stopped in a question dialog or a long turn`;
+  // Every one is the user's; only the one whose process ended is called gone.
+  assert.deepEqual([lane.unread.to, lane.unread.agent, lane.unread.gone, lane.unread.agentState], ['user', 'orchestrator session alivesn1', null, notReading]);
+  assert.ok(lane.unread.reason.endsWith(` · orchestrator session alivesn1 ${notReading}`), lane.unread.reason);
+  assert.deepEqual([lane.orphan.to, lane.orphan.gone, lane.orphan.agentState], ['user', 'its process has ended', 'is gone (its process has ended)']);
+  assert.deepEqual([lane.stale.to, lane.stale.gone, lane.stale.agentState], ['user', 'no wait on its run for 20m', 'has had no wait on its run for 20m']);
+  assert.doesNotMatch(lane.orphan.reason + lane.stale.reason, / · orchestrator session/);
+
+  const by = await eventually(() => {
+    const sent = Object.fromEntries(notify.messages().map((m) => [m.task, m]));
+    return sent.unread && sent.orphan && sent.stale ? sent : null;
+  }, 'the items did not reach the user', 20_000);
+  assert.match(by.unread.reason, new RegExp(`^orchestrator session alivesn1 is not reading its results: its process is alive \\(pid ${host.pid}\\) but has had no wait on this run for 20m; it may be stopped in a question dialog or a long turn; unread has waited \\d+m for review$`));
+  assert.match(by.orphan.reason, /^orchestrator session endedsn1 is gone \(its process has ended\); orphan has waited \d+m for review$/);
+  assert.match(by.stale.reason, /^orchestrator session unknwsn1 has had no wait on its run for 20m; stale has waited \d+m for review$/);
+
+  // Once its process ends, the session that was alive is gone.
+  await host.stop();
+  const after = await eventually(async () => {
+    const item = (await laneOf(board)).unread;
+    return item?.gone ? item : null;
+  }, 'the ended session was not called gone');
+  assert.deepEqual([after.to, after.gone, after.agentState], ['user', 'its process has ended', 'is gone (its process has ended)']);
 });
 
 test('wait reminds once per interval about a finished task left without accept, verdict or close', async (t) => {

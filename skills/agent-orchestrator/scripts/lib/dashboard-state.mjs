@@ -8,15 +8,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { mainSession, sessionGone, sessionLabel } from "./addressee.mjs";
+import { mainSession, sessionAbsence, sessionLabel } from "./addressee.mjs";
 import { CLAUDE_PROJECTS, HOME, RUNS_DIR } from "./config.mjs";
 import { externalAgents, externalRow, innerAgent } from "./external.mjs";
 import { parentOf, runById } from "./finish-notice.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./native.mjs";
 import { reviveParked } from "./park.mjs";
+import { DASHBOARD_CALLER, ownershipOf, resetHostView, sessionsEnded } from "./ownership.mjs";
 import { ceilingFor, modelExceedsCeiling, readPolicy } from "./policy.mjs";
-import { isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
+import { exists, isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
 
@@ -107,8 +108,12 @@ export const byUrgency = (a, b) => a.rank - b.rank || a.sinceMs - b.sinceMs;
 // `agent` names the agent that must act ("task <run>/<task>" or "orchestrator session 425c2bc2"),
 // or is null when the item is the user's own; `agentTask` is that orch task, {run, task}, or null
 // for a session; `gone` says why that agent no longer takes it, when the item went to the user for
-// that reason; `passed` lists, nearest first, the orch tasks the item passed on its way up because
-// they were not running ("task <run>/<task> is not running"), and is empty when it passed none.
+// that reason, and is null for a session whose process is alive (the page labels an item with `gone`
+// as "<agent> is gone"); `agentState` is what the board and the notice say of that agent after its
+// name ("is gone (its process has ended)", "has had no wait on its run for 3h", "is not reading its
+// results: ..."), or null; `passed` lists, nearest first, the orch tasks the item passed on its way
+// up because they were not running ("task <run>/<task> is not running"), and is empty when it passed
+// none.
 //
 // A task in a nested run reports to the orch task that started it, and one in a top-level run to the
 // session that launched the run (addressee.mjs), decisions it hands back included. When that task is
@@ -117,11 +122,14 @@ export const byUrgency = (a, b) => a.rank - b.rank || a.sinceMs - b.sinceMs;
 // The user takes an item only when an agent passed it up (`ask --user`), when a usage limit stopped
 // the task, when the chain ends at a run started from a terminal, or when the agent at its end is
 // gone: a run that is gone, or a session whose process ended or that has had no live `wait` on its
-// run for the grace (agentGraceMs). `table` is the process table for that check, PID to command
+// run for the grace (agentGraceMs). A session whose process is alive but that has had no wait for the
+// grace is not gone: its items still go to the user, and say that it is not reading its results
+// (sessionAbsence in addressee.mjs). `table` is the process table for the wait check, PID to command
 // line, so one board build runs `ps` once.
 export function addresseeOf(run, record, row, item, now = Date.now(), table = undefined) {
   const passed = [];
-  const user = (agent = null, gone = null, agentTask = null) => ({ to: "user", agent, agentTask, gone, passed });
+  const user = (agent = null, gone = null, agentTask = null, agentState = gone ? `is gone (${gone})` : null) => ({ to: "user", agent, agentTask, gone, agentState, passed });
+  const agentOwn = (agent, agentTask) => ({ to: "agent", agent, agentTask, gone: null, agentState: null, passed });
   if (item.label === "usage limit") return user();
   if (item.kind === "question" && row.question?.to === "user") return user();
   let r = run, rec = record, last = null; // `last`: the nearest task passed, for a terminal's run
@@ -134,8 +142,9 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
       const session = mainSession(r);
       if (!session || !r.dir) return last ? user(last.agent, "it is not running", last.agentTask) : user();
       const agent = sessionLabel(session);
-      const gone = sessionGone(r, session, now, table);
-      return gone ? user(agent, gone) : { to: "agent", agent, agentTask: null, gone: null, passed };
+      const away = sessionAbsence(r, session, now, table, sessionLiveness);
+      if (!away) return agentOwn(agent, null);
+      return user(agent, away.state === "alive" ? null : away.why, null, away.text);
     }
     const key = `${parent.run}/${parent.task}`;
     if (visited.has(key)) return last ? user(last.agent, "it is not running", last.agentTask) : user();
@@ -145,7 +154,7 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
     const parentRun = runById(parent.run);
     if (!parentRun) return user(agent, "its run is gone", agentTask);
     const task = loadTask(parentRun, parent.task);
-    if (task && (relayAlive(task.pid, task.startedAt, task.outDir) || isParked(parentRun, task))) return { to: "agent", agent, agentTask, gone: null, passed };
+    if (task && (relayAlive(task.pid, task.startedAt, task.outDir) || isParked(parentRun, task))) return agentOwn(agent, agentTask);
     passed.push(`${agent} ${task ? "is not running" : "is gone"}`);
     last ??= { agent, agentTask };
     [r, rec] = [parentRun, task];
@@ -153,12 +162,37 @@ export function addresseeOf(run, record, row, item, now = Date.now(), table = un
 }
 
 // An item with its addressee. One that passed agents on its way up says so in its reason too, which
-// the lane shows and the notice to its addressee quotes.
+// the lane shows and the notice to its addressee quotes; so does one that went to the user from a
+// session whose process is alive, since the page shows no "is gone" for it.
 const addressed = (run, record, row, item, now, table) => {
   if (!item) return null;
   const to = addresseeOf(run, record, row, item, now, table);
-  return { ...item, ...to, ...(to.passed.length ? { reason: `${item.reason} (passed on: ${to.passed.join("; ")})` } : {}) };
+  let reason = to.passed.length ? `${item.reason} (passed on: ${to.passed.join("; ")})` : item.reason;
+  if (to.to === "user" && to.agent && to.agentState && !to.gone) reason = `${reason} · ${to.agent} ${to.agentState}`;
+  return { ...item, ...to, ...(reason !== item.reason ? { reason } : {}) };
 };
+
+// Whether a launching session's process lives, for sessionAbsence: ownership.mjs's answer, which
+// checks the recorded PID's program and start time, and finds a session resumed in a new process
+// (Claude Code's session files, or a Codex process that holds its rollout open). It is read only for
+// a session past the grace with no live wait, or whose recorded PID is gone. It can cost a `ps` and
+// an `lsof`, and the board builds often, so an answer is kept for LIVENESS_MS; a recorded PID that
+// ends in the meantime starts a new check at once.
+const LIVENESS_MS = 15_000;
+const livenessCache = new Map();
+function sessionLiveness(run, session) {
+  const now = Date.now();
+  const key = JSON.stringify([run.dir, session?.sessionId ?? null, session?.pid ?? null, Boolean(session?.pid && exists(session.pid))]);
+  const hit = livenessCache.get(key);
+  if (hit && now - hit.at < LIVENESS_MS) return hit.value;
+  for (const [k, v] of livenessCache) if (now - v.at >= LIVENESS_MS) livenessCache.delete(k);
+  resetHostView();
+  const s = sessionsEnded(ownershipOf(run, DASHBOARD_CALLER));
+  // Alive with no why: its recorded process runs. Alive with a why: it was resumed in another.
+  const value = { state: s.state, pid: s.state === "alive" && !s.why ? session?.pid ?? null : null };
+  livenessCache.set(key, { at: now, value });
+  return value;
+}
 
 // The board's process table for addresseeOf, PID to command line, from the shared snapshot.
 function commandTable() {

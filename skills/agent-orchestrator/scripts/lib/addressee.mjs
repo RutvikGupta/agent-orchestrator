@@ -11,9 +11,11 @@
 // - Each poll of a `wait` that the session runs (one that no orch task runs) records the time in the
 //   run's main-wait.json, {pid, at}; `ps` shows a wait parked in its shell. A session with no live
 //   `wait` on its run for AGENT_ORCH_AGENT_GRACE (15 minutes, and never less than twice
-//   AGENT_ORCH_PARK_MAX) is gone, and its items go to the user.
+//   AGENT_ORCH_PARK_MAX), or whose process has ended, no longer takes its items, and they go to the
+//   user. Whether its process still lives decides what they say (sessionAbsence).
 //
-// The Stop hook (hooks/orch-stop.mjs) imports this module, so it loads only config.mjs and util.mjs.
+// The hooks (hooks/orch-stop.mjs, hooks/orch-ask.mjs, through session-work.mjs) import this module,
+// so it loads only config.mjs and util.mjs.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -96,21 +98,55 @@ export function waitLive(run, table) {
   return Boolean(pid) && String(table.get(pid) ?? "").includes("orch.mjs wait");
 }
 
-// Why the main session no longer takes its items, or null while it does. It takes them while one
-// of its waits on the run is live: recorded within the grace (agentGraceMs), or seen in `ps`, which
-// also finds a wait parked in its shell. Past that, it is gone when its process has ended or when no
-// wait has been live for the grace. A run's age stands in for a wait that never ran. A resumed
-// session runs in a new process, so a live wait outweighs the old PID. `table` is a process table
-// from processCommands(); without one, it runs `ps` itself, only when the record is too old.
-export function sessionGone(run, session = mainSession(run), now = Date.now(), table = undefined) {
+// Whether a session's process lives, from its recorded PID alone: ended once that PID is gone, else
+// unknown, since a PID can be reused and a resumed session runs under a new one. The board passes a
+// better answer (dashboard-state.mjs, from ownership.mjs, which also finds a resumed session).
+export const pidLiveness = (run, session) => (session?.pid && !exists(session.pid) ? { state: "ended" } : { state: "unknown" });
+
+// Why the main session does not take its items, or null while it does: { state, why, text }. It takes
+// them while one of its waits on the run is live: recorded within the grace (agentGraceMs), or seen
+// in `ps`, which also finds a wait parked in its shell. A run's age stands in for a wait that never
+// ran. Past that, `liveness(run, session)` says whether its process lives, as { state, pid }:
+//
+// - "ended": it is gone, at once: why "its process has ended".
+// - "alive", once no wait has been live for the grace: it is not reading its results, though its
+//   process lives (pid N, or a new process for a resumed session); it may be stopped in a question
+//   dialog or a long turn. Its items still go to the user.
+// - "unknown", once no wait has been live for the grace: only that is said, as why "no wait on its
+//   run for 3h".
+//
+// `text` is what the board and the notice say after the session's label ("orchestrator session
+// 425c2bc2 is gone (its process has ended)"). `table` is a process table from processCommands();
+// without one, it runs `ps` itself, only when the record is too old.
+export function sessionAbsence(run, session = mainSession(run), now = Date.now(), table = undefined, liveness = pidLiveness) {
   const grace = agentGraceMs();
   const seen = mainWaitSeenMs(run);
   if (seen && now - seen < grace) return null;
   if (waitLive(run, table === undefined ? processCommands() : table)) return null;
-  if (session?.pid && !exists(session.pid)) return "its process has ended";
   const since = seen ?? (Date.parse(run.createdAt) || now);
-  if (now - since < grace) return null;
-  return seen ? `no wait on its run for ${minutes(now - seen)}` : `no wait on its run in ${minutes(now - since)}`;
+  const quiet = now - since >= grace;
+  // Within the grace only a process that has ended counts, so liveness is read only when the recorded
+  // PID is gone.
+  if (!quiet && !(session?.pid && !exists(session.pid))) return null;
+  let live;
+  try {
+    live = liveness(run, session) || { state: "unknown" };
+  } catch {
+    live = { state: "unknown" };
+  }
+  if (live.state === "ended") return { state: "ended", why: "its process has ended", text: "is gone (its process has ended)" };
+  if (!quiet) return null;
+  const noWait = (where) => (seen ? `no wait on ${where} for ${minutes(now - seen)}` : `no wait on ${where} in ${minutes(now - since)}`);
+  if (live.state === "alive") {
+    const why = `its process is alive (${live.pid ? `pid ${live.pid}` : "resumed in a new process"}) but has had ${noWait("this run")}`;
+    return { state: "alive", why, text: `is not reading its results: ${why}; it may be stopped in a question dialog or a long turn` };
+  }
+  return { state: "unknown", why: noWait("its run"), text: `has had ${noWait("its run")}` };
+}
+
+// Why the main session no longer takes its items, or null while it does (sessionAbsence's `why`).
+export function sessionGone(run, session = mainSession(run), now = Date.now(), table = undefined, liveness = pidLiveness) {
+  return sessionAbsence(run, session, now, table, liveness)?.why ?? null;
 }
 
 // The JSON lines of a file. A missing file has none, and a torn or corrupt line is skipped.
