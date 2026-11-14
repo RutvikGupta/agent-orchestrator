@@ -523,6 +523,37 @@ test('the sweep keeps a stale job folder while its caller, or the process it ans
   assert.equal(fs.readFileSync(path.join(jobsFolder(f), 'agent-orch.0000000000a1', 'result.json'), 'utf8'), `{"pid":${process.pid}}\n`);
 });
 
+test('the sweep drops a stale job folder whose answer names a PID that another process now has, or is a day old', async (t) => {
+  const f = await fixture(t);
+  fs.mkdirSync(jobsFolder(f), { mode: 0o700 });
+  const job = (label) => path.join(jobsFolder(f), label);
+  const make = (label, pid, answerAgeMinutes) => {
+    fs.mkdirSync(job(label), { mode: 0o700 });
+    fs.writeFileSync(path.join(job(label), 'result.json'), `{"pid":${pid}}\n`, { mode: 0o600 });
+    if (answerAgeMinutes) minutesAgo(path.join(job(label), 'result.json'), answerAgeMinutes);
+    minutesAgo(job(label), 10);
+  };
+  const left = () => listJobs(f).filter((name) => /^agent-orch\.[0-9a-f]+$/.test(name)).sort();
+  // This process started before each answer below was written, except where the answer is aged:
+  // an answer older than the process that has its PID was written by an earlier process.
+  make('agent-orch.0000000000b1', process.pid, 0); // the process that answered: kept
+  make('agent-orch.0000000000b2', process.pid, 30 * 24 * 60); // a PID passed on since, and over a day old
+  make('agent-orch.0000000000b3', 1, 2 * 24 * 60); // a live PID, an answer two days old
+  await f.newRun('reused');
+  assert.deepEqual(left(), ['agent-orch.0000000000b1']);
+  // The start time it saw is kept in the folder, and a process with another start time is another one.
+  const noted = path.join(job('agent-orch.0000000000b1'), 'process');
+  assert.equal(readJson(noted).pid, process.pid);
+  assert.ok(readJson(noted).started);
+  minutesAgo(job('agent-orch.0000000000b1'), 10);
+  await f.newRun('same');
+  assert.deepEqual(left(), ['agent-orch.0000000000b1']);
+  fs.writeFileSync(noted, JSON.stringify({ pid: process.pid, started: 'Thu Jan 1 00:00:00 1970' }));
+  minutesAgo(job('agent-orch.0000000000b1'), 10);
+  await f.newRun('other');
+  assert.deepEqual(left(), []);
+});
+
 test('the sweep counts its file work in its five seconds, and leaves the rest for the next', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('slowfiles');

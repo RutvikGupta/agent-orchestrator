@@ -312,7 +312,8 @@ function stillLoaded(domain, label, ms) {
 // Clean the jobs' folder for callers that died: delete every spec older than a minute (it holds an
 // environment), remove the folders of jobs older than five minutes, and try again to remove from
 // launchd the jobs that were still loaded. A folder stays while the caller that made it still runs
-// (it may only be held up, and will read the answer), or while the process its answer names does.
+// (it may only be held up, and will read the answer), or while the process its answer names does,
+// checked by its start time, and never for more than a day.
 // orch.mjs runs this before every command, so the dashboard's chores run it too. It returns at once
 // when the folder is missing or empty, never throws, and spends at most five seconds, file work
 // included, each launchctl call at most three: what it did not reach waits for the next.
@@ -396,15 +397,43 @@ const runs = (pid) => {
 };
 
 // Whether a stale job's folder must stay: the process its answer names still runs, or the caller
-// that made it does (for a day at most, since a PID may pass to another process).
+// that made it does. Either way for a day at most, since a PID may pass to another process.
 function needed(dir) {
-  if (runs(readResult(path.join(dir, "result.json"))?.pid)) return true;
+  try {
+    if (answeredRuns(dir)) return true;
+  } catch {}
   try {
     const caller = path.join(dir, "caller");
     return Date.now() - fs.statSync(caller).mtimeMs < KEEP_MS && runs(Number(fs.readFileSync(caller, "utf8")));
   } catch {
     return false;
   }
+}
+
+// Whether the process that a job's answer names still runs: one with that PID and that process's
+// start time, and an answer less than a day old. The process wrote the answer itself, so on the
+// first look a process that started after the answer was written is another one, which got the PID
+// later. That look stores the start time in the folder (`process`), and every later look asks for
+// the same one. When `ps` cannot give a start time, the PID alone counts, within the day.
+function answeredRuns(dir) {
+  const file = path.join(dir, "result.json");
+  const pid = readResult(file)?.pid;
+  if (!runs(pid)) return false;
+  const written = fs.statSync(file).mtimeMs;
+  if (Date.now() - written >= KEEP_MS) return false;
+  const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: SWEEP_CALL_MS });
+  const started = r.error ? "" : String(r.stdout || "").replace(/\s+/g, " ").trim();
+  if (!started) return runs(pid);
+  const noted = path.join(dir, "process");
+  const known = readResult(noted);
+  if (known?.pid === pid && known.started) return known.started === started;
+  // `ps` gives the start time to the second.
+  const at = Date.parse(started);
+  if (!Number.isNaN(at) && at > written + 1000) return false;
+  try {
+    fs.writeFileSync(noted, `${JSON.stringify({ pid, started })}\n`, { mode: 0o600 });
+  } catch {}
+  return true;
 }
 
 const xml = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
