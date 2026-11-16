@@ -239,7 +239,8 @@ test('a finished implementer becomes its pull request\'s babysitter in its own s
   const started = JSON.parse((await f.command(['start', run.id, 'impl', '--agent', 'claude', '--babysit', '--pr', '42',
     '--why', 'Keeps the pull request it implemented', '--brief', brief, '--json',
     '--', '--session', implemented.session])).stdout);
-  assert.deepEqual([started.id, started.attempt, started.babysit, started.tier, started.pr.number], ['impl', 2, true, 'complex', 42]);
+  // A kept implementer watches at the standard tier; its small session continues.
+  assert.deepEqual([started.id, started.attempt, started.babysit, started.tier, started.pr.number], ['impl', 2, true, 'standard', 42]);
   const argsOf = (attempt) => eventually(() => {
     const file = path.join(attempt.outDir, 'invocation.json');
     return fs.existsSync(file) && readJson(file).argv;
@@ -267,7 +268,7 @@ test('a finished implementer becomes its pull request\'s babysitter in its own s
   const resumed = await eventually(() => (record(f, run, 'impl').attempt === 3 ? record(f, run, 'impl') : null), 'the watcher did not resume it', SLOW);
   const resumedArgv = await argsOf(resumed);
   assert.equal(resumedArgv[resumedArgv.indexOf('--session') + 1], implemented.session);
-  assert.deepEqual([resumed.name, resumed.babysit, resumed.tier], ['babysit-42', true, 'complex']);
+  assert.deepEqual([resumed.name, resumed.babysit, resumed.tier], ['babysit-42', true, 'standard']);
   assert.equal(fs.readFileSync(kept, 'utf8'), fs.readFileSync(brief, 'utf8'), 'a resume of the babysitter keeps its brief');
   await f.command(['close', run.id, 'babysit-42']);
   assert.ok(record(f, run, 'impl').closedAt);

@@ -2,6 +2,15 @@
 
 import path from "node:path";
 
+// A duration as people write it, with no zero parts: 200ms, 30s, 2m, 1h30m, 6h.
+export function durationText(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return "-";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = Math.round(ms / 1000);
+  const parts = [[Math.floor(s / 3600), "h"], [Math.floor((s % 3600) / 60), "m"], [s % 60, "s"]].filter(([n]) => n > 0);
+  return parts.map(([n, unit]) => `${n}${unit}`).join("") || "0s";
+}
+
 export function formatElapsed(ms) {
   if (ms == null || Number.isNaN(ms)) return "-";
   const s = Math.max(0, Math.round(ms / 1000));

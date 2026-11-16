@@ -824,9 +824,9 @@ function recoverRun(run, rows, own, dirty) {
     },
     {
       key: "parked",
-      label: "parked babysitters (a watcher resumes each on its next pull-request event or message)",
+      label: "parked tasks (a watcher resumes each on its next event: a pull-request change, its wake condition, a task it started finishing, or a message)",
       items: phase("parked"),
-      show: (r) => `${label(r)} (${r.parked?.waitsFor || "waits for its pull request"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
+      show: (r) => `${label(r)} (${r.parked?.waitsFor || "waits for its wake"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
       next: (items) => (items.some((r) => !["alive", "starting"].includes(r.parked?.watcher)) ? `${CLI} status ${run.id} (starts a watcher that is not running)` : null),
     },
     {

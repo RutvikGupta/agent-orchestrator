@@ -81,6 +81,75 @@ small shell. It checks watched PIDs and message and result files every second. I
 a change, at the deadline, or after `AGENT_ORCH_PARK_MAX` (default `30s`). Other attention, such as
 a task becoming silent, is checked at that maximum interval.
 
+Inside a Claude or Codex task, `nap` also keeps a budget. Each nap adds its duration to a total for
+the attempt (`naps.json` in the attempt's folder). Once the total would pass `AGENT_ORCH_NAP_BUDGET`
+(default `10m`), `nap` refuses with exit 2 and a message that says to park with `park-until`
+(below). Outside a task, and in a command task, `nap` is unchanged, and so is a babysitter's
+`pr-watch` (`references/messages.md`).
+
+## Parked tasks
+
+A task that has only a wait left can **park**: it ends its turn, its agent exits and frees its
+memory, and a small watcher wakes the same session later. The watcher is a shell loop with no model.
+A babysitter parks this way (`references/babysit.md`). So can any Claude or Codex task, for a wait of
+more than a few minutes.
+
+- **Record the wait.** `$ORCH park-until [--every DUR] [--for DUR] [--why TEXT] -- COMMAND [ARGS...]`
+  runs inside a task's shell: it finds the task from `AGENT_ORCH_RUN` and `AGENT_ORCH_TASK`. It
+  records a **wake condition** for the task's current attempt in `park-until.json` in the attempt's
+  folder. A later call in the same attempt replaces it.
+  - `--every` defaults to `2m` and is at least `30s`. `--for` defaults to `6h` and is at most `24h`.
+  - It refuses (exit 2) outside a task, in a command task, with a bad `--every` or `--for`, and when
+    `COMMAND` is neither a file nor a program on `PATH`.
+  - It prints what the agent must do next: end its turn with `PARKED: waits for <what>` and an
+    `orch-result` outcome `parked`.
+- **Who parks.** A babysitter, as before. And any Claude or Codex task whose attempt ends with
+  `PARKED:`, when either it recorded a wake condition in that attempt, or a task it started (with
+  `start`, in any attempt) was still running when the attempt ended. A `PARKED:` with neither does
+  not park: the task ends `completed`, and `result` prints a line `not parked: ...` that says why.
+  Command tasks never park.
+- **What the watcher does.** Every `--every` it runs the condition command in the folder
+  `park-until` ran in, with the task's environment: the starter's environment, the user's
+  `agent-env.json`, the agent's `PATH`, and the task's `AGENT_ORCH_*` variables. One run may take its
+  interval, at least 10 seconds and at most 10 minutes; a run cut off counts as not met. The output
+  goes to `park-condition.log` in the attempt's folder.
+- **What wakes the task.** The watcher resumes the same session, at the same tier and with the same
+  relay options, when:
+  - the command exits 0;
+  - `--for` has passed;
+  - an unread message arrives;
+  - a task it started finishes (its finish notice is a message).
+
+  A command that cannot run (a missing program, a folder that is gone) wakes the task with the error
+  instead of trying forever. The resume brief says which of these happened, gives the command's exit
+  code and its last 40 lines of output when they matter, and says not to run the condition again to
+  check.
+- **How it shows.** As for a parked babysitter: `status` and the dashboard show the task as
+  `parked`, with what it waits for. `wait` treats it as running. It takes no parallel slot and keeps
+  its checkout. `stop` and `close` end the watcher. `status`, `start`, `wait`, `dispatch` and the
+  dashboard restart a watcher that died.
+- **A babysitter's fix.** When a babysitter's watch attempt ends with `NEEDS FIX:`, the task shows as
+  running while the fix attempt starts, with `needs a fix · <reason> · starting its fix attempt at
+  the complex tier`. When no fix starts, it shows as `needs-decision` and `wait` exits 5
+  (`references/babysit.md`, "Watching and fixing").
+
+## Context cap of Claude agents
+
+Claude Code **compacts** a session, which summarizes its context to shrink it, once the context
+passes a set size. Left alone, a session with a 1M-token window compacts only near 967k tokens, and
+every call sends the whole context again. When `start` launches a Claude relay, it sets
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the relay's environment from `AGENT_ORCH_CLAUDE_COMPACT_WINDOW`:
+
+- The default is `300k` (300000 tokens).
+- A value from `100k` to `1M` sets it. Forms like `300000`, `300k` and `1m` work.
+- `off` leaves Claude Code's own default.
+- A bad value falls back to the default without failing.
+- A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` already set in the caller's environment, or in `agent-env.json`,
+  is kept.
+- The attempt records the value used, and `result` prints it on a `compact window:` line.
+
+Codex is unchanged.
+
 ## The `Stop` hook
 
 The `Stop` hook `scripts/hooks/orch-stop.mjs` (set up in `integrations/claude/settings.example.json`;
@@ -133,6 +202,8 @@ timeout and a usage limit are never retried.
   running, and `stop` and `close` never signal it.
 - Its **phase** is one of:
   - `prepared`, `running`, `needs-decision`;
+  - `parked`: the task ended its turn and its watcher wakes it ("Parked tasks"); `wait` counts it as
+    running;
   - `failed`: any unsuccessful end, including a usage limit;
   - `awaiting-review`: completed and not accepted yet;
   - `accepted`, `integrated`.

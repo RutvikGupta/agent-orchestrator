@@ -11,25 +11,32 @@
 // (parent-notice.json) that makes its notice go out exactly once and records what happened to it.
 // A later attempt that starts first never cancels an earlier attempt's notice. A top-level run's
 // parent is the user's own session, which has no inbox and whose `wait` already wakes, so `start`
-// starts no watcher there, except beside a pull-request babysitter: an attempt that ends parked sends
-// no notice (it still runs, as far as its parent can tell), and its watcher starts the park watcher
-// that resumes it (park.mjs).
+// starts no watcher there, except beside a pull-request babysitter, and beside a task that started
+// tasks or recorded a wake condition (ensureFinishWatcher): an attempt that ends parked sends no
+// notice (it still runs, as far as its parent can tell), and its watcher starts the park watcher
+// that resumes it (park.mjs). A babysitter's watch attempt that ends with `NEEDS FIX:` sends no
+// notice either: its watcher starts the fix attempt, in the same session (startFix).
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decisionsIn } from "./briefs.mjs";
+import { decisionsIn, fixBrief } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { firstLine } from "./format.mjs";
-import { spawnParkWatcher } from "./park.mjs";
-import { attemptAgent, describe, endedByStop, loadTask, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
+import { coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, spawnParkWatcher, tierModel } from "./park.mjs";
+import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, ceilingFor, strongerThan, tierText } from "./policy.mjs";
+import { NOTICE_FILE, attemptAgent, describe, endedByStop, isBabysitter, loadTask, needsFixSignal, parkBasis, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
-export const NOTICE_FILE = "parent-notice.json";
+export { NOTICE_FILE };
 const NOTICE_LOG = "parent-notice.log";
+// Created by whoever starts an attempt's finish watcher, so that it starts once (ensureFinishWatcher).
+export const FINISH_WATCHER_FILE = "finish-watcher.json";
+// How long a fix attempt that the machine has no room for keeps trying to start (start exits 7).
+const FIX_ADMISSION_MS = 10 * 60000;
 // Created once by the process that sends a notice an interrupt left taken (sendFinishNotice).
 const RECOVERY_FILE = "parent-notice-recovery.json";
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -88,7 +95,7 @@ export const WAIT_SCRIPT = 'id=$2; [ -n "$id" ] || id=$(ps -o lstart= -p "$1" 2>
 export function watchForFinish(run, task) {
   try {
     const send = [process.execPath, SCRIPT, run.dir, task.id, String(task.attempt), String(task.pid)];
-    return startDetached({
+    const pid = startDetached({
       command: "/bin/sh",
       args: ["-c", WAIT_SCRIPT, "finish-notice", String(task.pid), "", ...send],
       cwd: run.dir,
@@ -96,9 +103,27 @@ export function watchForFinish(run, task) {
       env: process.env,
       stdout: path.join(task.outDir, NOTICE_LOG),
     }).pid;
+    try {
+      writeJson(path.join(task.outDir, FINISH_WATCHER_FILE), { pid: pid ?? null, at: new Date().toISOString() });
+    } catch {}
+    return pid;
   } catch {
     return null;
   }
+}
+
+// Start the finish watcher of a task's current attempt unless one was started for it: a task that
+// will park needs one to start its park watcher, also in a top-level run (where `start` starts none
+// beside a task that is not a babysitter). Only while the attempt's relay still runs. Returns the
+// watcher's PID, or null.
+export function ensureFinishWatcher(run, task) {
+  if (!task?.outDir || !task.pid) return null;
+  try {
+    fs.writeFileSync(path.join(task.outDir, FINISH_WATCHER_FILE), `${JSON.stringify({ by: "ensure", at: new Date().toISOString() })}\n`, { flag: "wx" });
+  } catch {
+    return null; // one was started already, or the folder cannot be written
+  }
+  return watchForFinish(run, task);
 }
 
 const question = (d) => {
@@ -175,11 +200,78 @@ function stranded(dir, record) {
   return !resume?.attempt && !resume?.relay;
 }
 
+// The text of a final message before its orch-result block, quoted line by line.
+const quoted = (message) => String(message || "").split(/^[\t ]*```orch-result[\t ]*\r?$/m)[0].trim().split("\n").map((l) => `> ${l}`).join("\n");
+
+// Start the fix attempt of a babysitter whose watch attempt `n` (result `own`) ended with
+// `NEEDS FIX: <reason>`: the next attempt, at the fix tier, in the same session, with a brief that
+// says what to fix and quotes the watch attempt's message. This is the orchestrator's policy, not
+// an agent choosing a stronger model, so the caller's tier does not bound it; a ceiling inherited
+// through AGENT_ORCH_MAX_TIER does. A model switch reads no prompt cache, so with a current handoff
+// note and a session above the cold handoff limit the fix attempt starts a fresh session from the
+// babysitter's brief, the note and the fix brief instead (park.mjs, handoffOf). Returns { started }
+// with the saved task, or { refused } with why none started: the ceiling forbids the fix tier, the
+// watch attempt ran at it already, or the start failed. `start` is commands/start.mjs.
+function startFix(run, task, n, own, reason, start) {
+  if (!start) return { refused: "the fix attempt can only be started by the attempt's finish watcher" };
+  const watchTier = task.watchTier || BABYSIT_WATCH_TIER;
+  const ranTier = task.attemptTiers?.[n] || task.tier || watchTier;
+  const fixTier = { agent: "claude", tier: BABYSIT_FIX_TIER };
+  if (!strongerThan(fixTier, { agent: "claude", tier: ranTier })) {
+    return { refused: `attempt ${n} already ran at the ${ranTier} tier, which a fix attempt (${BABYSIT_FIX_TIER}) does not exceed` };
+  }
+  const cap = process.env.AGENT_ORCH_MAX_TIER;
+  if (cap !== undefined) {
+    try {
+      if (strongerThan(fixTier, { agent: "claude", tier: ceilingFor(cap).tier })) return { refused: `the inherited ceiling AGENT_ORCH_MAX_TIER=${cap} forbids ${tierText("claude", BABYSIT_FIX_TIER)}, which a fix attempt runs` };
+    } catch (error) {
+      return { refused: error.message };
+    }
+  }
+  const dir = path.join(taskDir(run, task.id), `attempt-${n}`);
+  const model = tierModel("claude", BABYSIT_FIX_TIER);
+  const { cold, why } = coldResume(own.finishedAt, task.model, model);
+  const handoff = handoffOf(run, task, dir, { cold, coldWhy: why });
+  const session = own.sessionId || own.threadId;
+  if (!session && !handoff.fresh) return { refused: "the watch attempt's result has no session id to resume" };
+  const brief = path.join(dir, "fix-brief.md");
+  const body = fixBrief({ reason, watchTier, fixTier: BABYSIT_FIX_TIER, model: model || BABYSIT_FIX_TIER, handoffFile: handoff.file });
+  fs.writeFileSync(brief, handoff.fresh ? handoffBrief(handoff, body, { from: "watch" }) : body);
+  const at = new Date().toISOString();
+  const until = Date.now() + FIX_ADMISSION_MS;
+  for (;;) {
+    try {
+      const { task: started } = start.startTask({
+        _: [run.dir, task.id], agent: "claude", tier: BABYSIT_FIX_TIER, brief,
+        briefData: `## The watch attempt's message\n\n${quoted(own.finalMessage)}`,
+        passthrough: handoff.fresh ? [] : ["--session", session], fromHandoff: handoff.fresh,
+        // The watch attempt held its place in the run's parallel limit; a fix keeps its tier.
+        force: true, "no-escalate": true,
+      }, {
+        attemptReason: "fix",
+        fixes: { ...(task.fixes || {}), [n + 1]: { fromAttempt: n, reason, at } },
+        handoffChecks: { ...(task.handoffChecks || {}), [n + 1]: handoffCheck(handoff) },
+        ...(handoff.fresh ? { handoffs: { ...(task.handoffs || {}), [n + 1]: handoffRecord(handoff, n, at) } } : {}),
+      });
+      return { started };
+    } catch (error) {
+      if (!(error instanceof start.StartRefused)) return { refused: `starting it failed: ${error.message}` };
+      // The machine has no room now (memory, or its agent limit): try again for a while.
+      if (error.code === 7 && Date.now() < until) {
+        spawnSync("sleep", ["5"]);
+        continue;
+      }
+      return { refused: error.message };
+    }
+  }
+}
+
 // Send the notice for attempt `attempt` of task `id` in the run at `runDir`, once, after its relay
 // (PID `pid`, started at `started`) has ended. Returns what was recorded in the claim file, or null
 // when another process already claimed it. A stranded interrupt's claim is taken over by one process
-// only, the one that creates the attempt's recovery file.
-export function sendFinishNotice(runDir, id, attempt, { pid = null, started = null } = {}) {
+// only, the one that creates the attempt's recovery file. `start` (commands/start.mjs, which the
+// watcher loads) lets it start a babysitter's fix attempt.
+export function sendFinishNotice(runDir, id, attempt, { pid = null, started = null, start = null } = {}) {
   const run = { ...readJson(path.join(runDir, "run.json")), dir: runDir };
   const task = loadTask(run, id);
   if (!task) return null;
@@ -205,19 +297,37 @@ export function sendFinishNotice(runDir, id, attempt, { pid = null, started = nu
   }
   const parent = attemptParent(run, task, attempt);
   try {
-    // Whether this attempt parked comes from its own final message, even when a later attempt has
-    // started since; only a park that is still the task's current one gets a watcher.
+    // Whether this attempt parked comes from its own final message and what could wake it, even
+    // when a later attempt has started since; only a park that is still the task's current one gets
+    // a watcher.
     const own = readJson(path.join(taskDir(run, id), `attempt-${attempt}`, "result.json"));
-    const parked = Boolean((task.babysit || task.plan?.type === "babysit") && own?.status === "completed" && parkedSignal(own.finalMessage));
-    if (parked) {
-      const current = attempt === task.attempt && (!pid || pid === task.pid) && describe(run, task).phase === "parked";
-      const watcher = current ? spawnParkWatcher(run, task, { by: "park" }) : null;
+    const parked = own?.status === "completed" && Boolean(parkedSignal(own.finalMessage)) && attemptAgent(task, attempt) !== "command" && Boolean(parkBasis(run, task, own, attempt));
+    const who = isBabysitter(task) ? "the babysitter" : "the task";
+    const current = attempt === task.attempt && (!pid || pid === task.pid);
+    const fixReason = isBabysitter(task) && own?.status === "completed" ? needsFixSignal(own.finalMessage) : null;
+    let fixRefused = false;
+    if (fixReason && current && !task.closedAt && !task.stoppedAt) {
+      const fix = startFix(run, task, attempt, own, fixReason, start);
+      if (fix.started) {
+        Object.assign(record, { fix: { attempt: fix.started.attempt, reason: fixReason }, skipped: `the babysitter needs a fix: its fix attempt ${fix.started.attempt} runs at the ${fix.started.tier} tier in the same session` });
+      } else {
+        // Recorded at once, so that the row below reads as the decision it now is (runs.mjs, fixOf).
+        record.fixRefused = fix.refused;
+        writeJson(claim, record);
+        fixRefused = true;
+      }
+    }
+    if (record.fix) {
+      // The babysitter still runs as far as its parent can tell.
+    } else if (parked && !fixRefused) {
+      const parkedNow = current && describe(run, task).phase === "parked";
+      const watcher = parkedNow ? spawnParkWatcher(run, task, { by: "park" }) : null;
       Object.assign(record, {
         parked: true,
         watcher: watcher?.pid ?? null,
-        skipped: current
-          ? "the babysitter parked: it still runs as far as its parent can tell, and its watcher resumes it on the next event"
-          : "the babysitter parked this attempt, and a later attempt has started or its park has ended since",
+        skipped: parkedNow
+          ? `${who} parked: it still runs as far as its parent can tell, and its watcher resumes it on the next event`
+          : `${who} parked this attempt, and a later attempt has started or its park has ended since`,
       });
     } else if (!parent) record.skipped = "a top-level run: the user's own session is the parent";
     else {
@@ -280,8 +390,10 @@ async function main([runDir, id, attempt, pid, started]) {
   // taken, or ends without doing so, and the notice goes out (stranded). Wait for it to end.
   const claim = path.join(runDir, "tasks", id, `attempt-${n}`, NOTICE_FILE);
   while (helperAlive(readJson(claim)?.interrupt)) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-  // The claim file records what happened; its final write is the watcher's last.
-  sendFinishNotice(runDir, id, n, { pid: relay, started: identity });
+  // The claim file records what happened; its final write is the watcher's last. Starting a
+  // babysitter's fix attempt needs `start`, loaded here, since `start` loads this module.
+  const start = await import("./commands/start.mjs");
+  sendFinishNotice(runDir, id, n, { pid: relay, started: identity, start });
 }
 
 const real = (file) => {

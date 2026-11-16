@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { AGENTS, TASK_ID } from "./config.mjs";
-import { CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
+import { BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
 import { readJson } from "./util.mjs";
 
 export const TASK_TYPES = ["implement", "review", "research", "debug", "babysit"];
@@ -56,14 +56,18 @@ export function briefProblem(runDir, entry) {
 const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names.at(-1)}` : names.join(""));
 
 // What is wrong with a planned task's tier, or null. Every task names one, since `start` refuses a
-// new task without it. A pull-request babysitter is the exception: it always runs `complex`, so its
-// tier may be left out. `dispatch` uses this too, for a plan recorded before tiers were required.
+// new task without it. A pull-request babysitter is the exception: it watches at `standard` unless
+// its tier names another one up to `complex`, the tier of its fix attempts, so its tier may be left
+// out. `dispatch` uses this too, for a plan recorded before tiers were required.
 export function tierProblem(task, policy = loadPolicy()) {
   if (task?.agent !== "claude" && task?.agent !== "codex") return null; // the agent is reported on its own
   const label = task.agent === "claude" ? "Claude" : "Codex";
   const names = Object.keys(policy[task.agent].tiers);
   if (task.agent === "claude" && task.type === "babysit") {
-    return task.tier != null && task.tier !== CLAUDE_DEFAULT_TIER ? `a babysit task runs the ${CLAUDE_DEFAULT_TIER} tier` : null;
+    if (task.tier == null || task.tier === "") return null;
+    const rank = (name) => (Number.isInteger(policy.claude.tiers[name]?.rank) ? policy.claude.tiers[name].rank : names.indexOf(name) + 1);
+    const allowed = names.filter((name) => rank(name) <= rank(CLAUDE_DEFAULT_TIER));
+    return allowed.includes(task.tier) ? null : `a babysit task watches at ${orList(allowed)} (default ${BABYSIT_WATCH_TIER}), and its fix attempts run ${CLAUDE_DEFAULT_TIER}`;
   }
   if (names.includes(task.tier)) return null;
   return task.tier == null || task.tier === ""

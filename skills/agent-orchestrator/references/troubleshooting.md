@@ -26,6 +26,11 @@ you find a bug in the skill itself ("Report a bug in this skill", below).
 | `accept` refuses with `a passing check matched a failed run` | Rerun the gate with `verify`, then fix the work or record why with `--unverified` (`references/review.md`, "Accept") |
 | The board shows `⚠ ... exceeds the <tier> ceiling` | See `references/dashboard.md`, "Model ceiling warnings" |
 | Every command prints `orch: the skill changed since this session loaded it` | See `references/monitor.md`, "Skill changes" |
+| `nap` refuses, saying the attempt's naps already add up to its budget | The attempt used `AGENT_ORCH_NAP_BUDGET` (default `10m`). Do not wait in the session: record the wait with `$ORCH park-until -- <command that exits 0 once it is done>`, then end the turn with `PARKED: waits for <what>` (`references/monitor.md`, "Parked tasks") |
+| A task said `PARKED:` and ended `completed`; `result` prints `not parked: ...` | Nothing would wake it: it recorded no wake condition with `park-until` in that attempt, and no task it started was still running when it ended. A command task never parks. Resume it by hand, and have it run `park-until` before it ends with `PARKED:` |
+| `park-until` refuses (exit 2) | Read its message. It refuses outside a task, in a command task, with `--every` below `30s`, with `--for` above `24h`, and when the command is neither a file nor a program on `PATH`. Run it in the task's own shell, with a command the watcher can run |
+| A babysitter shows `needs-decision`, with a `NEEDS FIX:` text | Its watch attempt asked for a fix and none started: the inherited ceiling (`AGENT_ORCH_MAX_TIER`) forbids `complex`, the attempt already ran at `complex`, or no fix attempt started within 15 minutes. `result` says which. Decide what to do, then resume it by hand (`references/babysit.md`, "Watching and fixing") |
+| An agent's context grows very large | A Claude agent compacts its context at `AGENT_ORCH_CLAUDE_COMPACT_WINDOW` (default `300k`); its `result` shows the value on the `compact window:` line. `off`, or a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` set in the environment or `agent-env.json`, leaves Claude Code's default, which compacts a 1M-window session only near 967k tokens: remove it, or set a value from `100k` to `1M`. Codex is not capped (`references/monitor.md`, "Context cap of Claude agents") |
 
 ## Report a bug in this skill
 

@@ -59,7 +59,7 @@ and repeats the call while it exits 3, as it does with `wait`.
 - It does not review, accept or integrate. Handle what it names, then run it again. When you
   integrate a task while it runs, it starts that task's dependents without a restart.
 - Like `wait`, it retries transient failures (`references/monitor.md`, "Automatic retry") and
-  restarts the watcher of a parked babysitter that has died.
+  restarts the watcher of a parked task that has died.
 - It stays while ready tasks wait for the machine, even when none of the run's tasks runs, and
   starts them as room appears. It prints the waiting reasons when they change.
 - `--max N` caps how many planned tasks run at once, a retried task included, instead of how many

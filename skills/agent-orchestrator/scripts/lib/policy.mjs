@@ -2,8 +2,9 @@
 // tier runs. The orchestrating agent picks a task's tier from its own assessment of the task
 // (SKILL.md, "Choose the agent and model"). Every new task, Claude or Codex,
 // names its tier with --tier, so that the choice is explicit and leans to the lightest tier that
-// does the task as well as the top one. Two things run `complex` without it: every pull-request
-// babysitter, and a Claude task recorded before Claude had tiers when it gets a follow-up attempt.
+// does the task as well as the top one. A pull-request babysitter needs none: it watches at
+// `standard` (BABYSIT_WATCH_TIER) and hands each code fix to a fix attempt at `complex`. A Claude
+// task recorded before Claude had tiers runs `complex` when it gets a follow-up attempt.
 // start escalates repeated follow-up failures unless --tier or --no-escalate overrides it.
 
 import { POLICY_PATH } from "./config.mjs";
@@ -12,9 +13,14 @@ import { POLICY_PATH } from "./config.mjs";
 import { evidenceNote, tierEvidence } from "./stats.mjs";
 import { die, readJson } from "./util.mjs";
 
-// Not a default for new tasks: the tier of every babysitter, and of a Claude task recorded before
-// Claude had tiers (which ran `complex`, then Opus).
+// Not a default for new tasks: the tier of a babysitter's fix attempts, and of a Claude task
+// recorded before Claude had tiers (which ran `complex`, then Opus).
 export const CLAUDE_DEFAULT_TIER = "complex";
+// A babysitter watches its pull request at this tier unless `start --tier` names light or complex:
+// waiting on checks and fetching results needs no frontier model. A wake that needs a code change or
+// a substantive reply goes to a fix attempt at BABYSIT_FIX_TIER, in the same session.
+export const BABYSIT_WATCH_TIER = "standard";
+export const BABYSIT_FIX_TIER = CLAUDE_DEFAULT_TIER;
 const POLICY_AGENTS = ["claude", "codex"];
 // A command task (`start --agent command -- COMMAND...`, scripts/command-relay.mjs) runs a command
 // with no model. Its ceiling applies to the agents its command starts.
@@ -57,7 +63,7 @@ export function policyProblems(policy) {
       if (tier.use !== undefined && typeof tier.use !== "string") problems.push(`${at}.use must be a string`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
-      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: every babysitter's, and that of tasks recorded before tiers`);
+      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: every babysitter's fix attempts, and that of tasks recorded before tiers`);
     }
   }
   return problems;

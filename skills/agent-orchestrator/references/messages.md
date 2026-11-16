@@ -7,8 +7,8 @@ hands back is in `SKILL.md`, "Decisions agents hand back".
 
 When an orch task started a task, it gets one inbox message from `agent:<run>/<task>` when each
 attempt ends: ready for review, needs a decision (with the questions), or failed (with the error's
-first line), plus the `result` command. `nap`, `wait` and `pr-watch` wake on it (exit 6). The user's
-session gets none; its `wait` wakes on the result.
+first line), plus the `result` command. `nap`, `wait` and `pr-watch` wake on it (exit 6), and so does
+the watcher of a parked task. The user's session gets none; its `wait` wakes on the result.
 
 ## Questions
 
@@ -98,8 +98,21 @@ $ORCH send <run> <task-id> "<message>" [--steer]    # or --file FILE
 - A Claude agent gets the message as context after its next tool call, through the user's
   `PostToolUse` hook. A Codex agent reads it with `$ORCH inbox <run> <task-id> --ack` at each gate,
   as its brief tells it.
-- Every brief tells agents to wait with `$ORCH nap <duration>`, `wait` or `pr-watch`, which return as
-  soon as a message arrives.
+- Every brief tells agents to wait with `$ORCH nap <duration>`, `wait` or `pr-watch` for a few
+  minutes at most. They return as soon as a message arrives. A longer wait parks
+  (`references/monitor.md`, "Parked tasks"), and every brief ends its messages section with a
+  paragraph that says so:
+  - Never wait in the session for more than a few minutes: no sleep, nap or polling loops.
+  - To wait for CI, a DAG run, a deploy or a command task, run `$ORCH park-until` and end the turn
+    with `PARKED:`.
+  - To wait for tasks it started, nothing needs recording.
+  - A babysitter keeps parking as its brief says.
+- **The nap budget.** Inside a Claude or Codex task, each `nap` adds its duration to a total for
+  the attempt (`naps.json` in the attempt's folder). Once the total would pass
+  `AGENT_ORCH_NAP_BUDGET` (default `10m`), `nap` refuses with exit 2 and a message that says to park
+  with `park-until`. Outside a task, and in a command task, `nap` is unchanged, and so is a
+  babysitter's `pr-watch`. The decisions note of a brief that is not a babysitter's says that naps
+  may add up to the budget, after which the agent finishes with `NEEDS DECISION:`.
 - Send only what the agent needs. A change of goal or scope still goes through a resume with a delta
   brief (`references/review.md`, "Rework").
 
@@ -153,7 +166,8 @@ not left alone. The next `start`, interrupt, `stop` or `close` adopts it as the 
 
 A resume is refused, with the reason, and nothing changes, for:
 
-- a babysitter, running or parked: its park watcher delivers messages;
+- a babysitter, running or parked, and a parked task of any kind: its park watcher delivers
+  messages;
 - a command task: it has no session and no agent;
 - a task whose session id is not known yet, just after it started;
 - a sandboxed Codex task with the network on: the Codex relay cannot resume its session;

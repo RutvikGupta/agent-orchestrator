@@ -33,11 +33,13 @@ export const USER_DASHBOARD = "user (dashboard)";
 export const DASHBOARD_CALLER = Object.freeze({ kind: "user", via: "dashboard", record: null });
 
 // The orch.mjs commands anyone may run, whoever owns the run: they read, or act only on the
-// caller's own things (its new run, its own task's question or note to its parent) or on no run. `result` closes a task
+// caller's own things (its new run, its own task's question or note to its parent, its own task's
+// wake condition) or on no run. `result` closes a task
 // and `status` and `wait` revive parked watchers and retry tasks only for the owner.
 export const OPEN_COMMANDS = new Set([
   "status", "wait", "result", "log", "recover", "agents", "stats", "lesson", "runs", "watch", "nap",
   "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch", "skill", "model", "questions",
+  "park-until",
 ]);
 // The guarded commands. `self`: the command checks ownership itself, so its refusal names what it
 // would change; orch.mjs checks the others on their RUN argument before they run (gateCommand).
@@ -590,7 +592,7 @@ export function gateCommand(command, args) {
       if (run && !ownTask) g = guard(run, `run \`${command}\` on run ${run.id}${rule.ownTask && args._[1] ? ` for task ${args._[1]}` : ""}`, { adopt: args.adopt });
     }
   }
-  const run = !["nap", "ask", "tell", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs"].includes(command) ? runNamed(args._[0]) : null;
+  const run = !["nap", "park-until", "ask", "tell", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs"].includes(command) ? runNamed(args._[0]) : null;
   if (run) {
     process.once("exit", () => {
       try {

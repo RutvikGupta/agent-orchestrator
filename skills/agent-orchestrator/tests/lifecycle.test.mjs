@@ -56,6 +56,7 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
       entry(run, 'claude-light', { tier: 'light' }),
       entry(run, 'codex-absent', { agent: 'codex', tier: undefined }),
       entry(run, 'babysit-light', { type: 'babysit', owns: [], tier: 'light' }),
+      entry(run, 'babysit-frontier', { type: 'babysit', owns: [], tier: 'frontier' }),
       entry(run, 'babysit-implied', { type: 'babysit', owns: [], tier: null }),
       entry(run, 'robot', { agent: 'robot' }),
       entry(run, 'no-why', { why: '  ' }),
@@ -72,13 +73,14 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
     /task codex-task: a Codex task needs a tier \(light, standard, strong or complex\)/, /task claude-tier: tier "imaginary" is not a Claude tier \(light, standard, complex or frontier\)/,
     /task claude-null: a Claude task needs a tier \(light, standard, complex or frontier\): the lightest that does the task as well as the top one/,
     /task claude-absent: a Claude task needs a tier \(light, standard, complex or frontier\)/, /task codex-absent: a Codex task needs a tier \(light, standard, strong or complex\)/,
-    /task babysit-light: a babysit task runs the complex tier/,
+    /task babysit-frontier: a babysit task watches at light, standard or complex \(default standard\), and its fix attempts run complex/,
     /task robot: agent must be claude or codex/, /task no-why: why is empty/,
     /task no-brief: brief is empty: the path of its brief file/, /task no-goal: goal is empty/,
     /task reader: is read-only, so it owns nothing/,
   ]) assert.match(out.stderr, pattern);
-  // A babysitter always runs complex, so its plan entry may leave the tier out.
-  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:|task babysit-implied:/);
+  // A babysitter watches at standard unless its plan entry names another watch tier up to complex,
+  // so its plan entry may leave the tier out.
+  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:|task babysit-implied:|task babysit-light:/);
   assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
 
   const cycle = { goal: 'Cycle', tasks: [entry(run, 'a', { dependsOn: ['c'] }), entry(run, 'b', { dependsOn: ['a'] }), entry(run, 'c', { dependsOn: ['b'] })] };

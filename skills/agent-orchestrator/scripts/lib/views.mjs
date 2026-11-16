@@ -83,7 +83,7 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
       : `${names.get(r.id) || r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run, names),
     ...whyLines(tasks),
-    ...tasks.filter((t) => t.state !== "closed").map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
+    ...tasks.filter((t) => t.state !== "closed").map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}${a.reason === "fix" ? " (fix)" : ""}`).join(", ") || "none"}`),
     ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }
