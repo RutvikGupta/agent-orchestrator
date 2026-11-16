@@ -107,7 +107,8 @@ more than a few minutes.
   `PARKED:`, when either it recorded a wake condition in that attempt, or a task it started (with
   `start`, in any attempt) had not ended for it when the attempt ended: it still ran or was parked,
   or its finish notice was not read yet. A child that ends just before the parent's result is
-  written so still wakes the parent. A `PARKED:` with neither does not park: the task ends
+  written so still wakes the parent. When a child's notice has not come 2 minutes after it ended
+  (its finish watcher is gone), the parent's watcher writes it. A `PARKED:` with neither does not park: the task ends
   `completed`, and `result` prints a line `not parked: ...` that says why. Command tasks never park.
 - **What the watcher does.** Every `--every` it runs the condition command in the folder
   `park-until` ran in, with the task's own environment: the starter's environment, the user's

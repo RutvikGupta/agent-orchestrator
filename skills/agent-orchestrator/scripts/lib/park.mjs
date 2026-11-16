@@ -56,9 +56,9 @@ import { CLI_PATH } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { durationText, shortText } from "./format.mjs";
 import { INBOX_FILE, fromAgent, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
-import { watchForFinish } from "./finish-notice.mjs";
+import { sendFinishNotice, watchForFinish } from "./finish-notice.mjs";
 import { BABYSIT_WATCH_TIER, lowerCeiling, lowerEffort, readPolicy } from "./policy.mjs";
-import { PARK_CHECK_FILE, PARK_UNTIL_FILE, attemptAgent, commandText, exists, isBabysitter, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
+import { PARK_CHECK_FILE, PARK_UNTIL_FILE, attemptAgent, commandText, exists, isBabysitter, isParked, lateNotices, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { aheadOfPr, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
@@ -552,10 +552,10 @@ const CONDITION_LINES = 40;
 export const conditionTimeout = (every) => Math.max(10000, Math.min(Number(every) || 0, 10 * 60000));
 
 // The last `n` lines of a file, or "".
-function tailLines(file, n) {
+function tailLines(file, n, bytes = 256 * 1024) {
   try {
     const size = fs.statSync(file).size;
-    const length = Math.min(size, 256 * 1024);
+    const length = Math.min(size, bytes);
     const buffer = Buffer.alloc(length);
     const fd = fs.openSync(file, "r");
     try {
@@ -598,15 +598,21 @@ const SECRET_SHAPE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20
 // through this; the condition itself runs without what its task was not given (conditionEnv).
 export function redactSecrets(text) {
   return String(text ?? "")
+    // A whole key block, and the end of one whose first lines were cut off before this text.
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/^(?:(?!-----BEGIN )[\s\S])*?-----END [A-Z ]*PRIVATE KEY-----/, "[redacted private key]")
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/g, "$1 [redacted]")
     .replace(SECRET_SHAPE, "[redacted]")
     .replace(/^([A-Za-z_][A-Za-z0-9_]*)=.*$/gm, (line, name) => (SECRET_NAME.test(name) ? `${name}=[redacted]` : line))
+    // A quoted value whole, spaces included: "NAME":"value", NAME: 'value', NAME="value".
+    .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)(["']?\s*[:=]\s*)(["'])((?:\\.|(?!\3)[^\\\n])*)\3/g, (pair, name, sep, quote, value) => (SECRET_NAME.test(name) && value !== "[redacted]" ? `${name}${sep}${quote}[redacted]${quote}` : pair))
     .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)(["']?\s*[:=]\s*["']?)([^\s"',;]+)/g, (pair, name, sep, value) => (SECRET_NAME.test(name) && value !== "[redacted]" ? `${name}${sep}[redacted]` : pair));
 }
 
-// The last lines of a condition's output, as a resume brief may quote them.
-const shownOutput = (log) => redactSecrets(tailLines(log, CONDITION_LINES));
+// The last lines of a condition's output, as a resume brief may quote them: up to the last MB of it
+// is redacted first, so that a secret that starts above the kept lines (the first line of a key
+// block, say) is still recognized, and only then cut to the last lines.
+const shownOutput = (log) => redactSecrets(tailLines(log, Infinity, 1024 * 1024)).split("\n").slice(-CONDITION_LINES).join("\n");
 
 // Run a parked attempt's wake condition once, in the folder `park-until` ran in, with the task's
 // own environment (conditionEnv). Its output goes to CONDITION_LOG in the attempt's folder `dir`.
@@ -777,6 +783,20 @@ export async function checkPark(dir, generation) {
   const file = path.join(dir, PARK_CHECK_FILE);
   const previous = readJson(file);
   const record = { at: new Date().toISOString(), generation };
+  // A task it started that ended long ago with no notice written (its finish watcher is gone):
+  // write that notice now, into this task's inbox, where it wakes the task below.
+  if (parked.children?.length) {
+    const late = lateNotices(run, task);
+    if (late.length) {
+      const start = await import("./commands/start.mjs");
+      for (const child of late) {
+        try {
+          sendFinishNotice(child.runDir, child.task, child.attempt, { start });
+        } catch {}
+      }
+      record.lateNotices = late.map((c) => `${path.basename(c.runDir)}/${c.task}`);
+    }
+  }
   const messages = readInbox(taskDir(run, id)).filter((m) => !m.read);
   let pr = null;
   const ref = babysit ? task.pr?.url || (task.pr?.number ? String(task.pr.number) : null) : null;

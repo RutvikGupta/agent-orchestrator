@@ -368,3 +368,68 @@ test('a babysitter keeps the ceiling it was started under when an uncapped proce
   assert.match(handed.decisions[1], /the inherited ceiling AGENT_ORCH_MAX_TIER=standard forbids claude complex/);
   assert.equal(readJson(f.taskFile(run, 'sit')).attempt, 2, 'no fix attempt ran above the ceiling');
 });
+
+// A finished standard-tier watch attempt that asked for a fix, recorded as a babysitter's; no finish
+// watcher ran for it, so the test runs that watcher by hand.
+async function seedFix(f, run, id) {
+  const task = await f.start(run, id, { config: { finalMessage: NEEDS_FIX }, flags: ['--tier', 'standard', '--force'] });
+  await f.finished(run, id);
+  writeJson(f.taskFile(run, id), { ...readJson(f.taskFile(run, id)), babysit: true, watchTier: 'standard', pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } });
+  return task;
+}
+// Run a seeded attempt's finish watcher by hand, with `env` added; resolves to its exit code.
+function runFinishWatcher(t, f, run, task, env = {}) {
+  const child = spawn(process.execPath, [finishNotice, run.dir, task.id, '1', String(task.pid)], { env: { ...f.env, ...env }, stdio: 'ignore' });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  return new Promise((resolve) => child.on('exit', resolve));
+}
+const relaysOf = (dir) => spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout.split('\n')
+  .filter((line) => line.includes('relay.mjs') && line.includes(`--out-dir ${dir}`)).map((line) => Number(line.trim().split(/\s+/)[0]));
+
+test('a stop that comes before the fix start claims the watch attempt keeps the fix from starting', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = await seedFix(f, run, 'sit');
+  // Nothing runs and nothing holds the task yet: the stop is still recorded.
+  const stop = await f.command(['stop', run.id, 'sit']);
+  assert.match(stop.stdout, /stopped sit: its watch attempt asked for a fix, which will not start/);
+  assert.ok(readJson(f.taskFile(run, 'sit')).stoppedAt);
+  // The finish watcher comes after it, on a machine with room: it starts no fix.
+  assert.equal(await runFinishWatcher(t, f, run, task), 0);
+  const record = readJson(f.taskFile(run, 'sit'));
+  assert.equal(record.attempt, 1, 'the fix started after the stop');
+  assert.equal(fs.existsSync(path.join(run.dir, 'tasks', 'sit', 'attempt-2')), false);
+  assert.equal((await f.json(['status', run.id])).tasks.find((x) => x.id === 'sit').state, 'stopped');
+});
+
+test('a fix start that fails after its relay started stops that relay before giving the claim back', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const task = await seedFix(f, run, 'sit');
+  // Saving the task fails once, right after the fix attempt's relay has started; that relay would
+  // otherwise hold (FAKE_RELAY_CONFIG) and run on, unrecorded.
+  const preload = path.join(f.root, 'save-fails.cjs');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const original = fs.renameSync;
+let fired = false;
+fs.renameSync = function (from, to, ...rest) {
+  if (!fired && String(to) === ${JSON.stringify(f.taskFile(run, 'sit'))}) {
+    fired = true;
+    throw Object.assign(new Error('EIO: i/o error, rename'), { code: 'EIO' });
+  }
+  return original.call(this, from, to, ...rest);
+};
+`);
+  const next = path.join(run.dir, 'tasks', 'sit', 'attempt-2');
+  const exit = runFinishWatcher(t, f, run, task, { FAKE_RELAY_CONFIG: JSON.stringify({ hold: true }), NODE_OPTIONS: `--require=${JSON.stringify(preload)}` });
+  assert.equal(await exit, 0);
+  // No relay runs for the next attempt, and the claim is given back with the error.
+  assert.deepEqual(relaysOf(next), [], 'the fix relay runs on, unrecorded');
+  assert.equal(fs.existsSync(next), false, 'the stopped relay\'s folder is left for the next start');
+  const claim = readJson(path.join(task.outDir, 'resume-1.json'));
+  assert.deepEqual([claim.released, claim.kind], [true, 'fix']);
+  assert.match(claim.error, /EIO/);
+  const row = (await f.json(['status', run.id])).tasks.find((x) => x.id === 'sit');
+  assert.deepEqual([row.state, row.attempt], ['needs-decision', 1]);
+  assert.match(row.decisions[1], /starting it failed after its relay \(pid \d+\) started, which was stopped: EIO/);
+});

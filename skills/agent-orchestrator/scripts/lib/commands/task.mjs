@@ -12,7 +12,7 @@ import { stopResume } from "../steer.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
-import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
+import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, pendingFix, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -215,7 +215,19 @@ function stopTask(run, task, g) {
     if (!left) {
       // Nothing of this attempt runs; a resume may have saved a newer one meanwhile.
       const latest = loadTask(run, id);
-      return latest && latest.attempt > (task.attempt || 0) ? stopTask(run, latest, g) : null;
+      if (latest && latest.attempt > (task.attempt || 0)) return stopTask(run, latest, g);
+      // A babysitter's watch attempt that asked for a fix, whose fix start holds no claim yet (it
+      // takes one a second or so after the attempt ends): the mark keeps the fix from starting. A
+      // fix that started in between is stopped too.
+      if (pendingFix(latest || task)) {
+        mark();
+        stopped();
+        const later = newer();
+        const failed = later ? terminate(later.pid) : null;
+        if (failed) throw failed;
+        return ended(`stopped ${shownName(task)}: its watch attempt asked for a fix, which will not start${later ? `; stopped attempt ${later.attempt}, which had just started (pid ${later.pid})` : ""}`);
+      }
+      return null;
     }
     if (!task.stoppedAt) mark();
     stopped();

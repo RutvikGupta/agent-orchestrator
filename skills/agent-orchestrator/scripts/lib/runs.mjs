@@ -534,9 +534,9 @@ export function isParked(run, task) {
   return result?.status === "completed" && parkedText(result.finalMessage) !== null && Boolean(parkBasis(run, task, result));
 }
 
-// How long a finished child's notice may take to reach its parent: its finish watcher checks every
-// second. Past this, a notice that was never written is taken as lost (its watcher is gone).
-const NOTICE_GRACE_MS = 2 * 60000;
+// How long a finished child's notice may take to be written: its finish watcher checks every second.
+// Past this, the parent's park watcher writes it instead (lateNotices; park.mjs, checkPark).
+export const NOTICE_GRACE_MS = 2 * 60000;
 
 // What can wake a task whose attempt `n` (default: its current one) ended parked, with that
 // attempt's result: { babysit: true } for a babysitter, which its pull request wakes; else
@@ -545,7 +545,7 @@ const NOTICE_GRACE_MS = 2 * 60000;
 // the task's intent to wait for it) whose ending the attempt had not taken in when it ended; else
 // null, and the attempt does not park. From the records alone, a child counts while it has no
 // result or is parked, and once it has ended until its finish notice is consumed: while the notice
-// is not written yet (NOTICE_GRACE_MS at most), while it is unread, and when it was read only after
+// is not written yet, however late it comes, while it is unread, and when it was read only after
 // this attempt ended. A child can end after its parent has decided to park but before the
 // parent's result is written: its unread notice is then the event that wakes the parent.
 export function parkBasis(run, task, result, n = task.attempt) {
@@ -572,12 +572,30 @@ export function parkBasis(run, task, result, n = task.attempt) {
       const m = inbox.find((x) => x.id === notice.message);
       pending = Boolean(m) && (!m.read || Date.parse(m.readAt) > ended);
     } else {
-      // Not written yet, or being written: a notice that went nowhere (skipped) wakes nothing.
-      pending = !notice?.skipped && Date.now() - (Date.parse(own.finishedAt) || 0) < NOTICE_GRACE_MS;
+      // Not written yet, or being written: the parent waits for it, and its park watcher writes it
+      // when it is late (lateNotices). A notice that went nowhere (skipped) wakes nothing.
+      pending = !notice?.skipped;
     }
     if (pending) children.push(`${child.run}/${child.task}`);
   }
   return children.length ? { children } : null;
+}
+
+// The finish notices of the tasks a parked task started that ended more than NOTICE_GRACE_MS ago
+// and have none written, not even claimed: their finish watchers are gone (after a reboot, say), so
+// nothing would wake the parent. [{ runDir, task, attempt }], for the parent's park watcher to send.
+export function lateNotices(run, task) {
+  const late = [];
+  for (const child of childrenOf(run, task.id)) {
+    const runDir = path.join(RUNS_DIR, child.run);
+    const record = fs.existsSync(path.join(runDir, "run.json")) ? loadTask({ dir: runDir }, child.task) : null;
+    if (!record?.attempt) continue;
+    const dir = path.join(runDir, "tasks", child.task, `attempt-${record.attempt}`);
+    const own = readJson(path.join(dir, "result.json"));
+    if (!own || fs.existsSync(path.join(dir, NOTICE_FILE))) continue;
+    if (Date.now() - (Date.parse(own.finishedAt) || Date.now()) > NOTICE_GRACE_MS) late.push({ runDir, task: child.task, attempt: record.attempt });
+  }
+  return late;
 }
 
 // The tasks a task started, once each: { run, task } from its children.jsonl.
@@ -625,6 +643,15 @@ function fixOf(task, result) {
     return { reason, refused: `no fix attempt started within ${FIX_GRACE_MS / 60000} minutes of the watch attempt's end; resume it by hand` };
   }
   return { reason, since: result.finishedAt || null };
+}
+
+// Whether a task's current attempt is a babysitter's watch attempt that asked for a fix whose fix
+// attempt has not started yet (nor been refused): `stop` marks it stopped, which keeps that fix
+// from starting (finish-notice.mjs, startFix), also before the fix start holds any claim.
+export function pendingFix(task) {
+  if (!task?.outDir) return false;
+  const fix = fixOf(task, readJson(path.join(task.outDir, "result.json")));
+  return Boolean(fix && !fix.refused);
 }
 
 // Resume claims (steer.mjs, resumeLock). Every way a task is resumed (a `start` by hand, a retry, a

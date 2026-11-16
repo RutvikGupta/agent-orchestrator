@@ -170,7 +170,8 @@ watch attempt below `complex` that says so.
   included.
 - **It holds the watch attempt while it waits.** When the machine has no room, the fix start tries
   again for up to 10 minutes. Meanwhile any other start of the task is refused, and `stop` or `close`
-  ends the wait with nothing started.
+  ends the wait with nothing started. A `stop` that comes before the fix start has begun keeps it
+  from starting too.
 - **When no fix starts**, the task shows as `needs-decision`, with the `NEEDS FIX:` text and why no
   fix started (`wait` exits 5; `result` prints it). This happens when the ceiling forbids `complex`,
   when the attempt that said `NEEDS FIX:` already ran at `complex`, and when no fix attempt has

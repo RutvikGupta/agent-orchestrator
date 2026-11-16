@@ -20,6 +20,7 @@ const attempt = (f, run, id, n) => eventually(() => {
   return task.attempt === n ? task : null;
 }, `${id}'s attempt ${n} did not start`, SLOW);
 const briefOf = (task) => fs.readFileSync(path.join(task.outDir, 'orch-brief.md'), 'utf8');
+const rowOf = async (f, run, id) => (await f.json(['status', run.id])).tasks.find((t) => t.id === id);
 const readQuiet = (file) => {
   try {
     return readJson(file);
@@ -184,6 +185,84 @@ test('a child that ends after its parent decided to park, before the parent\'s r
   const second = await attempt(f, run, 'lead', 2);
   await f.ready(second);
   assert.match(briefOf(second), /- A task you started has finished: its notice is among the messages below/);
+  f.release(second);
+  await f.finished(run, 'lead');
+});
+
+test('redactSecrets hides a quoted value whole, spaces included', () => {
+  const out = redactSecrets('{"DB_PASSWORD":"correct horse battery","user":"someone"}\nAPI_KEY: \'two words\'\nSECRET_TOKEN = "a b c" and more');
+  for (const gone of ['correct', 'horse', 'battery', 'two words', 'a b c']) assert.ok(!out.includes(gone), `${gone} left in:\n${out}`);
+  assert.match(out, /"DB_PASSWORD":"\[redacted\]","user":"someone"/);
+  assert.match(out, /API_KEY: '\[redacted\]'/);
+});
+
+test('a key block longer than the quoted lines is redacted whole, though its first line falls outside them', async (t) => {
+  const f = await fixture(t);
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: 'Done.' });
+  const run = await f.newRun();
+  const task = await f.start(run, 'keyed', { config: { hold: true, finalMessage: PARKED('the deploy') } });
+  await f.ready(task);
+  // 62 lines of key, then one more: the brief quotes the last 40.
+  const print = `console.log('-----BEGIN RSA PRIVATE KEY-----'); for (let i = 0; i < 60; i++) console.log('MIIEowIBAAKCAQEA' + i); console.log('-----END RSA PRIVATE KEY-----'); console.log('deployed')`;
+  await f.command(['park-until', '--', process.execPath, '-e', print], { env: inTask(run, 'keyed') });
+  f.release(task);
+  const second = await attempt(f, run, 'keyed', 2);
+  await f.ready(second);
+  const brief = briefOf(second);
+  assert.ok(!brief.includes('MIIEowIBAAKCAQEA'), 'the brief quotes part of a key');
+  assert.match(brief, / {4}\[redacted private key\]\n {4}deployed/);
+  f.release(second);
+  await f.finished(run, 'keyed');
+});
+
+test('the deadline is checked after a fast run that exits non-zero, whatever --every says', async (t) => {
+  const f = await fixture(t);
+  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: 'Done.' });
+  const run = await f.newRun();
+  const task = await f.start(run, 'quick', { config: { hold: true, finalMessage: PARKED('a job') } });
+  await f.ready(task);
+  await f.command(['park-until', '--every', '24h', '--', process.execPath, '-e', 'process.exit(1)'], { env: inTask(run, 'quick') });
+  recordEdit(task, { for: 3000, until: new Date(Date.now() + 3000).toISOString() });
+  f.release(task);
+  const second = await attempt(f, run, 'quick', 2);
+  await f.ready(second);
+  assert.match(briefOf(second), /was not met within the longest wait you gave it \(3s, until .*\): its last run \(.*\) exited 1\./);
+  f.release(second);
+  await f.finished(run, 'quick');
+});
+
+test('a parent keeps waiting for a child\'s late notice, and its watcher writes a notice that never comes', async (t) => {
+  const f = await fixture(t);
+  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: 'Integrated the child.' });
+  const run = await f.newRun();
+  const lead = await f.start(run, 'lead', { config: { hold: true, finalMessage: PARKED('my child task') } });
+  await f.ready(lead);
+  // A child whose finish watcher is gone: started with none, then recorded as the lead's.
+  const nested = await f.newRun('nested');
+  const child = await f.start(nested, 'child', { config: { hold: true } });
+  await f.ready(child);
+  const by = { run: run.id, task: 'lead' };
+  writeJson(f.taskFile(nested, 'child'), { ...readJson(f.taskFile(nested, 'child')), startedBy: by, attemptStartedBy: { 1: by } });
+  fs.appendFileSync(path.join(run.dir, 'tasks', 'lead', 'children.jsonl'), `${JSON.stringify({ run: nested.id, task: 'child', attempt: 1, at: new Date().toISOString() })}\n`);
+  f.release(lead);
+  await eventually(async () => (await rowOf(f, run, 'lead'))?.phase === 'parked', 'the lead did not park', SLOW);
+  // The child ends, and no notice is written for it; as if that were ten minutes ago.
+  f.release(child);
+  await f.finished(nested, 'child');
+  const result = path.join(child.outDir, 'result.json');
+  writeJson(result, { ...readJson(result), finishedAt: new Date(Date.now() - 10 * 60000).toISOString() });
+  // The lead never ends completed: its watcher writes the late notice, which wakes it.
+  const second = await eventually(async () => {
+    const row = await rowOf(f, run, 'lead');
+    assert.notEqual(row.state, 'completed', 'the lead ended completed while its child\'s notice was late');
+    const record = readJson(f.taskFile(run, 'lead'));
+    return record.attempt === 2 ? record : null;
+  }, 'the late notice did not wake the lead', SLOW);
+  await f.ready(second);
+  assert.match(briefOf(second), /- A task you started has finished: its notice is among the messages below/);
+  assert.ok(readJson(path.join(child.outDir, 'parent-notice.json')).sentAt);
   f.release(second);
   await f.finished(run, 'lead');
 });

@@ -28,7 +28,7 @@ import { firstLine } from "./format.mjs";
 import { coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, spawnParkWatcher, tierModel, withCeiling } from "./park.mjs";
 import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, ceilingFor, strongerThan, tierText } from "./policy.mjs";
 import { resumeLock } from "./steer.mjs";
-import { NOTICE_FILE, attemptAgent, describe, endedByStop, isBabysitter, loadTask, needsFixSignal, parkBasis, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
+import { NOTICE_FILE, attemptAgent, describe, endedByStop, isBabysitter, loadTask, needsFixSignal, parkBasis, parkedSignal, processStarted, relayAlive, resumeFile, taskDir, waitForExit } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -264,6 +264,36 @@ function startFix(run, task, n, own, reason, start) {
     claim.release(why);
     return { refused: why, overtaken: true };
   };
+  // A start that failed after its relay started (the save of the task failed, say) leaves that relay
+  // named in the claim. Released, the claim would hide it from adoption (steer.mjs, adoptResume), and
+  // another start would run a second relay for the session. So the relay is stopped first, and the
+  // claim released only once it has exited; one that does not exit keeps the claim, which the next
+  // `start`, `stop` or interrupt adopts once this process has ended.
+  const failed = (message) => {
+    const relay = claim.record?.relay;
+    if (!relay?.pid) {
+      claim.release(message);
+      return { refused: `starting it failed: ${message}` };
+    }
+    const outDir = claim.record?.task?.outDir || null;
+    if (relayAlive(relay.pid, null, outDir)) {
+      try {
+        process.kill(-relay.pid, "SIGTERM");
+      } catch {
+        try {
+          process.kill(relay.pid, "SIGTERM");
+        } catch {}
+      }
+      if (!waitForExit(relay.pid, 20000, outDir)) {
+        return { refused: `starting it failed after its relay (pid ${relay.pid}) started: ${message}; that relay did not exit, so the claim stays for the next start to adopt it` };
+      }
+    }
+    // Its folder is the next attempt's, which the next start writes again (as `start` removes the
+    // folder of a relay that did not start).
+    if (outDir && path.basename(outDir) === `attempt-${n + 1}`) fs.rmSync(outDir, { recursive: true, force: true });
+    claim.release(message);
+    return { refused: `starting it failed after its relay (pid ${relay.pid}) started, which was stopped: ${message}` };
+  };
   fs.writeFileSync(brief, handoff.fresh ? handoffBrief(handoff, body, { from: "watch" }) : body);
   const at = new Date().toISOString();
   const until = Date.now() + FIX_ADMISSION_MS;
@@ -285,10 +315,7 @@ function startFix(run, task, n, own, reason, start) {
       });
       return { started };
     } catch (error) {
-      if (!(error instanceof start.StartRefused)) {
-        claim.release(error.message);
-        return { refused: `starting it failed: ${error.message}` };
-      }
+      if (!(error instanceof start.StartRefused)) return failed(error.message);
       // The machine has no room now (memory, or its agent limit): try again for a while, still
       // holding the claim, and looking each second for a stop, a close or a newer attempt.
       if (error.code === 7 && Date.now() < until) {
