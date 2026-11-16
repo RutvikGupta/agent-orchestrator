@@ -192,6 +192,8 @@ test('vendor status overrides main and native rows, keeps telemetry, and caches 
   const s = await setup(t);
   s.set('claude', [
     {sessionId:'claude-main', kind:'interactive', status:'busy'},
+    // A second process resumed the same session in another terminal and sits idle: the busy one wins.
+    {sessionId:'claude-main', kind:'interactive', status:'idle'},
     {sessionId:'running', kind:'background', state:'blocked', status:'waiting', waitingFor:'permission prompt'},
     {sessionId:'stopped', state:'working', status:'idle'},
     {sessionId:'completed', state:'stopped'},

@@ -84,6 +84,9 @@ function jsonCommandAsync(bin, args, done) {
   });
 }
 
+// How active a session state is, for choosing between duplicate rows of one session.
+const ACTIVITY = { "needs-decision": 5, running: 4, failed: 3, stopped: 2, completed: 1, idle: 0 };
+
 export function claudeSessions() {
   return cached("claude", (bin) => ({ cmd: bin, args: ["agents", "--json", "--all"] }), (sessions) => {
     if (!Array.isArray(sessions)) return null;
@@ -97,6 +100,10 @@ export function claudeSessions() {
         : ({ working: "running", done: "completed", failed: "failed", stopped: "stopped" })[session.state]
           || ({ busy: "running", idle: "idle" })[session.status];
       if (!state) continue;
+      // Two Claude processes can run one session (a second `claude --resume` in another terminal
+      // or tmux). The listing has a row for each; the session is as active as its most active one.
+      const previous = result.get(session.sessionId);
+      if (previous && ACTIVITY[previous.state] >= ACTIVITY[state]) continue;
       result.set(session.sessionId, { state, waiting, waitingFor: session.waitingFor || null,
         cwd: session.cwd || null, model: session.model || null });
     }

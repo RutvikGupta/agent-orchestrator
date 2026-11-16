@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A session that two Claude processes run (a second `claude --resume` in another terminal or tmux)
+  shows the state of its most active process on the dashboard, not of whichever one Claude Code
+  lists last: an idle duplicate made a working session read idle.
 - A pull-request babysitter watches on Claude `standard` (Sonnet) by default. A watch attempt that
   ends with `NEEDS FIX: PR #<n> ...` resumes the same session at once on `complex` (Opus) to fix,
   push, reply and park; the next wake watches on `standard` again (`references/babysit.md`).
