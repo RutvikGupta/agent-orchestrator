@@ -2,15 +2,15 @@
 name: agent-orchestrator
 description: >-
   Orchestrate coding work across Claude Code (`claude`) and OpenAI Codex (`codex`) on this machine:
-  plan the work as data, brief each task from a template, run up to 8 tasks at once as background
-  agent sessions (each writer in its own prepared git worktree), review and accept every result,
-  integrate it in dependency order, and verify the whole request. Chooses Claude or Codex and the
-  model tier per task by assessing it, never by remaining usage, and records why. Opens a live
-  dashboard of every launched session, and babysits every pull request it opens until it lands.
-  Use when the user asks to orchestrate, fan out, parallelize, or coordinate work across agents,
-  run background agents, split a job between Claude and Codex, get a second opinion or a
-  cross-model review, or watch what launched sessions are doing. Once invoked, delegate by default.
-  For one task sent to one named agent, the claude-delegate or codex-delegate skill alone is enough.
+  plan the work as data, run up to 8 tasks at once as background agent sessions, review and accept
+  every result, integrate it in dependency order, and verify the whole request. Chooses Claude or
+  Codex and the lightest model tier per task by assessing it and comparing their measured records,
+  never by remaining usage, and records why. Opens a live dashboard and babysits every pull request
+  it opens until it lands. Use when the user asks to orchestrate, fan out, parallelize, or
+  coordinate work across agents, run background agents, split a job between Claude and Codex, get a
+  second opinion or a cross-model review, or watch what launched sessions are doing. Once invoked,
+  delegate by default. For one task sent to one named agent, the claude-delegate or codex-delegate
+  skill alone is enough.
 license: MIT
 compatibility: >-
   Node 18+, git, and the claude-delegate and/or codex-delegate skills installed under
@@ -33,23 +33,27 @@ investigations, test runs, reviews, research). These rules hold at every level, 
 
 - **Work inline only** on a few-minute edit, or on what is tied to this conversation, such as
   answering the user or a decision that needs what only you know.
-- **Break your task down and delegate the pieces** (independent parts, slow side work, test runs,
-  lookups, reviews): start an agent for each, then review and integrate what each hands back.
-- **Keep the parallel limit filled** while independent work exists (`references/plan.md`).
-- **Keep your own context lean:** an agent reads the large codebase or long log; you read its report.
-- **Split only independent parts,** never what one agent can do coherently in one pass. Give each
-  agent all its piece needs: goal, done criteria, scope, your own brief's constraints, and gates.
-- **Delegate work, never waiting.** Run a command whose output you only need to check as a command
-  task, with no model (`$ORCH start <run> <task> --agent command --why "..." -- <argv>`): an agent
-  that waits on one spends tokens watching, and hides any agent it starts. Before your first, read
-  `references/agents.md` ("Command tasks").
+- **Break your task down and delegate the pieces:** start an agent for each, then review and integrate
+  what each hands back. Run independent work in parallel up to the limit (`references/plan.md`).
+- **Keep your own context lean.** A `light` or `standard` task fetches, reads and summarizes the large
+  codebase, log, diff or query output: you read its short result and evidence paths, never an agent's
+  transcript, because every later call re-reads what you read. Keep the run state (requirements,
+  decisions, task ids, next steps) in a file.
+- **Before each start, pass the delegation test:** know what the task owns, what context it can leave
+  out, and how its result will be checked. Never start an agent only because a slot is free: published
+  coding-team results show 3 to 7 times the tokens of one agent. Keep tightly coupled work with one
+  owner, and give each agent its goal, done criteria, scope, your brief's constraints and gates.
+- **Delegate work, never waiting.** Work that only runs a command and waits needs no model: run it as a
+  command task (`$ORCH start <run> <task> --agent command --why "..." -- <argv>`; first read
+  `references/agents.md`, "Command tasks"), because an agent that waits spends tokens watching and hides
+  any agent it starts. A task that waits for something outside it parks (`$ORCH park-until -- <command>`,
+  last line `PARKED: waits for <what>`; `references/messages.md`) and never sleeps or polls for minutes.
 - **Start every agent through `$ORCH start` or `dispatch`,** never your host's own sub-agent tool
   (Codex's `spawn_agent`, Claude Code's Agent tool) or a script that runs `claude -p` or `codex exec`
   itself: only then does it show on the board, run your chosen tier, and report back. A script that
   must start its own agent runs as a command task (`references/agents.md`, "Model ceilings").
-- **Size each piece on its own** ("Choose the agent and model"), never by the tier of its parent.
-- **Pass the habit on:** tell each agent whose work has independent parts or slow side work to
-  delegate them the same way. The "Delegating further" note that `start` appends says how.
+- **Size each piece on its own** ("Choose the agent and model"), never by its parent's tier, and tell
+  each agent with independent parts or slow side work to delegate them (`start` appends how).
 
 **Inside a delegated agent** (`AGENT_ORCH_DEPTH` is set), also:
 
@@ -57,9 +61,8 @@ investigations, test runs, reviews, research). These rules hold at every level, 
   coupled edit yourself too. (A main session may hand a whole task to one agent.)
 - **Never hand your task to a stronger model,** directly or through a script; say so with `$ORCH
   ask` or `NEEDS DECISION:`. `start` refuses a tier above your task's `rank` in `policy.json`, on
-  either agent, except for a babysitter, whose tier is fixed. (A main session starts any tier.)
+  either agent, except for a babysitter (step 8). (A main session starts any tier.)
 - Review, integrate and close your agents' work before you finish, and cover it in your report.
-  You are notified when an agent finishes.
 
 ## Setup
 
@@ -85,7 +88,6 @@ An agent is usable only when `agents` shows `READY` as `yes` (`references/agents
   the session that maintains it; do not edit the skill (`references/troubleshooting.md`).
 - **Recover first.** After a restart, a context compaction, or any doubt about what runs, run
   `$ORCH recover [<run>] [--all]` and act on it before you dispatch anything.
-- **Tests, builds and containers:** read `references/memory.md` before you run or brief one.
 
 ## 1. Plan
 
@@ -96,42 +98,34 @@ without asking unless the plan changes the scope, the user asked to approve it, 
 
 ### Choose the agent and model
 
-Choose each task's agent and tier by assessing it, and re-assess after each failure and plan change.
-No default decides, and never prefer an agent because it is the CLI you run in.
+Assess each task to choose its agent and tier, and again after each failure and plan change. Never
+prefer an agent because it is the CLI you run in, and none is the default.
 
 - **The user's choice wins:** use the agent the user named for a task, and treat a split they
   proposed as a starting point (say where you change it). The model policy still applies.
-- `start` refuses a new task without `--tier` and `--why`: one line naming the deciding factor (the
-  plan's `why`), such as `"light: runs the tests and reports failures; nothing to judge"`. `status`,
-  `result` and the dashboard show it. A command task takes `--why` but no tier.
-- `policy.json` fixes each tier's model and effort, and `start` enforces them. Never pass `--model`.
-  Only `frontier` takes `--effort` (`medium` or `high`). A babysitter always runs Claude `complex`.
-
-| Agent | `light` | `standard` | `strong` | `complex` | `frontier` |
-| --- | --- | --- | --- | --- | --- |
-| Claude | `claude-haiku-5-5`, `xhigh` | `claude-sonnet-5-5`, `xhigh` | | `claude-opus-5-5`, `xhigh` | `claude-fable-5-2`, `high` (never above) |
-| Codex | `gpt-6-luna`, `medium` | `gpt-6.1-terra`, `medium` | `gpt-6.1-sol`, `medium` | `gpt-6-astra`, `high` | |
-
-Check what the agent must be able to do first: the relays limit commands without edits, the live
-web, diffs, and the network (`references/agents.md`, "What each agent can do"). Then
-take the lightest tier that does the task as well as the top one, never a bigger model for comfort:
+- **Between agents, compare records.** When the task's abilities (`references/agents.md`, "What each
+  agent can do") and the user's choice leave both possible, compare them at the task's tier in `$ORCH
+  stats` ("By agent, tier and task type"): the better first-try acceptance on this kind of task wins;
+  within about 10 points, the fewer input tokens per accepted task; with under 5 finished tasks of
+  that kind for either, alternate, so both build a record. Implementation is ordinary work for Codex.
+- **Start low.** Take the lightest tier that does the task well, never a bigger model for comfort; when
+  unsure between two, the lower one if the gates or review would catch a failure that is cheap to redo,
+  and a tier above `standard` only where the table requires it.
+- `start` refuses a new task without `--tier` and `--why`: one line on the deciding factor, such as
+  `"light: runs the tests; nothing to judge"`; for `complex` or `frontier` the table's criterion, and
+  between agents the numbers that decided it. A command task takes `--why` but no tier.
+- `policy.json` fixes each tier's model and effort (`start` enforces them; never pass `--model`). Only
+  `frontier` takes `--effort` (`medium` or `high`). Models, costs and each agent's record:
+  `references/tiers.md`.
 
 | The task | Tier |
 | --- | --- |
-| Nothing to judge: run tests or gates and report, lookups, inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` |
-| Small judgment calls: a change or test from a clear spec in 1 to 5 files, lint or type fixes, docs and config edits, reviews of small diffs | `standard` |
-| Bounded, but needing more judgment: live web research, reviews of medium diffs, debugging in a known area | Codex `strong`, or Claude `standard` |
-| **Any** of: several modules or more than about 5 files, or an interface other code depends on; an unsettled approach (open design choices, or a bug's cause unknown); costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; a large or high-risk review, or babysitting a pull request | `complex` |
-| Difficult and long: long-horizon or unattended multi-step work, a large refactor or migration, hard root-cause analysis across systems, a long audit or review. Never bounded or routine work. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for long but less hard work) |
-| A review, verification or second opinion of another agent's work | The other agent, `standard` or above |
+| Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` |
+| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard`; Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area) |
+| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` |
+| Design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed `complex` attempt. Never routine or mechanical work, small reviews or waiting. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for less hard work) |
+| A review, verification or second opinion of another agent's work | The other agent: `standard` for a small diff, `complex` for a large or risky one, `frontier` when the review itself is difficult |
 
-- **Measured results:** `agents`, `stats` and the `--tier` refusal show how each tier did here
-  (`references/tiers.md`). When nothing favors Codex, choose Claude.
-- **When unsure between two tiers,** take the lower one if the gates or review would catch a failure
-  that is cheap to redo, and the higher one only when a mistake would be costly or subtle.
-- **Quality guard.** Every task has gates (step 3) and a review (step 6). A follow-up keeps its tier
-  until counted failures move it up a tier, and then to the other agent (`references/review.md`,
-  "Escalate a tier"). After two failures on a similar task, start the next one on the other agent.
 
 ### Usage limits
 
@@ -236,11 +230,17 @@ finishes, read `references/babysit.md`.**
 
 ```bash
 $ORCH brief <run> babysit-<pr> --type babysit
-$ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits PR #<n>; Claude costs less than Codex" --brief <brief> --cd <checkout>
+$ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits PR #<n>; watching needs no strong model" --brief <brief> --cd <checkout>
 ```
 
-To keep a pull request with the Claude task that implemented it, start that task's next attempt as the
-babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>` (`references/babysit.md`).
+A babysitter runs `standard` by default (`--tier light` or `complex`; `frontier` is refused). Work that
+needs a code change, a reply that explains or defends code, or a conflicting rebase ends its attempt
+with a last line `NEEDS FIX: PR #<n> <one line>`; the orchestrator then resumes the same session at
+once on `complex` to fix, push, reply and park, and the next wake resumes at the watch tier.
+
+Whichever agent implemented a pull request, a babysitter takes it: the Claude implementer's own session,
+or a new one that starts from a Codex implementer's handoff note (`references/babysit.md`, "Keep it
+with its implementer").
 
 ## 9. Close what you no longer need, clean up, and report
 
@@ -283,7 +283,7 @@ babysitter in its own session, then `$ORCH rename <run> <task> --to babysit-<pr>
 | File | Read it |
 | --- | --- |
 | `references/plan.md` | Before you write or change a plan (steps 1 and 2) |
-| `references/tiers.md` | Before you choose Claude `frontier`, or when cost or a tier's measured results bear on a choice |
+| `references/tiers.md` | Before you choose Claude `frontier` or between the agents, or when cost, the models or a tier's measured results bear on a choice |
 | `references/agents.md` | Before you brief or start an agent whose abilities, modes, flags or model ceiling matter, and before your first command task |
 | `references/worktrees.md` | Before you start a write task by hand, when a gate fails in a worktree or a task's folder is gone, and before `gc` or `cleanup`; a worktree is refused while free disk is under `AGENT_ORCH_MIN_FREE_DISK` (15GB), after an automatic collection, so remove any worktree you make by hand as soon as you are done |
 | `references/briefing.md` | Before you write your first brief in a session (step 3) |
