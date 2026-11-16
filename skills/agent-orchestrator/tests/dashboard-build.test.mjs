@@ -415,7 +415,7 @@ test('a stored message answers 200 even when its rebuild throws', async (t) => {
   b.f.release(b.task);
 });
 
-test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement starts only after it exits, also after successive timeouts', async (t) => {
+test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement starts only after it exits, also after successive timeouts, each with twice the limit', async (t) => {
   const b = await setup(t, { receiver: true, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s' }, prepare: async (b) => b.touch('ignoreterm') });
   const initial = await b.state();
   const [first] = b.workers();
@@ -451,6 +451,8 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
   const count = b.workers().length;
   for (let i = 1; i <= 2; i++) {
     await eventually(() => b.builds().at(-1).pid === b.workers().at(-1).pid && !b.builds().at(-1).ended && b.pending('overdueBuild').length === 1, `hung build ${i} did not start`);
+    // Each build in a row that timed out doubles the next one's limit, so a slow machine still gets a board.
+    assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000 * 2 ** (i - 1)]);
     await b.control('fire overdueBuild');
     await eventually(() => b.workers().length === count + i, `replacement ${i} did not start`);
   }

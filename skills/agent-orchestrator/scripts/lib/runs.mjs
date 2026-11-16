@@ -152,11 +152,14 @@ export function processSnapshot() {
   return readTable();
 }
 
+// A process's command line from the shared snapshot: null when the process is not in the table,
+// undefined when `ps` could not read the table (it times out on a heavily loaded machine).
 function processCommand(pid) {
   const before = processTable.at;
   let rows = processSnapshot();
   if (rows && !rows.has(pid) && processTable.at === before) rows = readTable();
-  return rows?.get(pid)?.command ?? null;
+  if (!rows) return undefined;
+  return rows.get(pid)?.command ?? null;
 }
 
 // Whether a relay's command line is the one that writes to attempt folder `outDir`: every relay
@@ -180,6 +183,9 @@ export function relayAlive(pid, startedAt = null, outDir = null) {
   // it, the child still shows the parent's command until it execs, so a process that exists
   // within a few seconds of the recorded start counts as the relay.
   const command = processCommand(pid);
+  // `ps` failed while the PID exists: trust the PID, as before start times were checked. Calling a
+  // live relay dead would report it aborted and let `start` launch a second agent for the task.
+  if (command === undefined) return true;
   if (command?.includes("relay.mjs")) return outDir ? relayOf(command, outDir) : true;
   const age = startedAt ? Date.now() - Date.parse(startedAt) : Infinity;
   return command !== null && age >= 0 && age < 10000;

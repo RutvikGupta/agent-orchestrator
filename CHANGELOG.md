@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A live relay no longer reads as dead when `ps` cannot list the process table (it times out on a
+  heavily loaded machine): `status` and `wait` reported such a task aborted, and `start` could launch a
+  second agent for it.
+- The dashboard doubles a state build's time limit after each build in a row that timed out, up to the
+  first build's limit (5m), so a slow machine still gets a fresh board instead of a stale one forever.
 - On macOS, relays, the finish and park watchers, the interrupt's resume helper and
   `dashboard --detach` start through a one-off launchd job, so quitting the terminal application
   no longer ends them. A direct start is the fallback, and `AGENT_ORCH_LAUNCHD=off` turns this off.
