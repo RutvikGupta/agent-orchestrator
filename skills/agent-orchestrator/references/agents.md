@@ -34,12 +34,17 @@ These are hard limits of the relays on this machine:
 | `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged |
 | Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged |
 | `--sandbox` | Write-task file tools stay in the working directory. Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access |
-| `--babysit` | May publish to its pull request (`references/babysit.md`, "Start it") | Not supported: babysitting runs on Claude |
+| `--babysit` | May publish to its pull request; runs `standard` unless `--tier light` or `complex` (`references/babysit.md`, "Start it") | Not supported: a babysitter is a Claude task, and a Codex implementer's pull request goes to one |
 | Unavailable in the child | MCP servers, skill invocation (it reads a skill's `SKILL.md` instead, as briefs ask for testing skills), slash commands, subagents, web tools | MCP servers it is not configured with; with `--sandbox` or `--read-only`, the network |
 | Login | `claude auth status` / `claude auth login` | `codex login status` / `codex login` |
 
 ## Practical notes
 
+- **Implementation is ordinary work for Codex.** Its write mode has the network and the user's tools
+  (`danger-full-access`), so it builds, tests and pushes as a Claude task does. Its pull request goes to
+  a Sonnet babysitter, which starts from the implementer's handoff note (`references/babysit.md`,
+  "Keep it with its implementer"). Which agent implements a task is chosen by the agents' records
+  (`SKILL.md`, "Choose the agent and model").
 - **Sandboxing a task:** outside the sandbox, a task reaches SSH, the keychain and tool state as the
   user does. `--sandbox` confines a task again; `--offline` confines it and blocks the network.
   In Claude's sandbox the relay's own sandbox settings replace any in the user's or the project's
@@ -158,7 +163,7 @@ an interrupt's resume helper, and `dashboard --detach`.
 
 `start <run> <task> --agent command --why "<reason>" [--max-tier TIER] [--done "<marker>"]
 [--timeout DUR] [--cd DIR] -- <command> [args...]` runs a command as a task, with no model and no
-brief.
+brief. Work that only runs a command and waits belongs here, not in an agent's session.
 `scripts/command-relay.mjs` runs it in place of a delegate relay.
 
 - **How it runs.** The words after `--` run as an argument vector, with no shell. Put variables in
@@ -323,6 +328,12 @@ so that one stays listed after it exits. Two things record them:
     delegated. A window whose reset time has passed is shown as reset.
 - Every task is a full agent session on the user's subscription or API key. Give every write task
   a `--timeout` (`1h` to `2h` for implementation, `20m` for a review).
+- **Waiting needs no model.** A task that waits for something outside it parks (`SKILL.md`, "Delegate
+  well"): `$ORCH park-until [--every 2m] [--for 6h] [--why TEXT] -- <command>`. A watcher with no
+  model checks the command, and resumes the same session when it exits 0, when `--for` passes, when a
+  message arrives, or when one of the task's child tasks finishes (`references/messages.md`; a
+  babysitter's park: `references/babysit.md`). A task never sleeps, naps or polls in its session for
+  more than a few minutes: `nap` refuses once its naps in one attempt pass 10 minutes.
 - Claude's `--max-budget-usd` and `--max-turns` cap a runaway session. Codex has no budget flag; use
   `--timeout`, and the tier that the task's complexity calls for.
 - A resumed Codex thread re-reads its whole history on every turn, so long rework loops on Codex

@@ -33,7 +33,9 @@ claims to check.
 
 ## Check it
 
-- Read the whole diff against the brief, including untracked files.
+- Read the whole diff against the brief, including untracked files. When the diff or a log is large,
+  have a `light` or `standard` task read and summarize it: every later call of yours re-reads what you
+  read.
 - Reject scope creep: undo a scope violation, or keep it only for a reason you can state.
 - Check any edits to existing tests before you trust a green gate.
 - Check each reported check against its evidence. `result` and `accept` match each check's `cmd` to
@@ -92,9 +94,10 @@ with `result <run> review-<task-id>`, and verify each defect it reports before y
 - **Tier.** The diff sets it. `standard` is for at most 150 changed lines (added plus removed) in at
   most 3 files, none of them a module that other files import. Anything more is `complex`. Only
   relative imports of JavaScript and TypeScript files and the imports of Python files are read: a
-  file in another language never counts as imported. `--tier` overrides the choice. `review` takes
-  no `--why`: it records the size and the other-model reason as the reviewer's `--why`, and adds
-  `--tier X given` when you overrode the choice.
+  file in another language never counts as imported. `--tier` overrides the choice, for example
+  `frontier` when the review itself is difficult. `review` takes no `--why`: it records the size and
+  the other-model reason as the reviewer's `--why`, and adds `--tier X given` when you overrode the
+  choice.
 - **A delegated agent** cannot start a reviewer stronger than its own task (`SKILL.md`, "Delegate
   well"). When the diff's tier is above it, `review` refuses and says so: pass a lower `--tier`.
 - **A large diff.** The brief holds about 200 KB of diff, in whole files, in git's order. Each file
@@ -175,14 +178,16 @@ A follow-up is any later attempt of a task: a rework, a resume, or a new attempt
   existed needs `--tier`.
 - It may omit `--why` when it keeps its agent and tier, or when `start` escalates it (the reason is
   then the earlier one, plus the escalation).
-- **Two counted failures** at the task's tier: `start` moves the next attempt one tier up, in the
-  task's last session when it has one, and prints a `note:` that says so.
+- **Two counted failures** at the task's tier: `start` moves the next attempt one tier up (`standard`
+  to `complex`, `complex` to `frontier`), in the task's last session when it has one, and prints a
+  `note:` that says so.
 - **Two more failures** at that higher tier, or two at the top tier: `start` refuses. It names the
   other agent and the tier to start there: the same rank, or the closest lower one. Start it with a
   fresh brief and a new `--why`.
 - **Overrides.** `--tier` picks the tier itself, with no automatic move. A changed `--agent` starts
   a new count for that agent, and needs `--tier` and `--why`. `--no-escalate` keeps the tier and
-  skips the refusal. A babysitter never escalates: its tier is fixed.
+  skips the refusal. A babysitter never escalates: it watches on `standard` and fixes on `complex`
+  (`SKILL.md`, step 8).
 - **What counts as a failure:** an attempt that ended `failed`, `timeout` or `aborted`, and an
   attempt whose review round is `changes` or `reject`, whether `review` or `verdict` recorded it.
   Each attempt counts once.
@@ -198,6 +203,10 @@ A follow-up is any later attempt of a task: a rework, a resume, or a new attempt
   "Delegate well").
 - To start over in a fresh session (an attempt that went far off track), pass `--tier` yourself,
   no `--session`, and a corrected full brief. An automatic escalation continues the last session.
+- A large session whose cache is cold (about an hour idle), or that an escalation moves to another
+  model, rewrites its whole context when it resumes. Start it fresh with a short brief instead
+  (`references/tiers.md`, "Where the cost goes").
+- After two failures on a similar task, start the next one on the other agent.
 
 ## Accept
 

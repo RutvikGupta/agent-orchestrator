@@ -22,8 +22,17 @@ the user's choices, and when to ask before dispatching.
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts. `dispatch` waits for them, `start` refuses without them, and `integrate` takes tasks in this order |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out), and your one-line assessment |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out and runs `standard`), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
 | `brief` | The brief file, relative to the run directory |
+
+## Tiers in the plan
+
+- Give each task the lightest tier that does it well (`SKILL.md`, "Choose the agent and model").
+- Plan a step that fetches or summarizes large logs, diffs or query output as a `light` or
+  `standard` task of its own, so that you and the later tasks read its summary, not the raw output.
+- Waiting is no plan entry. A command task runs with no model, and `start --unplanned` starts it
+  (`references/dispatch.md`, "Plan checks"). A task that waits for something outside it parks
+  (`references/messages.md`). A pull-request babysitter is a `babysit` task (`SKILL.md`, step 8).
 
 ## Disjoint files are not enough
 
@@ -42,7 +51,8 @@ starts.
 
 ## Parallel limit
 
-- At most 8 tasks run at once in a run by default. `AGENT_ORCH_MAX_PARALLEL` overrides it.
+- At most 8 tasks run at once in a run by default. `AGENT_ORCH_MAX_PARALLEL` overrides it. It is a
+  ceiling, not a target: start a task only after the delegation test (`SKILL.md`, "Delegate well").
 - Runs that delegated agents start allow fewer: 6 at the second level, 4 at the third, and 2 at the
   fourth.
 - Agents below the fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
