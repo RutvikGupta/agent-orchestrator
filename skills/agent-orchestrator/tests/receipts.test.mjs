@@ -163,6 +163,7 @@ test('each row lists its attempts newest first, and the dashboard rereads an att
   assert.equal(row.attempts.reduce((sum, a) => sum + a.tokensOut, 0), row.tokensOut);
   assert.deepEqual({ ...row.acceptance, at: undefined }, {
     verdict: 'accepted', attempt: 2, at: undefined, by: 'coordinator', commit: await f.git(['rev-parse', 'HEAD']), note: 'gates pass',
+    checkoutGone: false, unverifiedReason: null,
   });
 
   // A task not started yet has no attempts.

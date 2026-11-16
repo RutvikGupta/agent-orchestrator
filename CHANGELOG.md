@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- A pull-request babysitter watches on Claude `standard` (Sonnet) by default. A watch attempt that
+  ends with `NEEDS FIX: PR #<n> ...` resumes the same session at once on `complex` (Opus) to fix,
+  push, reply and park; the next wake watches on `standard` again (`references/babysit.md`).
+- Any Claude or Codex task that waits for something outside it parks: `orch.mjs park-until
+  [--every] [--for] -- <command>`, then a final line `PARKED: waits for <what>`. A watcher with no
+  model resumes the same session when the command exits 0, the deadline passes, a message arrives,
+  or one of its child tasks finishes. `nap` refuses once a task's naps pass 10 minutes in one attempt.
+- Claude agents run with `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from `AGENT_ORCH_CLAUDE_COMPACT_WINDOW`
+  (default `300k`), so their context stops growing to about 1M tokens. A resume after the prompt
+  cache expired, or onto another model, starts a fresh session from the handoff note when the last
+  call was above 60k tokens.
+- The skill's model ladder sends work to the lightest tier that does it well: `frontier` only for
+  design and difficult work, and waiting to command tasks or parked tasks. Claude is no longer the
+  default implementer: the choice between Claude and Codex compares their measured records, which
+  `stats` now shows by agent, tier and task type. A Codex implementer hands its pull request to a
+  Claude babysitter through a handoff note.
+- `accept --unverified "<reason>"` accepts a task whose working folder was removed, and `close`
+  takes a completed task out of "awaiting review".
 - A live relay no longer reads as dead when `ps` cannot list the process table (it times out on a
   heavily loaded machine): `status` and `wait` reported such a task aborted, and `start` could launch a
   second agent for it.
