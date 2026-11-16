@@ -488,6 +488,13 @@ function prepareStart(args, extra = {}) {
       ...(implementer?.fresh ? { handoffs: { ...(prev.handoffs || {}), [attempt]: handoffRecord(implementer, prev.attempt, new Date().toISOString(), { from: "implementer" }) } } : {}),
       ...(implementer ? { handoffChecks: { ...(prev.handoffChecks || {}), [attempt]: handoffCheck(implementer) } } : {}),
       ...(compact ? { compactWindows: { ...(prev.compactWindows || {}), [attempt]: compact.record } } : {}),
+      // The ceiling this attempt starts under (AGENT_ORCH_MAX_TIER, AGENT_ORCH_MAX_EFFORT): whoever
+      // later starts its park watcher restores it (park.mjs, withCeiling), so no resume or fix
+      // attempt of the task goes above it, even when an uncapped process such as the dashboard
+      // revives the watcher.
+      inheritedCeiling: process.env.AGENT_ORCH_MAX_TIER || process.env.AGENT_ORCH_MAX_EFFORT
+        ? { maxTier: process.env.AGENT_ORCH_MAX_TIER || null, maxEffort: process.env.AGENT_ORCH_MAX_EFFORT || null }
+        : null,
       attemptReason,
       attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
       title: args.title ?? prev.title ?? null,

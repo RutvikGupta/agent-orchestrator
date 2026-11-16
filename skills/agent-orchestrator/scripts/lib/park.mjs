@@ -57,8 +57,8 @@ import { startDetached } from "./detach.mjs";
 import { durationText, shortText } from "./format.mjs";
 import { INBOX_FILE, fromAgent, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
-import { BABYSIT_WATCH_TIER, readPolicy } from "./policy.mjs";
-import { PARK_CHECK_FILE, PARK_UNTIL_FILE, commandText, exists, isBabysitter, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
+import { BABYSIT_WATCH_TIER, lowerCeiling, lowerEffort, readPolicy } from "./policy.mjs";
+import { PARK_CHECK_FILE, PARK_UNTIL_FILE, attemptAgent, commandText, exists, isBabysitter, isParked, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { aheadOfPr, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
@@ -259,7 +259,31 @@ export function parkEnv(task, base = process.env) {
   if (parent?.run && parent?.task) Object.assign(env, { AGENT_ORCH_RUN: parent.run, AGENT_ORCH_TASK: parent.task });
   const depth = Number.isInteger(task.startDepth) ? task.startDepth : parent ? 1 : 0;
   if (depth > 0) env.AGENT_ORCH_DEPTH = String(depth);
-  return env;
+  return withCeiling(task, env);
+}
+
+// `env` with the model ceiling the task's attempt was started under (`start` records it as
+// inheritedCeiling), so that whoever starts its watcher, the dashboard included, starts nothing
+// above it: a fix attempt or a resume. A ceiling `env` holds already stays when it is lower.
+export function withCeiling(task, env) {
+  const kept = task?.inheritedCeiling;
+  if (!kept?.maxTier && !kept?.maxEffort) return env;
+  const out = { ...env };
+  if (kept.maxTier) {
+    try {
+      out.AGENT_ORCH_MAX_TIER = lowerCeiling(kept.maxTier, env.AGENT_ORCH_MAX_TIER || null) || kept.maxTier;
+    } catch {
+      out.AGENT_ORCH_MAX_TIER = kept.maxTier; // an unreadable policy: keep the recorded ceiling
+    }
+  }
+  if (kept.maxEffort) {
+    try {
+      out.AGENT_ORCH_MAX_EFFORT = env.AGENT_ORCH_MAX_EFFORT ? lowerEffort(env.AGENT_ORCH_MAX_EFFORT, kept.maxEffort) : kept.maxEffort;
+    } catch {
+      out.AGENT_ORCH_MAX_EFFORT = kept.maxEffort;
+    }
+  }
+  return out;
 }
 
 // Start a watcher for the task's current attempt, which is parked, unless one is alive or starting.
@@ -278,10 +302,12 @@ export function spawnParkWatcher(run, task, { by = "park", table = null } = {}) 
     throw error;
   }
   try {
-    // A wake condition is checked every --every; a babysitter's pull request every interval.
+    // Every interval (AGENT_ORCH_PARK_INTERVAL) the check reads the pull request and the wake
+    // condition's deadline; it runs the condition itself only every --every (checkPark), and more
+    // often when --every is shorter than the interval.
     const condition = readJson(path.join(dir, PARK_UNTIL_FILE));
     const every = Number(condition?.every) > 0 ? Math.max(1, Math.round(condition.every / 1000)) : null;
-    const seconds = every && !isBabysitter(task) ? every : Math.min(parkInterval(), every || Infinity);
+    const seconds = Math.min(parkInterval(), every || Infinity);
     const inbox = path.join(taskDir(run, task.id), INBOX_FILE);
     // Detached, and on macOS started through launchd, outside the terminal application (detach.mjs).
     const { pid } = startDetached({
@@ -543,31 +569,68 @@ function tailLines(file, n) {
   }
 }
 
+// The variables the Codex relay's --clean-env passes to Codex, besides each --keep-env name
+// (codex-delegate's relay.mjs, cleanEnvironment). A task started with it never saw the rest.
+const CLEAN_ENV = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "CODEX_HOME",
+  "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "COMSPEC"];
+
+// The environment a wake condition runs with: the task's own, as its agent's shell had it. That is
+// the watcher's (the environment of whoever started the attempt) with the user's extra agent
+// environment and the PATH the agent had; for a Codex task started with --clean-env, only what
+// that option keeps. The task's AGENT_ORCH_* identity is added, so that `orch.mjs` commands in the
+// condition act as the task.
+export function conditionEnv(run, task, condition, base = process.env, agentEnv = {}) {
+  const full = { ...base, ...agentEnv, ...(condition.path ? { PATH: condition.path } : {}) };
+  const argv = Array.isArray(task.argv) ? task.argv : [];
+  const clean = attemptAgent(task, task.attempt) === "codex" && argv.includes("--clean-env");
+  const keep = clean ? [...CLEAN_ENV, ...argv.flatMap((a, i) => (a === "--keep-env" && argv[i + 1] ? [argv[i + 1]] : []))] : null;
+  const env = keep ? Object.fromEntries(keep.filter((key) => full[key] !== undefined).map((key) => [key, full[key]])) : full;
+  return { ...env, AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: task.id, AGENT_ORCH_DEPTH: String((Number.isInteger(task.startDepth) ? task.startDepth : 0) + 1) };
+}
+
+// Names of variables whose values are secrets, and shapes of tokens that give themselves away.
+const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|COOKIE|SESSION_?KEY|AUTHORIZATION)/i;
+const SECRET_SHAPE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abeprs]-[A-Za-z0-9-]{10,}|sk-(?:ant-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,})\b/g;
+
+// Text from a command's output with obvious secrets replaced by [redacted]: the value of a variable
+// whose name says it holds one (NAME=value lines, and NAME: value or "NAME":"value" pairs), tokens
+// of known shapes, bearer credentials and private key blocks. What a resume brief quotes passes
+// through this; the condition itself runs without what its task was not given (conditionEnv).
+export function redactSecrets(text) {
+  return String(text ?? "")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/g, "$1 [redacted]")
+    .replace(SECRET_SHAPE, "[redacted]")
+    .replace(/^([A-Za-z_][A-Za-z0-9_]*)=.*$/gm, (line, name) => (SECRET_NAME.test(name) ? `${name}=[redacted]` : line))
+    .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)(["']?\s*[:=]\s*["']?)([^\s"',;]+)/g, (pair, name, sep, value) => (SECRET_NAME.test(name) && value !== "[redacted]" ? `${name}${sep}[redacted]` : pair));
+}
+
+// The last lines of a condition's output, as a resume brief may quote them.
+const shownOutput = (log) => redactSecrets(tailLines(log, CONDITION_LINES));
+
 // Run a parked attempt's wake condition once, in the folder `park-until` ran in, with the task's
-// environment: the watcher's (the environment of whoever started the attempt), the user's extra
-// agent environment, the PATH the agent had, and the task's AGENT_ORCH_* variables, as in the
-// agent's own shell. Its output goes to CONDITION_LOG in the attempt's folder `dir`. Returns
-// { ranAt, code, signal, timedOut, output }, or { ranAt, error } when it cannot run at all (its
-// folder is gone, its program is missing), which wakes the task rather than trying forever.
+// own environment (conditionEnv). Its output goes to CONDITION_LOG in the attempt's folder `dir`.
+// One run takes at most its interval (conditionTimeout), and never past the condition's deadline.
+// Returns { ranAt, code, signal, timedOut, timeoutMs, output }, with the output's secrets redacted,
+// or { ranAt, error } when it cannot run at all (its folder is gone, its program is missing), which
+// wakes the task rather than trying forever.
 export function runCondition(run, task, dir, condition, agentEnv = {}) {
   const ranAt = new Date().toISOString();
   const [program, ...args] = condition.command;
   const cwd = condition.cwd || task.cd || run.repo;
   if (!cwd || !fs.existsSync(cwd)) return { ranAt, error: `its folder ${cwd} is gone` };
   const log = path.join(dir, CONDITION_LOG);
-  const env = {
-    ...process.env, ...agentEnv, ...(condition.path ? { PATH: condition.path } : {}),
-    AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: task.id, AGENT_ORCH_DEPTH: String((Number.isInteger(task.startDepth) ? task.startDepth : 0) + 1),
-  };
+  const left = Date.parse(condition.until) - Date.now();
+  const timeoutMs = Math.max(1000, Math.min(conditionTimeout(condition.every), Number.isFinite(left) ? left : Infinity));
   let r;
   const fd = fs.openSync(log, "w");
   try {
-    r = spawnSync(program, args, { cwd, env, stdio: ["ignore", fd, fd], timeout: conditionTimeout(condition.every), killSignal: "SIGKILL" });
+    r = spawnSync(program, args, { cwd, env: conditionEnv(run, task, condition, process.env, agentEnv), stdio: ["ignore", fd, fd], timeout: timeoutMs, killSignal: "SIGKILL" });
   } finally {
     fs.closeSync(fd);
   }
-  const output = tailLines(log, CONDITION_LINES);
-  if (r.error?.code === "ETIMEDOUT") return { ranAt, code: null, signal: r.signal || null, timedOut: true, output };
+  const output = shownOutput(log);
+  if (r.error?.code === "ETIMEDOUT") return { ranAt, code: null, signal: r.signal || null, timedOut: true, timeoutMs, output };
   if (r.error) return { ranAt, error: r.error.code === "ENOENT" ? `\`${program}\` was not found` : r.error.message, output };
   return { ranAt, code: r.status, signal: r.signal || null, output };
 }
@@ -576,14 +639,15 @@ export function runCondition(run, task, dir, condition, agentEnv = {}) {
 function runText(c) {
   if (!c.ranAt) return "it has not run yet";
   if (c.error) return `it could not run (${c.ranAt}): ${c.error}`;
-  if (c.timedOut) return `its last run (${c.ranAt}) was stopped after ${durationText(conditionTimeout(c.every))}, the most one run may take`;
+  if (c.timedOut) return `its last run (${c.ranAt}) was stopped after ${durationText(c.timeoutMs || conditionTimeout(c.every))}, the most it could take`;
   return `its last run (${c.ranAt}) exited ${c.code ?? `on signal ${c.signal}`}`;
 }
 
 // The resume brief's lines on the wake condition (`wake`: the record the watcher kept, with `met`,
 // `expired` or `error` saying what woke the task).
 function conditionLines(wake, quote) {
-  const cmd = `\`${shortText(commandText(wake.command), 200)}\``;
+  // The command line too may carry a secret, such as a header with a token.
+  const cmd = `\`${shortText(redactSecrets(commandText(wake.command)), 200)}\``;
   const head = wake.met
     ? `- Your wake condition ${cmd} exited 0 (${wake.ranAt}).`
     : wake.error
@@ -739,33 +803,40 @@ export async function checkPark(dir, generation) {
   }
   // The wake condition: run it when its interval has passed since its last run (at once on the
   // first check), and wake the task when it exits 0, cannot run, or its longest wait has passed.
+  // Every check looks at the deadline, whatever the interval. A run that exited 0, or could not
+  // run, stays the event (latched in the check's record) until a resume delivers it: a resume the
+  // machine refuses now is tried again at the next check, without running the condition again.
   let wake = null;
   const conditionEvents = [];
   const condition = readJson(path.join(dir, PARK_UNTIL_FILE));
   if (Array.isArray(condition?.command) && condition.command.length) {
     const last = previous?.condition || null;
+    const latched = last?.met || last?.error ? last : null;
+    const expired = Date.now() >= Date.parse(condition.until);
     const due = !last?.ranAt || Date.now() - Date.parse(last.ranAt) >= condition.every;
     let ran = null;
-    if (due) {
+    if (!latched && !expired && due) {
       const { readAgentEnv } = await import("./commands/start.mjs");
       ran = runCondition(run, task, dir, condition, readAgentEnv());
     }
     const latest = ran || last || {};
     // The output of a run before this check is in its log; the check's record keeps none of it.
-    const output = ran ? ran.output : latest.ranAt ? tailLines(path.join(dir, CONDITION_LOG), CONDITION_LINES) : "";
+    const output = ran ? ran.output : latest.ranAt ? shownOutput(path.join(dir, CONDITION_LOG)) : "";
     wake = { command: condition.command, every: condition.every, for: condition.for, until: condition.until, why: condition.why || null, ...latest, output };
-    if (ran?.error) {
+    if (latched) {
+      conditionEvents.push(latched.met ? "the wake condition exited 0" : `the wake condition could not run: ${latched.error}`);
+    } else if (ran?.error) {
       wake.error = ran.error;
       conditionEvents.push(`the wake condition could not run: ${ran.error}`);
     } else if (ran && ran.code === 0) {
       wake.met = true;
       conditionEvents.push("the wake condition exited 0");
-    } else if (Date.now() >= Date.parse(condition.until)) {
+    } else if (expired || Date.now() >= Date.parse(condition.until)) {
       wake.expired = true;
       conditionEvents.push("the wake condition's longest wait has passed");
     }
     const { output: shown, ...kept } = latest;
-    record.condition = kept;
+    record.condition = { ...kept, ...(wake.met ? { met: true } : {}), ...(wake.error ? { error: wake.error } : {}) };
   }
   record.events = [...(pr?.attention || []), ...conditionEvents, ...messages.map((m) => `message ${m.id}`)];
   if (!record.events.length) {
@@ -801,7 +872,7 @@ export async function checkPark(dir, generation) {
     // read-only) and its tier, as an interrupt does; a babysitter's start sets its own.
     const keep = babysit ? {} : { relayFrom: Array.isArray(task.argv) ? task.argv : [], "no-escalate": true, ...(task.readOnly ? { "read-only": true } : {}) };
     ({ task: started } = startTask({
-      _: [run.dir, id], agent: task.agent, brief, briefData: data, passthrough: fresh ? [] : ["--session", session], parkClaim: claim,
+      _: [run.dir, id], agent: task.agent, brief, briefData: data, passthrough: fresh ? [] : [...resumeSandbox(task), "--session", session], parkClaim: claim,
       fromHandoff: fresh, ...keep,
       attemptFiles: messages.length ? { [PARK_MESSAGES_FILE]: messagesText(messages) } : {},
       // The record that this attempt began a fresh session from a handoff, and at what context size.
@@ -821,6 +892,16 @@ export async function checkPark(dir, generation) {
   markRead(taskDir(run, id), messages.map((m) => m.id), { attempt: started.attempt });
   writeJson(file, { ...record, resumed: started.attempt, ...(fresh ? { freshSession: true, contextTokens: handoff.tokens, limitKind: handoff.cold ? "cold" : "warm" } : {}) });
   return DONE;
+}
+
+// What a resumed Codex session must be told about its sandbox. The Codex relay refuses
+// --network-access on a resumed run unless the sandbox is named (Codex does not carry it over), and
+// a sandboxed Codex task with the network on starts in the relay's default sandbox, workspace-write,
+// without naming it. A task that named its sandbox, or runs in a lane, keeps that.
+export function resumeSandbox(task) {
+  const argv = Array.isArray(task.argv) ? task.argv : [];
+  if (attemptAgent(task, task.attempt) !== "codex" || !argv.includes("--network-access")) return [];
+  return argv.some((a) => a === "--sandbox" || a.startsWith("--sandbox=") || a === "--read-only" || a === "--lane" || a.startsWith("--lane=")) ? [] : ["--sandbox", "workspace-write"];
 }
 
 // The model of an agent's tier, from the policy, or null when it cannot be read.

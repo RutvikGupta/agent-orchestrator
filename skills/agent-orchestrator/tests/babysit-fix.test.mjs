@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
-// Pure: what a final message says about a fix, and about parking.
+// Pure: what a final message says about a fix, and about parking; the ceiling a watcher restores.
 import { needsFixSignal, parkedSignal } from '../scripts/lib/runs.mjs';
-import { coldResume } from '../scripts/lib/park.mjs';
+import { coldResume, withCeiling } from '../scripts/lib/park.mjs';
+
+const finishNotice = new URL('../scripts/lib/finish-notice.mjs', import.meta.url).pathname;
 
 const SLOW = 20_000; // a watcher's check is a fresh Node process, slow on a loaded machine
 const report = (outcome) => `\`\`\`orch-result\n{"outcome":"${outcome}","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n\`\`\``;
@@ -284,4 +287,84 @@ test('a Codex babysitter is refused with the real reason, before the pull reques
   assert.match(refused.stderr, /A Codex implementer hands its pull request to a Claude babysitter through its handoff note \(references\/babysit\.md\)/);
   assert.doesNotMatch(refused.stderr, /costs less/);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
+});
+
+test('a fix attempt waiting for room holds the watch attempt: no other start gets in, and stop or close end it with nothing started', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  // A finished standard-tier watch attempt that asked for a fix, recorded as a babysitter's.
+  const seed = async (id) => {
+    const task = await f.start(run, id, { config: { finalMessage: NEEDS_FIX }, flags: ['--tier', 'standard', '--force'] });
+    await f.finished(run, id);
+    writeJson(f.taskFile(run, id), { ...readJson(f.taskFile(run, id)), babysit: true, watchTier: 'standard', pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } });
+    return task;
+  };
+  // Its finish watcher, run by hand on a machine with no memory to spare: the fix start is refused
+  // (exit 7), and the watcher keeps trying.
+  const watch = (task) => {
+    const child = spawn(process.execPath, [finishNotice, run.dir, task.id, '1', String(task.pid)], {
+      env: { ...f.env, AGENT_ORCH_MIN_FREE_AGENT: '1.5GB', AGENT_ORCH_HEAVY_FREE_BYTES: '1' }, stdio: 'ignore',
+    });
+    const exited = new Promise((resolve) => child.on('exit', resolve));
+    t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    return { child, exited };
+  };
+  const claimOf = (task) => readJson(path.join(task.outDir, 'resume-1.json'));
+  const waiting = (task) => eventually(() => fs.existsSync(path.join(task.outDir, 'resume-1.json')) && claimOf(task).kind === 'fix', 'the fix start did not claim the watch attempt', SLOW);
+  const ended = (w) => Promise.race([w.exited, new Promise((resolve) => setTimeout(() => resolve('still running'), SLOW))]);
+
+  const stopped = await seed('stopped');
+  const first = watch(stopped);
+  await waiting(stopped);
+  // While it waits, a start by hand is refused: it cannot slip in a newer attempt.
+  const hand = await f.command(['start', run.id, 'stopped', '--agent', 'claude', '--brief', f.brief('hand'), '--', '--session', 'fixture-claude'], { code: 1 });
+  assert.match(hand.stderr, /is being resumed right now \(by `fix`\)/);
+  const stop = await f.command(['stop', run.id, 'stopped']);
+  assert.match(stop.stdout, /stopped stopped while `fix` was resuming it; it starts no new attempt/);
+  assert.notEqual(await ended(first), 'still running', 'the finish watcher kept trying after the stop');
+  assert.equal(readJson(f.taskFile(run, 'stopped')).attempt, 1);
+  assert.match(claimOf(stopped).error, /the task was stopped meanwhile/);
+  assert.equal((await f.json(['status', run.id])).tasks.find((x) => x.id === 'stopped').state, 'stopped');
+
+  const closed = await seed('closed');
+  const second = watch(closed);
+  await waiting(closed);
+  await f.command(['close', run.id, 'closed']);
+  assert.notEqual(await ended(second), 'still running', 'the finish watcher kept trying after the close');
+  const record = readJson(f.taskFile(run, 'closed'));
+  assert.deepEqual([record.attempt, Boolean(record.closedAt)], [1, true]);
+  assert.match(claimOf(closed).error, /the task was closed meanwhile/);
+});
+
+test('a babysitter keeps the ceiling it was started under when an uncapped process revives its watcher', async (t) => {
+  // The watcher's environment restores the recorded ceiling, the lower one when both have one.
+  const task = { inheritedCeiling: { maxTier: 'standard', maxEffort: null } };
+  assert.equal(withCeiling(task, {}).AGENT_ORCH_MAX_TIER, 'standard');
+  assert.equal(withCeiling(task, { AGENT_ORCH_MAX_TIER: 'complex' }).AGENT_ORCH_MAX_TIER, 'standard');
+  assert.equal(withCeiling(task, { AGENT_ORCH_MAX_TIER: 'light' }).AGENT_ORCH_MAX_TIER, 'light');
+  assert.deepEqual(withCeiling({}, { A: '1' }), { A: '1' });
+
+  const f = await fixture(t);
+  await github(f);
+  // Its wake ends with NEEDS FIX, which the ceiling must keep from running complex.
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ finalMessage: NEEDS_FIX });
+  const run = await f.newRun();
+  await babysit(f, run, 'sit', { finalMessage: PARKED }, { env: { AGENT_ORCH_MAX_TIER: 'standard' } });
+  const row = await parkedRow(f, run, 'sit', 1);
+  assert.deepEqual(readJson(f.taskFile(run, 'sit')).inheritedCeiling, { maxTier: 'standard', maxEffort: null });
+  // The watcher dies; a `status` with no ceiling (as the dashboard) starts the next one.
+  process.kill(-row.parked.watcherPid, 'SIGTERM');
+  await eventually(async () => (await rowOf(f, run, 'sit')).parked?.watcher !== 'alive', 'the watcher did not stop', SLOW);
+  await f.command(['status', run.id]);
+  const revived = await parkedRow(f, run, 'sit', 1);
+  const environ = spawnSync('ps', ['-E', '-ww', '-o', 'command=', '-p', String(revived.parked.watcherPid)], { encoding: 'utf8' }).stdout;
+  if (environ.includes('AGENT_ORCH_HOME=')) assert.match(environ, /AGENT_ORCH_MAX_TIER=standard\b/);
+  await f.command(['send', run.id, 'sit', 'A reviewer asked for a rename.']);
+  await attempt(f, run, 'sit', 2);
+  const handed = await eventually(async () => {
+    const r = await rowOf(f, run, 'sit');
+    return r?.state === 'needs-decision' ? r : null;
+  }, 'the NEEDS FIX was not handed back', SLOW);
+  assert.match(handed.decisions[1], /the inherited ceiling AGENT_ORCH_MAX_TIER=standard forbids claude complex/);
+  assert.equal(readJson(f.taskFile(run, 'sit')).attempt, 2, 'no fix attempt ran above the ceiling');
 });

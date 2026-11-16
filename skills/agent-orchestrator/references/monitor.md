@@ -105,14 +105,17 @@ more than a few minutes.
     `orch-result` outcome `parked`.
 - **Who parks.** A babysitter, as before. And any Claude or Codex task whose attempt ends with
   `PARKED:`, when either it recorded a wake condition in that attempt, or a task it started (with
-  `start`, in any attempt) was still running when the attempt ended. A `PARKED:` with neither does
-  not park: the task ends `completed`, and `result` prints a line `not parked: ...` that says why.
-  Command tasks never park.
+  `start`, in any attempt) had not ended for it when the attempt ended: it still ran or was parked,
+  or its finish notice was not read yet. A child that ends just before the parent's result is
+  written so still wakes the parent. A `PARKED:` with neither does not park: the task ends
+  `completed`, and `result` prints a line `not parked: ...` that says why. Command tasks never park.
 - **What the watcher does.** Every `--every` it runs the condition command in the folder
-  `park-until` ran in, with the task's environment: the starter's environment, the user's
-  `agent-env.json`, the agent's `PATH`, and the task's `AGENT_ORCH_*` variables. One run may take its
-  interval, at least 10 seconds and at most 10 minutes; a run cut off counts as not met. The output
-  goes to `park-condition.log` in the attempt's folder.
+  `park-until` ran in, with the task's own environment: the starter's environment, the user's
+  `agent-env.json`, the agent's `PATH`, and the task's `AGENT_ORCH_*` variables; for a Codex task
+  started with `--clean-env`, only what that option and its `--keep-env` names keep. One run may take
+  its interval, at least 10 seconds and at most 10 minutes, and never past `--for`; a run cut off
+  counts as not met. The deadline is checked every minute (`AGENT_ORCH_PARK_INTERVAL`), whatever
+  `--every` says. The output goes to `park-condition.log` in the attempt's folder.
 - **What wakes the task.** The watcher resumes the same session, at the same tier and with the same
   relay options, when:
   - the command exits 0;
@@ -121,9 +124,12 @@ more than a few minutes.
   - a task it started finishes (its finish notice is a message).
 
   A command that cannot run (a missing program, a folder that is gone) wakes the task with the error
-  instead of trying forever. The resume brief says which of these happened, gives the command's exit
-  code and its last 40 lines of output when they matter, and says not to run the condition again to
-  check.
+  instead of trying forever. A run that exited 0 or could not run stays the event until a resume
+  delivers it, also when the machine has no room for the resume at first. The resume brief says
+  which of these happened, gives the command's exit code and its last 40 lines of output when they
+  matter, with obvious secrets replaced by `[redacted]`, and says not to run the condition again to
+  check. A sandboxed Codex task with the network on resumes with its sandbox named
+  (`--sandbox workspace-write`), which the Codex relay needs to resume it.
 - **How it shows.** As for a parked babysitter: `status` and the dashboard show the task as
   `parked`, with what it waits for. `wait` treats it as running. It takes no parallel slot and keeps
   its checkout. `stop` and `close` end the watcher. `status`, `start`, `wait`, `dispatch` and the

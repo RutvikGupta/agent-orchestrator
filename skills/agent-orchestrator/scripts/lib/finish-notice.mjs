@@ -25,8 +25,9 @@ import { decisionsIn, fixBrief } from "./briefs.mjs";
 import { CLI_PATH, RUNS_DIR } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { firstLine } from "./format.mjs";
-import { coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, spawnParkWatcher, tierModel } from "./park.mjs";
+import { coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, spawnParkWatcher, tierModel, withCeiling } from "./park.mjs";
 import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, ceilingFor, strongerThan, tierText } from "./policy.mjs";
+import { resumeLock } from "./steer.mjs";
 import { NOTICE_FILE, attemptAgent, describe, endedByStop, isBabysitter, loadTask, needsFixSignal, parkBasis, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
@@ -211,7 +212,14 @@ const quoted = (message) => String(message || "").split(/^[\t ]*```orch-result[\
 // note and a session above the cold handoff limit the fix attempt starts a fresh session from the
 // babysitter's brief, the note and the fix brief instead (park.mjs, handoffOf). Returns { started }
 // with the saved task, or { refused } with why none started: the ceiling forbids the fix tier, the
-// watch attempt ran at it already, or the start failed. `start` is commands/start.mjs.
+// watch attempt ran at it already, the task was stopped, closed or resumed another way, or the
+// start failed. `start` is commands/start.mjs.
+//
+// The start claims the watch attempt (steer.mjs, resumeLock) before it writes anything, and holds
+// that claim across every try while the machine has no room: a `stop` or `close` meanwhile finds
+// the claim (stopResume), marks the task and waits for it, and any other start of the task is
+// refused. Between tries it gives the claim back at once, starting nothing, when the task was
+// stopped or closed since it claimed, or a newer attempt exists.
 function startFix(run, task, n, own, reason, start) {
   if (!start) return { refused: "the fix attempt can only be started by the attempt's finish watcher" };
   const watchTier = task.watchTier || BABYSIT_WATCH_TIER;
@@ -220,7 +228,10 @@ function startFix(run, task, n, own, reason, start) {
   if (!strongerThan(fixTier, { agent: "claude", tier: ranTier })) {
     return { refused: `attempt ${n} already ran at the ${ranTier} tier, which a fix attempt (${BABYSIT_FIX_TIER}) does not exceed` };
   }
-  const cap = process.env.AGENT_ORCH_MAX_TIER;
+  // The ceiling of this process, and the one the task was started under, whoever revived its
+  // watcher (park.mjs, withCeiling); the start below runs under it too.
+  const env = withCeiling(task, process.env);
+  const cap = env.AGENT_ORCH_MAX_TIER;
   if (cap !== undefined) {
     try {
       if (strongerThan(fixTier, { agent: "claude", tier: ceilingFor(cap).tier })) return { refused: `the inherited ceiling AGENT_ORCH_MAX_TIER=${cap} forbids ${tierText("claude", BABYSIT_FIX_TIER)}, which a fix attempt runs` };
@@ -228,6 +239,7 @@ function startFix(run, task, n, own, reason, start) {
       return { refused: error.message };
     }
   }
+  for (const key of ["AGENT_ORCH_MAX_TIER", "AGENT_ORCH_MAX_EFFORT"]) if (env[key] !== undefined) process.env[key] = env[key];
   const dir = path.join(taskDir(run, task.id), `attempt-${n}`);
   const model = tierModel("claude", BABYSIT_FIX_TIER);
   const { cold, why } = coldResume(own.finishedAt, task.model, model);
@@ -236,17 +248,35 @@ function startFix(run, task, n, own, reason, start) {
   if (!session && !handoff.fresh) return { refused: "the watch attempt's result has no session id to resume" };
   const brief = path.join(dir, "fix-brief.md");
   const body = fixBrief({ reason, watchTier, fixTier: BABYSIT_FIX_TIER, model: model || BABYSIT_FIX_TIER, handoffFile: handoff.file });
+  const claim = resumeLock(run, task, "fix");
+  if (!claim) return { refused: `attempt ${n}'s folder is gone` };
+  // Another start, an interrupt or a retry resumed the task first: nothing is left to decide.
+  if (claim.refused) return { refused: claim.refused, overtaken: true };
+  // Why the fix must not start any more, or null: the task changed since the claim.
+  const overtaken = () => {
+    const latest = loadTask(run, task.id);
+    if (!latest || latest.attempt !== n) return `the task moved on to attempt ${latest?.attempt ?? "?"} meanwhile`;
+    if (latest.closedAt && latest.closedAt !== claim.since?.closedAt) return "the task was closed meanwhile";
+    if (latest.stoppedAt && latest.stoppedAt !== claim.since?.stoppedAt) return "the task was stopped meanwhile";
+    return null;
+  };
+  const giveUp = (why) => {
+    claim.release(why);
+    return { refused: why, overtaken: true };
+  };
   fs.writeFileSync(brief, handoff.fresh ? handoffBrief(handoff, body, { from: "watch" }) : body);
   const at = new Date().toISOString();
   const until = Date.now() + FIX_ADMISSION_MS;
   for (;;) {
+    const why = overtaken();
+    if (why) return giveUp(why);
     try {
       const { task: started } = start.startTask({
         _: [run.dir, task.id], agent: "claude", tier: BABYSIT_FIX_TIER, brief,
         briefData: `## The watch attempt's message\n\n${quoted(own.finalMessage)}`,
         passthrough: handoff.fresh ? [] : ["--session", session], fromHandoff: handoff.fresh,
         // The watch attempt held its place in the run's parallel limit; a fix keeps its tier.
-        force: true, "no-escalate": true,
+        force: true, "no-escalate": true, parkClaim: claim,
       }, {
         attemptReason: "fix",
         fixes: { ...(task.fixes || {}), [n + 1]: { fromAttempt: n, reason, at } },
@@ -255,12 +285,21 @@ function startFix(run, task, n, own, reason, start) {
       });
       return { started };
     } catch (error) {
-      if (!(error instanceof start.StartRefused)) return { refused: `starting it failed: ${error.message}` };
-      // The machine has no room now (memory, or its agent limit): try again for a while.
+      if (!(error instanceof start.StartRefused)) {
+        claim.release(error.message);
+        return { refused: `starting it failed: ${error.message}` };
+      }
+      // The machine has no room now (memory, or its agent limit): try again for a while, still
+      // holding the claim, and looking each second for a stop, a close or a newer attempt.
       if (error.code === 7 && Date.now() < until) {
-        spawnSync("sleep", ["5"]);
+        for (let i = 0; i < 5; i++) {
+          const later = overtaken();
+          if (later) return giveUp(later);
+          spawnSync("sleep", ["1"]);
+        }
         continue;
       }
+      claim.release(error.message);
       return { refused: error.message };
     }
   }
@@ -310,6 +349,11 @@ export function sendFinishNotice(runDir, id, attempt, { pid = null, started = nu
       const fix = startFix(run, task, attempt, own, fixReason, start);
       if (fix.started) {
         Object.assign(record, { fix: { attempt: fix.started.attempt, reason: fixReason }, skipped: `the babysitter needs a fix: its fix attempt ${fix.started.attempt} runs at the ${fix.started.tier} tier in the same session` });
+      } else if (fix.overtaken) {
+        // Stopped, closed or resumed another way: no decision is left to hand back.
+        record.fixAbandoned = fix.refused;
+        writeJson(claim, record);
+        fixRefused = true;
       } else {
         // Recorded at once, so that the row below reads as the decision it now is (runs.mjs, fixOf).
         record.fixRefused = fix.refused;

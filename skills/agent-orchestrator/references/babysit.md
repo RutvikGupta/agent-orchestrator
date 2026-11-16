@@ -165,7 +165,12 @@ watch attempt below `complex` that says so.
   current note and a last call above that limit, it starts fresh from the brief, the note and the
   `NEEDS FIX:` text. Without a current note it keeps the session.
 - **The start is the orchestrator's policy**, so the caller's own tier does not block it. An
-  inherited ceiling (`AGENT_ORCH_MAX_TIER`) still applies.
+  inherited ceiling (`AGENT_ORCH_MAX_TIER`) still applies: the task records the ceiling each
+  attempt starts under, and its watcher keeps it whoever starts that watcher, the dashboard
+  included.
+- **It holds the watch attempt while it waits.** When the machine has no room, the fix start tries
+  again for up to 10 minutes. Meanwhile any other start of the task is refused, and `stop` or `close`
+  ends the wait with nothing started.
 - **When no fix starts**, the task shows as `needs-decision`, with the `NEEDS FIX:` text and why no
   fix started (`wait` exits 5; `result` prints it). This happens when the ceiling forbids `complex`,
   when the attempt that said `NEEDS FIX:` already ran at `complex`, and when no fix attempt has

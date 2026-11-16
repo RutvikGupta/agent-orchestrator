@@ -6,7 +6,7 @@ import path from "node:path";
 import { CLI_PATH, DEPTH, QUIET_AFTER_MS, RUNS_DIR, TASK_ID } from "./config.mjs";
 import { asksDecision, decisionsIn } from "./briefs.mjs";
 import { failureHistory } from "./escalation.mjs";
-import { inboxFields } from "./inbox.mjs";
+import { inboxFields, readInbox } from "./inbox.mjs";
 import { attemptReasonOf, isClosedPreparation, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
@@ -350,7 +350,8 @@ export const isBabysitter = (task) => Boolean(task?.babysit || task?.plan?.type 
 // end, and one that came before the stop (a command task's relay that died and left processes that
 // `stop` ended) is too. `result` is the attempt's result.json, or null.
 export function endedByStop(task, result) {
-  const parked = result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
+  // A babysitter's watch attempt that asked for a fix waits for its fix attempt, as a park does.
+  const parked = result?.status === "completed" && Boolean(parkedSignal(result.finalMessage) || (isBabysitter(task) && needsFixSignal(result.finalMessage)));
   return stopEnded(task?.stoppedAt, result && { status: result.status, finishedAt: result.finishedAt, parked });
 }
 
@@ -533,25 +534,48 @@ export function isParked(run, task) {
   return result?.status === "completed" && parkedText(result.finalMessage) !== null && Boolean(parkBasis(run, task, result));
 }
 
+// How long a finished child's notice may take to reach its parent: its finish watcher checks every
+// second. Past this, a notice that was never written is taken as lost (its watcher is gone).
+const NOTICE_GRACE_MS = 2 * 60000;
+
 // What can wake a task whose attempt `n` (default: its current one) ended parked, with that
 // attempt's result: { babysit: true } for a babysitter, which its pull request wakes; else
 // { condition } when the attempt recorded a wake condition with `park-until`; else { children:
-// ["<run>/<task>", ...] }, the tasks it started (in any attempt) that were still running when the
-// attempt ended; else null, and the attempt does not park. From the records alone: a child that
-// has no result, or whose result came after this attempt's, or that is parked, was still running.
+// ["<run>/<task>", ...] }, the tasks it started (in any attempt; children.jsonl records each start,
+// the task's intent to wait for it) whose ending the attempt had not taken in when it ended; else
+// null, and the attempt does not park. From the records alone, a child counts while it has no
+// result or is parked, and once it has ended until its finish notice is consumed: while the notice
+// is not written yet (NOTICE_GRACE_MS at most), while it is unread, and when it was read only after
+// this attempt ended. A child can end after its parent has decided to park but before the
+// parent's result is written: its unread notice is then the event that wakes the parent.
 export function parkBasis(run, task, result, n = task.attempt) {
   if (isBabysitter(task)) return { babysit: true };
   const condition = readJson(path.join(taskDir(run, task.id), `attempt-${n}`, PARK_UNTIL_FILE));
   if (Array.isArray(condition?.command) && condition.command.length) return { condition };
   const ended = Date.parse(result?.finishedAt) || Date.now();
   const children = [];
+  let inbox = null;
   for (const child of childrenOf(run, task.id)) {
     const childRun = { ...readJson(path.join(RUNS_DIR, child.run, "run.json")), dir: path.join(RUNS_DIR, child.run) };
     const record = childRun.id ? loadTask(childRun, child.task) : null;
     if (!record?.attempt) continue;
-    const own = readJson(path.join(taskDir(childRun, child.task), `attempt-${record.attempt}`, "result.json"));
-    const running = !own || !(Date.parse(own.finishedAt) <= ended) || isParked(childRun, record);
-    if (running) children.push(`${child.run}/${child.task}`);
+    const dir = path.join(taskDir(childRun, child.task), `attempt-${record.attempt}`);
+    const own = readJson(path.join(dir, "result.json"));
+    if (!own || isParked(childRun, record)) {
+      children.push(`${child.run}/${child.task}`);
+      continue;
+    }
+    const notice = readJson(path.join(dir, NOTICE_FILE));
+    let pending;
+    if (notice?.message) {
+      inbox ??= readInbox(taskDir(run, task.id));
+      const m = inbox.find((x) => x.id === notice.message);
+      pending = Boolean(m) && (!m.read || Date.parse(m.readAt) > ended);
+    } else {
+      // Not written yet, or being written: a notice that went nowhere (skipped) wakes nothing.
+      pending = !notice?.skipped && Date.now() - (Date.parse(own.finishedAt) || 0) < NOTICE_GRACE_MS;
+    }
+    if (pending) children.push(`${child.run}/${child.task}`);
   }
   return children.length ? { children } : null;
 }
@@ -781,7 +805,7 @@ function attemptsOf(task, seen, row) {
     // continues it.
     if (!now && attemptReasonOf(task, n + 1) === "interrupt") state = "interrupted";
     // An earlier attempt that a stop ended (`start` keeps the stop in attemptStops) did not fail either.
-    else if (!now && stopEnded(task.attemptStops?.[n], r)) state = "stopped";
+    else if (!now && stopEnded(task.attemptStops?.[n], r && { ...r, parked: r.parked || (isBabysitter(task) && r.needsFix) })) state = "stopped";
     else if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
     // An earlier attempt parked when a babysitter's did, or another task's that recorded a wake
     // condition or had started tasks (parkBasis decided it then; the files show it now).
