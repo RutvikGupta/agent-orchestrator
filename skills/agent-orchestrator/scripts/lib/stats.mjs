@@ -110,6 +110,7 @@ function taskItems(runs) {
     const results = attemptResults(dir, task);
     const row = outcome(run, task, dir, results);
     items.push({ ...baseItem(task, results[1]), modelLabel: modelLabel(task),
+      tier: task.attemptTiers?.[1] || task.tier || "unknown",
       type: task.plan?.type || (task.babysit ? "babysit" : task.readOnly ? "read-only" : "write"),
       integrated: Number(Boolean(task.integratedAt) || row.phase === "integrated"),
       failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
@@ -122,8 +123,16 @@ function taskItems(runs) {
 
 export function taskStats(runs) {
   const items = taskItems(runs);
+  const policy = loadPolicy();
+  const rank = ({ agent, tier }) => {
+    const tiers = policy[agent]?.tiers || {};
+    return tiers[tier]?.rank ?? (Object.keys(tiers).includes(tier) ? Object.keys(tiers).indexOf(tier) + 1 : Infinity);
+  };
+  const byAgentTierType = group(items, ({ agent, tier, type }) => ({ agent, tier, type }))
+    .sort((a, b) => a.type.localeCompare(b.type) || a.agent.localeCompare(b.agent)
+      || rank(a) - rank(b) || a.tier.localeCompare(b.tier));
   return { byAgent: group(items, ({ agent, modelLabel }) => ({ agent, modelLabel })),
-    byType: group(items, ({ type }) => ({ type })) };
+    byType: group(items, ({ type }) => ({ type })), byAgentTierType };
 }
 
 // How each tier has done on this machine, which is what an orchestrator weighs when it picks one.
