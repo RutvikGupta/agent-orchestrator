@@ -71,6 +71,9 @@ export function phaseOf(task, state) {
   if (acceptedNow(task) && task.integratedAt) return "integrated";
   // A read-only task produces no code: collecting its result (or closing it) is its integration.
   if (task.readOnly && task.closedAt) return "integrated";
+  // Reading a result also sets closedAt; only an explicit close retires a write task.
+  if (!acceptedNow(task) && task.closedAt && task.closedExplicitlyAttempt === (task.attempt || 0) &&
+      (!task.worktree?.restoredAt || Date.parse(task.closedAt) >= Date.parse(task.worktree.restoredAt))) return "closed";
   return acceptedNow(task) ? "accepted" : "awaiting-review";
 }
 
@@ -114,6 +117,7 @@ function acceptanceOf(task) {
   return {
     verdict: "accepted", attempt: task.acceptedAttempt ?? null, at: task.acceptedAt, by: task.acceptedBy || null,
     commit: task.acceptedCommit || null, note: task.acceptNote ? shortText(task.acceptNote, 300) : null,
+    checkoutGone: task.acceptedCheckoutGone || false, unverifiedReason: task.unverifiedReason || null,
   };
 }
 

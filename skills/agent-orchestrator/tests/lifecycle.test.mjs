@@ -422,6 +422,20 @@ test('recover groups tasks by phase, flags dirty worktrees and dead processes, a
   assert.match((await f.command(['recover', other.id])).stdout, /integrated \(1\): peek/);
 });
 
+test('explicitly closing a completed writer retires it from review', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  await f.start(run, 'writer');
+  await f.finished(run, 'writer');
+  await f.command(['result', run.id, 'writer']);
+  assert.equal((await row(f, run, 'writer')).phase, 'awaiting-review');
+  await f.command(['close', run.id, 'writer']);
+  assert.equal((await row(f, run, 'writer')).phase, 'closed');
+  const recovered = await f.json(['recover', run.id]);
+  assert.deepEqual(recovered.runs[0].groups.closedCompleted, ['writer']);
+  assert.deepEqual(recovered.runs[0].groups['awaiting-review'], []);
+  assert.match((await f.command(['recover', run.id])).stdout, /closed without acceptance \(1\): writer/);
+});
+
 // Regression tests for a review of the lifecycle commands: each failed before its fix.
 
 // A finished task in its own worktree whose committed change the orchestrator accepted.

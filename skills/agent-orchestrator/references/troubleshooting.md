@@ -24,6 +24,7 @@ you find a bug in the skill itself ("Report a bug in this skill", below).
 | `start` refuses a task that is `not in the plan`, `waits on` another, or `conflicts with running task` | See `references/dispatch.md`, "Plan checks" |
 | `start` refuses because a task's folder was collected | Run the `worktree` command that it prints (`references/worktrees.md`, "Restoring a collected worktree") |
 | `accept` refuses with `a passing check matched a failed run` | Rerun the gate with `verify`, then fix the work or record why with `--unverified` (`references/review.md`, "Accept") |
+| `accept` says the working directory is gone | If it was removed on purpose, pass `--unverified "<reason>"` to record acceptance without a commit. |
 | The board shows `⚠ ... exceeds the <tier> ceiling` | See `references/dashboard.md`, "Model ceiling warnings" |
 | Every command prints `orch: the skill changed since this session loaded it` | See `references/monitor.md`, "Skill changes" |
 
