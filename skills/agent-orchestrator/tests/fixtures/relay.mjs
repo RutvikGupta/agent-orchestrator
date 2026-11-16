@@ -21,7 +21,10 @@ fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'invocation.json'), JSON.stringify({
   argv, cwd: process.cwd(), depth: process.env.AGENT_ORCH_DEPTH,
   run: process.env.AGENT_ORCH_RUN, task: process.env.AGENT_ORCH_TASK,
+  compactWindow: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null,
 }));
+// A larger last model call, for tests of the handoff limits: `contextTokens` input tokens.
+const usage = { input_tokens: config.contextTokens ? config.contextTokens - 20 : 100, cache_read_input_tokens: 20, output_tokens: 30 };
 event(claude
   ? { type: 'system', subtype: 'init', session_id: session, model }
   : { type: 'thread.started', thread_id: session });
@@ -41,7 +44,7 @@ function finish(status = config.status || 'completed', signal = null) {
     event({ type: 'assistant', effort, message: {
       id: 'message-1', model, stop_reason: 'end_turn',
       content: [{ type: 'text', text: finalMessage }],
-      usage: { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 30 },
+      usage,
     } });
     event({ type: 'result', subtype: exitCode ? 'error_during_execution' : 'success',
       is_error: Boolean(exitCode), result: config.error || finalMessage, session_id: session,

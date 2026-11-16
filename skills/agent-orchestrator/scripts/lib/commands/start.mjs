@@ -5,11 +5,11 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
-import { decisionNote, handoffNote, nestingNote, publishHoldNote } from "../briefs.mjs";
+import { HANDOFF_RULES, decisionNote, handoffNote, nestingNote, publishHoldNote, watchTierNote } from "../briefs.mjs";
 import { startDetached } from "../detach.mjs";
-import { runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
+import { ensureFinishWatcher, runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote, inboxWake } from "../inbox.mjs";
-import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, reviveParked } from "../park.mjs";
+import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, handoffWhy, reviveParked } from "../park.mjs";
 import { resumeLock } from "../steer.mjs";
 import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { escalationFor, failureHint } from "../escalation.mjs";
@@ -17,9 +17,9 @@ import { readPlan, runningConflicts } from "../plan.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
-import { attemptAgent, commandText, describe, listTasks, loadRun, loadTask, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
-import { die, emit, findRelay, parseDuration } from "../util.mjs";
+import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { CHILDREN_FILE, attemptAgent, commandText, describe, listTasks, loadRun, loadTask, recordChild, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
+import { die, emit, findRelay, parseDuration, readJson } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
 export class StartRefused extends Error {
@@ -115,7 +115,9 @@ function callerTier() {
 
 // A delegated agent never starts a stronger model than its own: it was given its task at a tier
 // chosen for that task, and handing the work to a stronger model defeats that choice. A babysitter's
-// tier is fixed by policy, so only an inherited ceiling is checked for it.
+// default watch tier and its fix tier are policy (a fix attempt is started by the orchestrator, not
+// by an agent), so only an inherited ceiling is checked for them; a --tier given for it is checked
+// against the caller too.
 function refuseStronger(key, tier, ignoreCaller = false) {
   try {
     const own = ignoreCaller ? null : callerTier();
@@ -273,14 +275,21 @@ function prepareStart(args, extra = {}) {
   const babysit = Boolean(args.babysit || (sameAgent && prev.babysit));
   // A new task needs --tier (modelFor refuses it without). A Claude follow-up keeps the earlier
   // attempt's tier until repeated failures escalate it; Claude tasks recorded before tiers ran
-  // `complex`. A babysitter always runs `complex`, and --babysit implies it.
+  // `complex`. A babysitter watches at its watch tier: --tier when given, else the one it recorded,
+  // else BABYSIT_WATCH_TIER; a babysitter recorded before watch tiers watches at that default too.
+  // Its fix attempts (attemptReason "fix", started by finish-notice.mjs) run BABYSIT_FIX_TIER and
+  // keep the watch tier for the wakes after them.
+  const fixAttempt = babysit && extra.attemptReason === "fix";
+  const watchTier = babysit && key === "claude"
+    ? (fixAttempt ? prev.watchTier : args.tier || (sameAgent && prev.babysit ? prev.watchTier : null)) || BABYSIT_WATCH_TIER
+    : null;
   const prevTier = sameAgent ? prev.tier || (key === "claude" ? CLAUDE_DEFAULT_TIER : null) : null;
   const automatic = !babysit && sameAgent && !args.tier && !args["no-escalate"]
     ? escalationFor(prev, previousAttempts) : null;
   if (automatic?.refusal) refuse(automatic.refusal, 2);
   let escalation = automatic?.note || null;
   const effectiveArgs = automatic?.tier ? { ...args, tier: automatic.tier } : args;
-  const tierArgs = babysit && key === "claude" ? { ...args, tier: args.tier || CLAUDE_DEFAULT_TIER } : effectiveArgs;
+  const tierArgs = watchTier ? { ...args, tier: fixAttempt ? BABYSIT_FIX_TIER : watchTier } : effectiveArgs;
   let choice;
   try {
     choice = modelFor(key, !tierArgs.tier && prevTier ? { ...tierArgs, tier: prevTier } : tierArgs, babysit ? null : prevTier);
@@ -297,17 +306,20 @@ function prepareStart(args, extra = {}) {
   const keep = Array.isArray(args.relayFrom) && args.relayFrom.includes("--brief") && args.relayFrom.includes("--out-dir") && sameAgent;
   const { model, effort } = keep ? { model: prev.model ?? choice.model, effort: prev.effort ?? null } : choice;
   if (!escalation && extra.attemptReason !== "retry") escalation = failureHint(prev, previousAttempts, key, tier);
-  refuseStronger(key, tier, babysit);
+  if (watchTier && strongerThan({ agent: "claude", tier: watchTier }, { agent: "claude", tier: BABYSIT_FIX_TIER })) {
+    refuse(`a babysitter watches at the light, ${BABYSIT_WATCH_TIER} (the default) or ${BABYSIT_FIX_TIER} tier, and its fix attempts run ${BABYSIT_FIX_TIER}; drop --tier ${watchTier}`, 2);
+  }
+  refuseStronger(key, tier, babysit && (fixAttempt || !args.tier));
   if (!args.check && relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(missingDirectory(run, id, prev, cd));
   // The orchestrator chooses the agent and tier by assessing the task; record why. A follow-up
-  // attempt with the same agent and tier keeps the earlier reason unless a new one is given.
-  const keepsChoice = sameAgent && prevTier === tier;
+  // attempt with the same agent and tier keeps the earlier reason unless a new one is given, and so
+  // does a babysitter, whose tier moves between watching and fixing by policy.
+  const keepsChoice = sameAgent && (prevTier === tier || babysit);
   // --offline carries over to follow-up attempts by the same agent.
   const offline = Boolean(args.offline || (sameAgent && prev.offline));
-  if (babysit && key !== "claude") refuse("pull-request babysitting runs on Claude, which costs less of the user's limits than Codex (SKILL.md step 8)", 2);
-  if (babysit && tier !== CLAUDE_DEFAULT_TIER) refuse(`a babysitter always runs the ${CLAUDE_DEFAULT_TIER} tier, since it fixes review feedback and CI on a live pull request; drop --tier ${tier}`, 2);
+  if (babysit && key !== "claude") refuse("pull-request babysitting runs on Claude: a babysitter (--babysit) parks and resumes the same Claude session, watching at the standard tier and fixing at complex (SKILL.md step 8). A Codex implementer hands its pull request to a Claude babysitter through its handoff note (references/babysit.md)", 2);
   if (babysit && (args["read-only"] || offline)) refuse("a babysitter needs write mode and the network", 2);
   // Babysitting starts only once the pull request is ready for review: open, and not a draft.
   let pr = babysit ? prev.pr || null : null;
@@ -332,6 +344,21 @@ function prepareStart(args, extra = {}) {
     (automatic?.tier ? `${prev.why || "Follow-up"}; ${escalation}` : keepsChoice ? prev.why : null) ||
     refuse(`--why is required: one line on why your assessment of this task picked ${key}${tier ? ` at the ${tier} tier` : ""} (see SKILL.md, "Choose the agent and model")`, 2);
   const sharesRepo = !prev.worktree && path.resolve(cd) === path.resolve(run.repo);
+  // An implementer kept as its pull request's babysitter (`start --babysit ... -- --session <id>`):
+  // its session's latest call may be large, and the switch to the watch tier's model reads no
+  // prompt cache. Above the handoff limit (the cold one for a switch of model or a long wait), with
+  // a handoff note written since its last attempt started, the babysitter starts a fresh session
+  // from this brief and the note instead (park.mjs). Without a current note it continues the
+  // session, and its brief tells it to write one: memory is never dropped without a note.
+  const sessionGiven = args.passthrough.some((a) => a === "--session" || a.startsWith("--session=") || a === "--resume-last");
+  const implementer = babysit && key === "claude" && sameAgent && !prev.babysit && sessionGiven && !args.parkClaim && !fixAttempt && prev.outDir
+    ? (() => {
+      const ended = readJson(path.join(prev.outDir, "result.json"))?.finishedAt;
+      const { cold, why } = coldResume(ended, prev.model, model);
+      return handoffOf(run, prev, prev.outDir, { cold, coldWhy: why, original: briefText });
+    })()
+    : null;
+  const passthrough = implementer?.fresh ? withoutSession(args.passthrough) : args.passthrough;
 
   checkSlots(run, id, args, cd, { writes: !args["read-only"] });
   const agentEnv = readAgentEnv();
@@ -347,10 +374,13 @@ function prepareStart(args, extra = {}) {
     }
   }
 
+  // The context window at which Claude Code compacts the session (compactWindow).
+  const compact = key === "claude" ? compactWindow({ ...process.env, ...agentEnv }) : null;
+
   // The agent this start replaces already held a place: a parked babysitter's watcher, a retry and an
   // interrupt bring their claim on its attempt or retry it. They skip the count, and only they may run
   // without the machine lock when it stays busy.
-  const replacement = Boolean(prev.attempt && prev.agent !== COMMAND_AGENT && (args.parkClaim || extra.attemptReason === "retry"));
+  const replacement = Boolean(prev.attempt && prev.agent !== COMMAND_AGENT && (args.parkClaim || ["retry", "fix"].includes(extra.attemptReason)));
   // Validate before acquiring the machine lock, including any slow pull-request lookup.
   const launch = (owner = () => {}, locked = false) => {
     // Other starts may have changed the run while this one waited for the machine lock.
@@ -393,7 +423,8 @@ function prepareStart(args, extra = {}) {
     try {
       owner();
       fs.mkdirSync(outDir, { recursive: true });
-      fs.copyFileSync(briefSource, brief);
+      if (implementer?.fresh) fs.writeFileSync(brief, handoffBrief(implementer, "## Start\n\nDo the start checks of your brief, then begin its loop.\n", { from: "implementer" }));
+      else fs.copyFileSync(briefSource, brief);
       // Data the brief carries, such as messages, is passed on as it is: never checked for markers.
       if (args.briefData) fs.appendFileSync(brief, `\n${String(args.briefData).trim()}\n`);
       if (!args["read-only"] && !offline && !sandbox && childDepth < MAX_NEST_DEPTH) {
@@ -402,6 +433,10 @@ function prepareStart(args, extra = {}) {
       if (noPublish && !args["read-only"]) fs.appendFileSync(brief, publishHoldNote());
       if (babysit) {
         fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
+        // A large implementer session kept without a current note: it writes one before it parks.
+        if (implementer && !implementer.fresh && implementer.tokens > implementer.limit) fs.appendFileSync(brief, implementerNoteLine(implementer));
+        // An attempt that watches below the fix tier hands every code fix to a fix attempt.
+        if (!fixAttempt && watchTier && strongerThan({ agent: "claude", tier: BABYSIT_FIX_TIER }, { agent: "claude", tier })) fs.appendFileSync(brief, watchTierNote(tier, BABYSIT_FIX_TIER));
         // Keep the brief a babysitter's session starts from, as it was given: a fresh session that
         // takes over from a handoff note starts from it again. A brief that continues a babysitter's
         // session, or the one the watcher composes for that fresh session, is not it. The brief that
@@ -428,7 +463,7 @@ function prepareStart(args, extra = {}) {
       const session = previousRow?.session;
       if (session) relayArgs.push("--session", session);
     }
-    relayArgs.push(...args.passthrough);
+    relayArgs.push(...passthrough);
     if (automatic?.tier) {
       const sessionAt = relayArgs.indexOf("--session");
       const hasSession = relayArgs.includes("--resume-last") || (sessionAt >= 0 && Boolean(relayArgs[sessionAt + 1])) || relayArgs.some((a) => a.startsWith("--session=") && a.length > "--session=".length);
@@ -449,6 +484,17 @@ function prepareStart(args, extra = {}) {
       attemptTiers: { ...Object.fromEntries(previousAttempts.map((a) => [a.n, a.tier])), [attempt]: tier },
       attemptStops: { ...(prev.attemptStops || {}), ...(prev.stoppedAt ? { [prev.attempt]: prev.stoppedAt } : {}) },
       automaticEscalations: { ...(prev.automaticEscalations || {}), ...(automatic?.tier ? { [attempt]: { from: prevTier, to: tier } } : {}) },
+      ...(watchTier ? { watchTier } : {}),
+      ...(implementer?.fresh ? { handoffs: { ...(prev.handoffs || {}), [attempt]: handoffRecord(implementer, prev.attempt, new Date().toISOString(), { from: "implementer" }) } } : {}),
+      ...(implementer ? { handoffChecks: { ...(prev.handoffChecks || {}), [attempt]: handoffCheck(implementer) } } : {}),
+      ...(compact ? { compactWindows: { ...(prev.compactWindows || {}), [attempt]: compact.record } } : {}),
+      // The ceiling this attempt starts under (AGENT_ORCH_MAX_TIER, AGENT_ORCH_MAX_EFFORT): whoever
+      // later starts its park watcher restores it (park.mjs, withCeiling), so no resume or fix
+      // attempt of the task goes above it, even when an uncapped process such as the dashboard
+      // revives the watcher.
+      inheritedCeiling: process.env.AGENT_ORCH_MAX_TIER || process.env.AGENT_ORCH_MAX_EFFORT
+        ? { maxTier: process.env.AGENT_ORCH_MAX_TIER || null, maxEffort: process.env.AGENT_ORCH_MAX_EFFORT || null }
+        : null,
       attemptReason,
       attemptReasons: { ...(prev.attemptReasons || {}), [attempt]: attemptReason },
       title: args.title ?? prev.title ?? null,
@@ -495,7 +541,7 @@ function prepareStart(args, extra = {}) {
       // continues: one agent over the limit. The limit controls load and is not a hard guarantee;
       // waiting on a stopped holder instead would let one paused process block every start.
       owner();
-      started = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}) });
+      started = spawnRelay(run, id, relay, relayArgs, outDir, cd, { ...agentEnv, ...(net.httpsGit ? gitHttpsEnv(process.env) : {}), ...(compact?.env || {}) });
     } catch (error) {
       giveBack();
       if (error instanceof AdmissionRevoked) throw error;
@@ -510,13 +556,15 @@ function prepareStart(args, extra = {}) {
     saveTask(run, task);
     parkClaim?.done(task);
     // Started once the record is saved, so the watcher always reads this attempt. A babysitter always
-    // gets one: when its attempt ends parked, the watcher starts its park watcher (park.mjs).
-    if (startedBy || babysit) watchForFinish(run, task);
+    // gets one, and so does a task that started tasks: when its attempt ends parked, the watcher
+    // starts its park watcher (park.mjs), and a babysitter's NEEDS FIX starts its fix attempt.
+    if (startedBy || babysit || fs.existsSync(path.join(taskDir(run, id), CHILDREN_FILE))) watchForFinish(run, task);
+    if (startedBy) noteChild(run, id, attempt, startedBy);
     const warn =
       sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
     return {
       task,
-      text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${started.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
+      text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${started.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}${babysitLine(watchTier, fixAttempt, tier)}${implementer?.fresh ? `\nnote: started a fresh session from the babysit brief and the handoff note instead of continuing session ${sessionOf(args.passthrough) || "(the latest)"}: ${handoffWhy(implementer)} (limit ${implementer.limit}, ${implementer.cold ? "cold" : "warm"})` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
     };
   };
   // A new start never runs uncounted because another start holds the lock: it waits up to 30 seconds,
@@ -551,10 +599,78 @@ function checkSlots(run, id, args, cd, { writes }) {
   }
 }
 
+// The context window at which Claude Code auto-compacts a Claude agent's session. Left alone, a
+// session with a 1M window compacts only near its end, so every call of a long session re-sends
+// up to that much. AGENT_ORCH_CLAUDE_COMPACT_WINDOW sets it: 100k to 1M tokens (300000, 300k,
+// 1m), default 300k; `off` leaves Claude Code's own default, and a bad value falls back to the
+// default. A CLAUDE_CODE_AUTO_COMPACT_WINDOW the caller's environment (or agent-env.json) already
+// sets is kept. Returns { env, record }: the variable for the relay, and what the attempt records.
+export const COMPACT_DEFAULT = 300000;
+export function compactWindow(env = process.env) {
+  const own = env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  if (own !== undefined && String(own).trim()) return { env: {}, record: { value: String(own).trim(), from: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" } };
+  const setting = String(env.AGENT_ORCH_CLAUDE_COMPACT_WINDOW ?? "").trim();
+  if (/^off$/i.test(setting)) return { env: {}, record: { value: null, from: "AGENT_ORCH_CLAUDE_COMPACT_WINDOW=off" } };
+  const m = /^(\d+(?:\.\d+)?)([km])?$/i.exec(setting);
+  const tokens = m ? Math.round(Number(m[1]) * ({ k: 1000, m: 1000000 }[(m[2] || "").toLowerCase()] || 1)) : null;
+  const valid = tokens !== null && tokens >= 100000 && tokens <= 1000000;
+  const value = String(valid ? tokens : COMPACT_DEFAULT);
+  return { env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: value }, record: { value, from: valid ? "AGENT_ORCH_CLAUDE_COMPACT_WINDOW" : "default" } };
+}
+
+// Relay arguments without the session they would resume.
+function withoutSession(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--resume-last" || argv[i].startsWith("--session=")) continue;
+    if (argv[i] === "--session") {
+      i++;
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  return out;
+}
+
+// The session id that relay arguments resume, or null.
+function sessionOf(argv) {
+  const at = argv.indexOf("--session");
+  if (at >= 0) return argv[at + 1] || null;
+  return argv.find((a) => a.startsWith("--session="))?.slice("--session=".length) || null;
+}
+
+// Appended to the brief of an implementer kept as babysitter whose large session continues because
+// it has no current handoff note.
+function implementerNoteLine(h) {
+  return `\nYour session's latest call sent ${h.tokens} tokens, and every call re-sends all of it. Write your handoff note at \`${h.file}\` now, before you park: once it is written, your wakes may start a fresh session from your brief and that note. ${HANDOFF_RULES}\n`;
+}
+
+// The line `start` prints about a babysitter's tiers.
+function babysitLine(watchTier, fixAttempt, tier) {
+  if (!watchTier) return "";
+  if (fixAttempt) return `\nnote: this is the babysitter's fix attempt; its next wake resumes at its watch tier, ${watchTier}`;
+  return strongerThan({ agent: "claude", tier: BABYSIT_FIX_TIER }, { agent: "claude", tier })
+    ? `\nnote: the babysitter watches at the ${watchTier} tier; a wake that needs a code fix ends with NEEDS FIX:, and its fix attempt runs at once at the ${BABYSIT_FIX_TIER} tier in the same session`
+    : "";
+}
+
+// Record that the calling task started task `id` (attempt `attempt`) of `run`, so that it may park
+// while that task runs (runs.mjs, parkBasis), and make sure its own finish watcher runs, which starts
+// its park watcher then. Never fails the start.
+function noteChild(run, id, attempt, startedBy) {
+  try {
+    const parentRun = runById(startedBy.run);
+    const parent = parentRun && loadTask(parentRun, startedBy.task);
+    if (!parent) return;
+    recordChild(parentRun, parent.id, run, id, attempt);
+    ensureFinishWatcher(parentRun, parent);
+  } catch {}
+}
+
 // The user's extra environment for agents (agent-env.json), read before creating attempt
 // artifacts. A broken optional file must not prevent work, and it cannot change the
 // orchestrator's identity or execution setup.
-function readAgentEnv() {
+export function readAgentEnv() {
   const envFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "agent-orchestrator", "agent-env.json");
   const agentEnv = {};
   try {
@@ -717,6 +833,7 @@ function startCommand(run, id, args, extra) {
   saveTask(run, task);
   claim?.done(task);
   if (startedBy) watchForFinish(run, task);
+  if (startedBy) noteChild(run, id, attempt, startedBy);
   const opts = [done !== null ? `done marker ${JSON.stringify(done)}` : null, timeout !== null ? `timeout ${timeout}` : null].filter(Boolean);
   return {
     task,

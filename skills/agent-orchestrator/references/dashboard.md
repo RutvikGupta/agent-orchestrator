@@ -31,6 +31,8 @@ act on. `SKILL.md` step 5 says when to open it.
 
 - One section per launching session, holding all of its runs, and each child session: agent, model,
   why that agent was chosen, state, steps, tokens, session id, and current activity.
+- Any parked task shows as `parked`, with what it waits for, as a babysitter does
+  (`references/monitor.md`, "Parked tasks"). A babysitter's fix attempt shows the reason `fix`.
 - Clicking a session shows its final report and its live event log. The log opens at the newest
   events and follows new output while the reader is at the bottom.
 - For a task, the panel also shows its receipts: its brief, one line per attempt (clicking one shows

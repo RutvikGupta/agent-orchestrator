@@ -35,6 +35,13 @@ export const QUIET_AFTER_MS = 5 * 60000; // a running task with no new events fo
 export const TURN_SILENT_MS = 30 * 60000;
 export const CACHE_PATH = /(^|\/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|node_modules|\.DS_Store)(\/|$)/;
 
+// How long an agent's naps may add up to in one attempt before `nap` refuses and tells it to park:
+// AGENT_ORCH_NAP_BUDGET (90s, 10m, ...), default 10 minutes. A bad value falls back to the default.
+export function napBudgetMs(value = process.env.AGENT_ORCH_NAP_BUDGET) {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : 10 * 60000;
+}
+
 // Supported implementers. Keys match the delegate-skills naming: `<key>-delegate`.
 export const AGENTS = {
   claude: { bin: "claude", vendor: "Anthropic", authCmd: ["auth", "status"] },

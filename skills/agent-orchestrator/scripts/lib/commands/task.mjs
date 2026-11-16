@@ -12,7 +12,7 @@ import { stopResume } from "../steer.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
-import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
+import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, pendingFix, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
 import { die, emit, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -100,6 +100,13 @@ function reviewText(run, row) {
   return lines.length ? lines.join("\n") : null;
 }
 
+// The line `result` prints when an attempt kept its session though a fresh one was weighed.
+function keptLine(c) {
+  const kind = c.limitKind === "cold" ? `cold limit, ${c.coldWhy === "model" ? "a switch of model" : "the prompt cache had expired"}` : "warm limit";
+  const size = c.contextTokens == null ? "an unknown number of tokens" : `${c.contextTokens} tokens`;
+  return `session kept: its latest call sent ${size}, ${c.contextTokens != null && c.contextTokens > c.limit ? `above ${c.limit} (the ${kind}), but its handoff note was ${c.note}` : `within ${c.limit} (the ${kind})`}`;
+}
+
 export function cmdResult(args) {
   computeEvidence();
   const run = loadRun(args._[0]);
@@ -123,12 +130,17 @@ export function cmdResult(args) {
   const lines = [
     `task ${shownName(d)} → ${d.agent} (${d.mode}), attempt ${d.attempt}: ${d.phase === "parked" ? "parked" : d.state}${r?.exitCode != null ? ` (exit ${r.exitCode})` : ""}`,
     d.name || earlier.length ? `id: ${id}${d.name ? ` · name: ${d.name}` : ""}${earlier.length ? ` · earlier names: ${earlier.join(", ")}` : ""}` : null,
-    `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`,
+    `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}${a.reason === "fix" ? " (fix)" : ""}`).join(", ") || "none"}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
     `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,
     session ? `session: ${session}  (resume with: start ... -- --session ${session})` : null,
-    d.handoff ? `fresh session: attempt ${d.attempt} started from the handoff note, since attempt ${d.handoff.fromAttempt}'s context had grown to ${d.handoff.contextTokens} tokens (limit ${d.handoff.limit})` : null,
+    d.handoff ? `fresh session: attempt ${d.attempt} started from the handoff note, since attempt ${d.handoff.fromAttempt}'s context had grown to ${d.handoff.contextTokens} tokens (limit ${d.handoff.limit}${d.handoff.limitKind === "cold" ? `, the cold limit: ${d.handoff.coldWhy === "model" ? "a switch of model" : "the prompt cache had expired"}` : ""})` : null,
+    !d.handoff && d.handoffCheck ? keptLine(d.handoffCheck) : null,
+    task.fixes?.[d.attempt] ? `fix attempt: attempt ${d.attempt} fixes what attempt ${task.fixes[d.attempt].fromAttempt} asked for: NEEDS FIX: ${task.fixes[d.attempt].reason}` : null,
+    d.fixing ? `needs a fix: ${d.fixing.reason}; its fix attempt is starting at the complex tier` : null,
+    d.notParked ? `not parked: ${d.notParked}` : null,
+    d.compactWindow ? `compact window: ${d.compactWindow.value ? `${d.compactWindow.value} tokens (${d.compactWindow.from === "default" ? "the default of AGENT_ORCH_CLAUDE_COMPACT_WINDOW" : `from ${d.compactWindow.from}`})` : `Claude Code's default (${d.compactWindow.from})`}` : null,
     d.limitHit ? `USAGE LIMIT: ${d.agent} reached a usage limit. Ping the user once, and resume the task on the other agent if it is ready (SKILL.md, "Usage limits")` : null,
     d.decisions ? `NEEDS DECISION: decide what the user's request covers and resume this session with the answer; ask the user only about scope, security posture, or cost${d.decisions.map((q) => `\n  - ${q}`).join("")}` : null,
     Array.isArray(r?.touchedFiles) ? `touched (${r.touchedFiles.length}):${r.touchedFiles.map((f) => `\n  ${f}`).join("")}` : null,
@@ -203,7 +215,19 @@ function stopTask(run, task, g) {
     if (!left) {
       // Nothing of this attempt runs; a resume may have saved a newer one meanwhile.
       const latest = loadTask(run, id);
-      return latest && latest.attempt > (task.attempt || 0) ? stopTask(run, latest, g) : null;
+      if (latest && latest.attempt > (task.attempt || 0)) return stopTask(run, latest, g);
+      // A babysitter's watch attempt that asked for a fix, whose fix start holds no claim yet (it
+      // takes one a second or so after the attempt ends): the mark keeps the fix from starting. A
+      // fix that started in between is stopped too.
+      if (pendingFix(latest || task)) {
+        mark();
+        stopped();
+        const later = newer();
+        const failed = later ? terminate(later.pid) : null;
+        if (failed) throw failed;
+        return ended(`stopped ${shownName(task)}: its watch attempt asked for a fix, which will not start${later ? `; stopped attempt ${later.attempt}, which had just started (pid ${later.pid})` : ""}`);
+      }
+      return null;
     }
     if (!task.stoppedAt) mark();
     stopped();

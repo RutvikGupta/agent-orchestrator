@@ -4,13 +4,16 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH } from "../config.mjs";
+import { CLI_PATH, napBudgetMs } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
+import { callerTask, runById } from "../finish-notice.mjs";
+import { durationText } from "../format.mjs";
+import { COMMAND_AGENT } from "../policy.mjs";
 import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
-import { describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
+import { attemptAgent, describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { adoptResume, awaitInterrupt, claimResume, heldBy, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
-import { die, emit, parseDuration, readJson } from "../util.mjs";
+import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 
 // How a message reaches this attempt of the task: { delivery, reaches }. An attempt started before
 // messages existed has no inbox note in its brief, so it never runs `inbox`. `row`, the task's
@@ -312,11 +315,36 @@ export function cmdReply(args) {
   emit(args, { run: run.id, task: id, ...reply }, `replied to message ${to}; the user sees it on the dashboard`);
 }
 
+// The file in an attempt's folder that adds up its naps: { ms, naps }.
+const NAP_FILE = "naps.json";
+
+// Inside a Claude or Codex task, count a nap of `ms` against the attempt's budget (napBudgetMs):
+// refuse with exit 2, telling the agent to park, once its naps would add up past it. A session
+// that naps in a loop re-sends its whole context after every nap; a parked one waits for free. A
+// command task naps freely (no model waits), and so does anyone outside a task.
+function chargeNap(ms) {
+  const caller = callerTask();
+  const run = caller && runById(caller.run);
+  const task = run && loadTask(run, caller.task);
+  if (!task?.outDir || attemptAgent(task, task.attempt) === COMMAND_AGENT) return;
+  const file = path.join(task.outDir, NAP_FILE);
+  const spent = readJson(file) || { ms: 0, naps: 0 };
+  const budget = napBudgetMs();
+  if (spent.ms + ms > budget) {
+    die(`refusing: the naps of this attempt already add up to ${durationText(spent.ms)}, and a nap of ${durationText(ms)} would pass its budget of ${durationText(budget)} (AGENT_ORCH_NAP_BUDGET). Do not wait in your session: record what you wait for with \`node ${CLI_PATH} park-until --every 2m -- <command that exits 0 once it is done>\` (nothing to record when you wait for tasks you started), then end your turn with a final message whose first line is \`PARKED: waits for <what>\`. A watcher with no model resumes this session when the command exits 0, when a message arrives, or when a task you started finishes.`, 2);
+  }
+  try {
+    writeJson(file, { ms: spent.ms + ms, naps: (spent.naps || 0) + 1 });
+  } catch {} // a sandboxed agent may be unable to write the state folder; its nap still runs
+}
+
 // `sleep` for agents: returns after DUR (exit 0), or as soon as a message arrives for the agent
-// running it (exit 6), so a waiting agent stays reachable.
+// running it (exit 6), so a waiting agent stays reachable. Inside a task, an attempt's naps may add
+// up to its budget only (chargeNap).
 export async function cmdNap(args, resumed = null) {
   const ms = parseDuration(args._[0] || "");
   if (!(ms > 0)) die("give a duration, like 30s or 5m", 2);
+  if (!resumed) chargeNap(ms);
   let checkedAt = Date.now();
   const wake = inboxWake(resumed?.inbox);
   const until = resumed?.until ?? Date.now() + ms;

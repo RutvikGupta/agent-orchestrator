@@ -150,7 +150,7 @@ test('a parked babysitter shows as parked, keeps wait waiting, and is resumed on
   assert.match(result.stdout, /attempt 1: parked/);
   assert.equal(readJson(f.taskFile(run, 'sit')).closedAt, null);
   const recover = await f.command(['recover', run.id]);
-  assert.match(recover.stdout, /parked babysitters .*: sit \(PR #42 waits for a human review\)/);
+  assert.match(recover.stdout, /parked tasks .*: sit \(PR #42 waits for a human review\)/);
   // A pr-watch run by the babysitter itself suggests parking when nothing is new.
   const watch = await f.command(['pr-watch', '42', '--timeout', '1ms'], { code: 3, env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'sit' } });
   assert.match(watch.stdout, /park: end your turn with a final message whose first line is `PARKED: /);
@@ -161,7 +161,8 @@ test('a parked babysitter shows as parked, keeps wait waiting, and is resumed on
   set({ statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
   const second = await eventually(() => (readJson(f.taskFile(run, 'sit')).attempt === 2 ? readJson(f.taskFile(run, 'sit')) : null), 'the watcher did not resume', SLOW);
   await f.ready(second);
-  assert.deepEqual([second.tier, second.babysit, second.attemptReason], ['complex', true, 'resume']);
+  // A babysitter watches at the standard tier, and its wakes resume at that watch tier.
+  assert.deepEqual([second.tier, second.watchTier, second.babysit, second.attemptReason], ['standard', 'standard', true, 'resume']);
   const argv = readJson(path.join(second.outDir, 'invocation.json')).argv;
   assert.equal(argv[argv.indexOf('--session') + 1], 'fixture-claude');
   const brief = fs.readFileSync(path.join(second.outDir, 'orch-brief.md'), 'utf8');
@@ -871,7 +872,8 @@ test('above the context limit a parked babysitter resumes in a fresh session, bu
     'HANDOFF_MARK round 1 asked for a rename', '## What changed while the previous session was parked', 'On the pull request: 1 new comment(s).', '## Handoff note\n'].map((part) => brief.indexOf(part));
   assert.ok(parts.every((at, i) => at >= 0 && (i === 0 || at > parts[i - 1])), `the brief's parts are out of order: ${parts}`);
   assert.deepEqual([fourth.handoffs[4].fromAttempt, fourth.handoffs[4].contextTokens, fourth.handoffs[4].limit], [3, 120, 100]);
-  assert.deepEqual([fourth.babysit, fourth.tier, fourth.pr.number], [true, 'complex', 42]);
+  assert.deepEqual([fourth.babysit, fourth.tier, fourth.pr.number], [true, 'standard', 42]);
+  assert.equal(fourth.handoffs[4].limitKind, 'warm', 'the same model, resumed at once: the warm limit');
   // The first brief is kept as it was given, for the next handoff.
   assert.equal(fs.readFileSync(path.join(run.dir, 'tasks', 'sit', 'babysit-brief.md'), 'utf8'), fs.readFileSync(f.brief('sit', { finalMessage: PARKED }), 'utf8'));
   const row = await rowOf(f, run, 'sit');

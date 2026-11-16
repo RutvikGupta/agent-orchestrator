@@ -745,8 +745,10 @@ test('a nested start runs both its relay and its finish watcher through launchd,
   const invocation = path.join(kid.outDir, 'invocation.json');
   await eventually(() => fs.existsSync(invocation), 'the relay did not start');
   assert.equal(readJson(invocation).cwd, f.repo);
-  // The relay's and the finish watcher's jobs.
-  assert.equal(fake.calls().filter((c) => c.verb === 'bootstrap').length, 2);
+  // The relay's and the finish watcher's jobs, and the finish watcher of the lead, which has started
+  // a task and may now park while that task runs (runs.mjs, parkBasis).
+  assert.equal(fake.calls().filter((c) => c.verb === 'bootstrap').length, 3);
+  assert.ok(fs.existsSync(path.join(lead.outDir, 'finish-watcher.json')));
   const record = await eventually(() => {
     try {
       const r = readJson(path.join(kid.outDir, 'parent-notice.json'));

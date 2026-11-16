@@ -58,7 +58,10 @@ fix is waiting:
    - Exit 4 means this checkout has commits that the pull request lacks: push them, then watch again.
    - Exit 6 means a message arrived: Claude receives it as context when the command returns;
      otherwise read it with `node <orch-path> inbox <run> <task> --ack`. Act on it, then watch again.
-2. Handle every item it printed:
+2. Handle every item it printed. If this brief has a "Watch tier" section, you are at the watch
+   tier: you change no code, write no substantive reply and make no rebase with conflicts yourself.
+   Those go to the fix attempt through `NEEDS FIX:`, as that section says; all else below is yours.
+   A fix attempt, and a babysitter with no such section, does every item:
    - **Failed check:** read its log, fix the cause, run the gates, commit, and push. If the failure
      is unrelated to this change (a flaky test or an infrastructure fault), re-run it once with
      `gh run rerun <run-id> --failed` and record that.
@@ -137,10 +140,12 @@ with `ask` can wait while you are parked: its answer arrives as a message, which
 ## Final message
 
 When you park, start with the `PARKED:` line (see "Park"). When you stop on a decision, start with
-the `NEEDS DECISION:` block. Then list each commit you
-pushed with its purpose, each reply you posted, the final state of the pull request and its checks,
-and everything left for the user. For a blocker, give the exact command
-and error, and the local commits that still need publishing.
+the `NEEDS DECISION:` block. When this brief has a "Watch tier" section and a wake needs a code
+change, a substantive reply or a rebase with conflicts, start with the `NEEDS FIX:` line that section
+describes, and do not park in the same message. A fix attempt parks as "Park" says. Then list each
+commit you pushed with its purpose, each reply you posted, the final state of the pull request and
+its checks, and everything left for the user. For a blocker, give the exact command and error, and
+the local commits that still need publishing.
 
 Finish the message with this block, filled in:
 
@@ -152,7 +157,7 @@ Finish the message with this block, filled in:
  "unresolved": ["..."]}
 ```
 
-`outcome` is `done` when the pull request left `OPEN`, `parked` when you park, and `blocked` when
-you stopped on a blocker or a decision. `changed` lists the files your commits changed. `checks` lists the gates you ran
-before your last push. `decisions` lists the questions you hand back. `unresolved` lists what is
-left for the user.
+`outcome` is `done` when the pull request left `OPEN`, `parked` when you park, `partial` when you
+end with `NEEDS FIX:`, and `blocked` when you stopped on a blocker or a decision. `changed` lists the
+files your commits changed. `checks` lists the gates you ran before your last push. `decisions`
+lists the questions you hand back. `unresolved` lists what is left for the user.

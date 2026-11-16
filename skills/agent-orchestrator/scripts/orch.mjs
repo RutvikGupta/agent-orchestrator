@@ -21,6 +21,7 @@ import { cmdAgents } from "./lib/commands/agents.mjs";
 import { cmdAsk } from "./lib/commands/ask.mjs";
 import { cmdBrief } from "./lib/commands/brief.mjs";
 import { cmdInbox, cmdNap, cmdReply, cmdSend, cmdSteer } from "./lib/commands/inbox.mjs";
+import { cmdParkUntil } from "./lib/commands/park-until.mjs";
 import { cmdLesson } from "./lib/commands/lessons.mjs";
 import { cmdDashboard } from "./lib/commands/dashboard.mjs";
 import { cmdAccept, cmdDispatch, cmdIntegrate, cmdPlan, cmdRecover, cmdResolve } from "./lib/commands/lifecycle.mjs";
@@ -93,7 +94,18 @@ Usage: node orch.mjs <command> [args] [--json]
                                   network. --babysit --pr N (Claude only) makes the task the
                                   babysitter of pull request N, which must be open and ready for
                                   review (not a draft): it may commit, push without force, and
-                                  reply on GitHub; its timeout defaults to 24h.
+                                  reply on GitHub; its timeout defaults to 24h. It watches at
+                                  standard (--tier light or complex if asked; frontier is
+                                  refused). A watch attempt that needs a code fix or a substantive
+                                  reply ends with NEEDS FIX:, and its fix attempt starts at once at
+                                  complex, in the same session; the next wake watches again.
+                                  Kept as its implementer's babysitter (-- --session ID), a session
+                                  above the handoff limit with a current handoff note starts fresh
+                                  from the babysit brief and the note.
+                                  Every Claude agent's session compacts at
+                                  AGENT_ORCH_CLAUDE_COMPACT_WINDOW tokens (default 300k, 100k..1M;
+                                  off: Claude Code's default; a CLAUDE_CODE_AUTO_COMPACT_WINDOW
+                                  already set is kept).
                                   --why records the assessment behind the choice of agent and tier;
                                   it is required unless this attempt keeps the previous attempt's
                                   agent and tier, or start escalates it automatically.
@@ -106,7 +118,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Counted failures are failed, timeout or aborted attempts and review
                                   changes/reject; owner stops and usage-limit stops do not count.
                                   Legacy Claude tasks resume at complex, and --babysit
-                                  implies complex, so it needs none. "agents" lists each tier's model and results.
+                                  implies standard, so it needs none. "agents" lists each tier's model and results.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
                                   In a run with a plan, the first start refuses a task whose prerequisites are
@@ -263,7 +275,21 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Queue a heavy command until memory is available; exit 6 on a message
   reclaim [--dry-run] [--json]     Stop orphan build daemons and report their resident memory
   nap DUR                         Sleep like \`sleep\`, but return at once (exit 6) when a message
-                                  arrives for the agent running it; agents wait with this
+                                  arrives for the agent running it; agents wait a few minutes with
+                                  this. Inside a Claude or Codex task, an attempt's naps may add up
+                                  to AGENT_ORCH_NAP_BUDGET (default 10m): past it nap refuses (exit
+                                  2) and says to park with park-until
+  park-until [--every DUR] [--for DUR] [--why TEXT] -- COMMAND [ARG...]
+                                  Run inside a task: record a wake condition for its current
+                                  attempt, then end the turn with "PARKED: waits for <what>". A
+                                  watcher with no model runs COMMAND every --every (default 2m, at
+                                  least 30s) in this folder with the task's environment, and
+                                  resumes the same session when it exits 0, cannot run, --for has
+                                  passed (default 6h, at most 24h), a message arrives, or a task
+                                  it started finishes. Any Claude or Codex task parks this way, or
+                                  with no condition while a task it started still runs; a PARKED:
+                                  with neither ends it completed. Refused outside a task and in a
+                                  command task
   inbox RUN TASK [--ack] [--all]  A task's unread messages (--all: every one), with when the agent
                                   reads them; --ack marks them read
   questions RUN [TASK] [--all]    Every open question that the run's agents (or TASK) asked with ask,
@@ -351,7 +377,10 @@ Usage: node orch.mjs <command> [args] [--json]
                                   with no model, and absorbs checks that pass with nothing else open.
                                   A parked babysitter whose last call sent more than
                                   AGENT_ORCH_BABYSIT_HANDOFF_TOKENS (default 150000) resumes in a
-                                  fresh session from its handoff note, when that note is current.
+                                  fresh session from its handoff note, when that note is current;
+                                  above AGENT_ORCH_COLD_HANDOFF_TOKENS (default 60000) when the
+                                  resume reads no prompt cache: another model, or parked longer
+                                  than AGENT_ORCH_CACHE_TTL (default 1h) less 5 minutes.
                                   Exit 0 = needs you, 3 = timed out (default 9m; 0 waits forever),
                                   4 = the checkout has commits the pull request lacks: push first.
                                   Exit 6 = a new unread message for this agent; read it, then watch again.
@@ -404,6 +433,7 @@ const specs = {
   brief: { value: ["type", "out"], bool: ["force", "read-only", "adopt"] },
   send: { value: ["file"], bool: ["steer", "adopt"] },
   nap: {},
+  "park-until": { value: ["every", "for", "why"] },
   heavy: { value: ["label"] },
   reclaim: { bool: ["dry-run"] },
   steer: { bool: ["adopt"] },
@@ -453,6 +483,7 @@ const handlers = {
   ask: cmdAsk,
   tell: cmdTell,
   nap: cmdNap,
+  "park-until": cmdParkUntil,
   heavy: cmdHeavy,
   reclaim: cmdReclaim,
   steer: cmdSteer,
