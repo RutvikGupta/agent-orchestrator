@@ -15,6 +15,24 @@ async function start(f, run, id, checks, { flags = [], events = [] } = {}) {
   await f.finished(run, id);
 }
 
+test('a removed working folder requires an unverified reason and records no commit', async (t) => {
+  const f = await fixture(t), run = await f.newRun();
+  const cwd = path.join(f.root, 'removed');
+  fs.mkdirSync(cwd);
+  await start(f, run, 'writer', null, { flags: ['--cd', cwd] });
+  fs.rmSync(cwd, { recursive: true });
+  const denied = await f.command(['accept', run.id, 'writer'], { code: 1 });
+  assert.ok(denied.stderr.includes(cwd));
+  assert.match(denied.stderr, /--unverified "<reason>"/);
+  const accepted = await f.json(['accept', run.id, 'writer', '--unverified', 'folder removed after review']);
+  assert.equal(accepted.acceptedCommit, null);
+  assert.equal(accepted.acceptedCheckoutGone, true);
+  assert.equal(accepted.unverifiedReason, 'folder removed after review');
+  const row = (await f.json(['status', run.id])).tasks.find((task) => task.id === 'writer');
+  assert.equal(row.acceptance.checkoutGone, true);
+  assert.equal(row.acceptance.unverifiedReason, 'folder removed after review');
+});
+
 test('a failed matching check refuses even alongside success; override is saved and must be nonblank', async (t) => {
   const f = await fixture(t), run = await f.newRun();
   await start(f, run, 'writer', [pass('npm test'), pass('npm run lint')], { events: [...runEvent('test', 'npm test'), ...runEvent('lint', 'npm run lint', 'Exit code 2', true)] });

@@ -481,11 +481,12 @@ export function cmdAccept(args) {
   }
   if (warnings.length) process.stderr.write(`${warnings.map((warning) => `WARNING: ${warning}`).join("\n")}\n`);
   const cwd = row.cd || run.repo;
-  const inGit = fs.existsSync(cwd) && gitOk(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  const checkoutGone = !fs.existsSync(cwd);
+  const inGit = !checkoutGone && gitOk(cwd, ["rev-parse", "--is-inside-work-tree"]);
   // The orchestrator commits a write task's work after reviewing it, so nothing may be left over.
   // A read-only task changed nothing: whatever its checkout holds is not its work.
   if (!task.readOnly) {
-    if (!fs.existsSync(cwd)) die(`task ${id}'s working directory is gone: ${cwd}`);
+    if (checkoutGone && !unverifiedReason) die(`task ${id}'s working directory is gone: ${cwd}; if it was removed on purpose, pass --unverified "<reason>"`);
     const dirty = inGit ? uncommitted(cwd) : [];
     if (dirty.length) die(`task ${id} has uncommitted changes in ${cwd}; review them and commit them on the task's branch, then accept:\n  ${dirty.join("\n  ")}`);
   }
@@ -504,7 +505,7 @@ export function cmdAccept(args) {
   const cleanVerdict = rounds.filter((r) => r.attempt === attempt).at(-1)?.verdict === "clean";
   const accepted = {
     ...task, acceptedAt: new Date().toISOString(), acceptedAttempt: attempt, acceptedCommit: commit,
-    acceptedBy: "coordinator", acceptedActor: g.actor, acceptNote, acceptVerifications, unverifiedReason,
+    acceptedBy: "coordinator", acceptedActor: g.actor, acceptNote, acceptVerifications, unverifiedReason, acceptedCheckoutGone: !task.readOnly && checkoutGone,
     // Accepting overrides an earlier `reject` of this attempt; reviews.jsonl keeps that round.
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
@@ -513,10 +514,10 @@ export function cmdAccept(args) {
   saveTask(run, accepted);
   recordChange(run, g, { task: id, attempt, action: "accepted" });
   reclaimTask(run, task);
-  const empty = !task.readOnly && task.worktree && commit === git(cwd, ["rev-parse", `${task.worktree.from}^{commit}`], { allowFail: true });
+  const empty = !task.readOnly && task.worktree && commit && commit === git(cwd, ["rev-parse", `${task.worktree.from}^{commit}`], { allowFail: true });
   emit(
     args,
-    { id, acceptedAt: accepted.acceptedAt, acceptedAttempt: attempt, acceptedCommit: commit, acceptedBy: "coordinator", acceptNote, acceptVerifications, cleanVerdict, unverifiedReason },
+    { id, acceptedAt: accepted.acceptedAt, acceptedAttempt: attempt, acceptedCommit: commit, acceptedBy: "coordinator", acceptNote, acceptVerifications, cleanVerdict, unverifiedReason, acceptedCheckoutGone: accepted.acceptedCheckoutGone },
     `accepted ${id}${commit ? ` at ${short(commit)}` : ""} (attempt ${attempt})${empty ? `\nnote: ${task.worktree.branch} has no commits beyond where it started, so integrating it changes nothing` : ""}` +
       `${cleanVerdict ? "" : `\nnote: no clean verdict is recorded for attempt ${attempt} (${CLI} verdict ${run.id} ${id} clean records one)`}\nnext: ${CLI} integrate ${run.id} ${id}`,
   );
@@ -893,6 +894,7 @@ function recoverRun(run, rows, own, dirty) {
   const integrated = phase("integrated");
   const closedFailed = phase("failed").filter(closed);
   const closedStopped = phase("stopped").filter(closed);
+  const closedCompleted = phase("closed").filter((r) => r.state === "completed");
 
   const manualMerges = rows.flatMap((r) => {
     const merged = manualMerge(run, records.get(r.id));
@@ -923,6 +925,7 @@ function recoverRun(run, rows, own, dirty) {
   if (integrated.length) lines.push(`  integrated (${integrated.length}): ${integrated.map(label).join(", ")}`);
   if (closedFailed.length) lines.push(`  closed after failing (${closedFailed.length}): ${closedFailed.map(label).join(", ")}`);
   if (closedStopped.length) lines.push(`  closed after a stop (${closedStopped.length}): ${closedStopped.map(label).join(", ")}`);
+  if (closedCompleted.length) lines.push(`  closed without acceptance (${closedCompleted.length}): ${closedCompleted.map(label).join(", ")}`);
   if (!rows.length && !plan) lines.push("  no tasks yet");
   for (const w of warnings) lines.push(`  ! ${w}`);
 
@@ -944,6 +947,7 @@ function recoverRun(run, rows, own, dirty) {
         integrated: ids(integrated),
         closedFailed: ids(closedFailed),
         closedStopped: ids(closedStopped),
+        closedCompleted: ids(closedCompleted),
       },
       warnings,
       manualMerges,
