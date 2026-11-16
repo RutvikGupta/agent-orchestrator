@@ -415,8 +415,8 @@ test('a stored message answers 200 even when its rebuild throws', async (t) => {
   b.f.release(b.task);
 });
 
-test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement starts only after it exits, also after successive timeouts, each with twice the limit', async (t) => {
-  const b = await setup(t, { receiver: true, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s' }, prepare: async (b) => b.touch('ignoreterm') });
+test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement starts only after it exits, also after successive timeouts', async (t) => {
+  const b = await setup(t, { receiver: true, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_BUILD_KILL_TIMEOUT: '3s' }, prepare: async (b) => b.touch('ignoreterm') });
   const initial = await b.state();
   const [first] = b.workers();
   b.touch('hang');
@@ -451,8 +451,6 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
   const count = b.workers().length;
   for (let i = 1; i <= 2; i++) {
     await eventually(() => b.builds().at(-1).pid === b.workers().at(-1).pid && !b.builds().at(-1).ended && b.pending('overdueBuild').length === 1, `hung build ${i} did not start`);
-    // Each build in a row that timed out doubles the next one's limit, so a slow machine still gets a board.
-    assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000 * 2 ** (i - 1)]);
     await b.control('fire overdueBuild');
     await eventually(() => b.workers().length === count + i, `replacement ${i} did not start`);
   }
@@ -465,7 +463,7 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
 });
 
 test('a read while the build is past its deadline gets the stale headers before the watchdog stops it', async (t) => {
-  const b = await setup(t, { env: { AGENT_ORCH_BUILD_TIMEOUT: '60s' } });
+  const b = await setup(t, { env: { AGENT_ORCH_BUILD_TIMEOUT: '60s', AGENT_ORCH_BUILD_KILL_TIMEOUT: '60s' } });
   const initial = await b.state();
   b.touch('hang');
   await b.rebuild();
@@ -476,12 +474,33 @@ test('a read while the build is past its deadline gets the stale headers before 
   b.advance(1); // the deadline passes on the server's clock; the watchdog has not fired
   const overdue = await b.state();
   assert.equal(overdue.text, initial.text);
-  assert.equal(overdue.response.headers.get('x-orch-error'), 'state build timed out after 60s');
+  assert.equal(overdue.response.headers.get('x-orch-error'), 'state build has run past 60s');
   assert.equal(overdue.response.headers.get('x-orch-stale'), '65');
   assert.equal(b.pending('overdueBuild').length, 1);
   b.touch('release');
   await b.settled();
   assert.equal((await b.state()).response.headers.get('x-orch-error'), null, 'the finished build did not clear the overdue mark');
+});
+
+test('a build past its stale limit keeps running: reads get the cached board marked stale, and only the kill limit stops it', async (t) => {
+  const b = await setup(t, { env: { AGENT_ORCH_BUILD_TIMEOUT: '3s' } });
+  const initial = await b.state();
+  const [worker] = b.workers();
+  b.touch('hang');
+  await b.rebuild();
+  await eventually(() => b.exists('blocked'), 'the build did not hang');
+  // The watchdog waits for AGENT_ORCH_BUILD_KILL_TIMEOUT (5m by default), not the 3s stale limit.
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [300_000]);
+  b.advance(3000);
+  const slow = await b.state();
+  assert.equal(slow.text, initial.text);
+  assert.equal(slow.response.headers.get('x-orch-error'), 'state build has run past 3s');
+  // The same worker, with its warm caches, finishes the build and its board clears the mark.
+  b.touch('release');
+  await b.settled();
+  assert.equal((await b.state()).response.headers.get('x-orch-error'), null);
+  assert.equal(b.workers().length, 1, 'a slow build was replaced');
+  assert.equal(b.workers()[0].pid, worker.pid);
 });
 
 test('a worker error while its process lives stops that process before another starts', async (t) => {
@@ -662,7 +681,7 @@ test('a bad AGENT_ORCH_FIRST_BUILD_TIMEOUT stops startup with the usage code', a
 });
 
 test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT; the first limit is never the shorter', async (t) => {
-  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
+  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_BUILD_KILL_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
   await eventually(() => b.exists('blocked'), 'the first build did not start');
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
   // A read waits for the first board, through the lost build and its replacement.

@@ -14,11 +14,13 @@ act on. `SKILL.md` step 5 says when to open it.
 - It exits by itself once no task is running and no tab has shown it for 30 minutes.
   `$ORCH dashboard --stop` stops it sooner.
 - `$ORCH watch` shows the same tree in a terminal, for a user who asks for it.
-- The board is built in a separate worker process. A build that runs past
-  `AGENT_ORCH_BUILD_TIMEOUT` (default `30s`) is stopped and started again. Until the first board
-  is built, each build gets `AGENT_ORCH_FIRST_BUILD_TIMEOUT` instead (default `5m`, never less than
-  the other limit): a first build reads everything with cold caches, often on a machine that is
-  still busy after a restart.
+- The board is built in a separate worker process. While a build runs past
+  `AGENT_ORCH_BUILD_TIMEOUT` (default `30s`), the page shows the last board marked stale, and the
+  build keeps going: a new worker would start with cold caches and be slower still. Only a build
+  past `AGENT_ORCH_BUILD_KILL_TIMEOUT` (default `5m`, never less than the stale limit) is taken for
+  hung, stopped and started again. Until the first board is built, each build gets
+  `AGENT_ORCH_FIRST_BUILD_TIMEOUT` instead (default `5m`, never less than the other limits): a first
+  build reads everything with cold caches, often on a machine that is still busy after a restart.
 - Every five minutes it stops orphaned build daemons (`reclaim`; `AGENT_ORCH_RECLAIM=off` turns it
   off). Five minutes after it starts, and five minutes after each pass ends, it collects unused
   worktrees (`gc --auto`; `AGENT_ORCH_AUTO_GC=off` turns it off). The two never run at the same

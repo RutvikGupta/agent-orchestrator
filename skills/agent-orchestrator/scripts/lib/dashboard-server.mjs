@@ -181,6 +181,8 @@ export async function serveDashboard({ host, port, args }) {
   // Until a first board exists every build is cold (no caches, often on a machine still busy after
   // a restart), so it gets its own, longer limit, never shorter than the later builds' one.
   const firstBuildTimeoutMs = Math.max(buildTimeoutMs, parseDuration(process.env.AGENT_ORCH_FIRST_BUILD_TIMEOUT || "5m"));
+  // A build is stopped as hung only past this limit, never shorter than the stale one.
+  const killTimeoutMs = Math.max(buildTimeoutMs, parseDuration(process.env.AGENT_ORCH_BUILD_KILL_TIMEOUT || "5m"));
   readVendorStatusInBackground();
   readProcessesInBackground();
   const page = loadPage();
@@ -190,8 +192,7 @@ export async function serveDashboard({ host, port, args }) {
   const tabs = new Set(); // presence streams of the open tabs
   // Only a worker process (dashboard-worker.mjs) builds the board, so a slow build never holds up
   // HTTP: reads get the last board at once. One build runs at a time, and there is never more than
-  // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_TIMEOUT (30s, doubled
-  // after each build in a row that timed out, up to the first build's limit), or
+  // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_KILL_TIMEOUT (5m), or
   // AGENT_ORCH_FIRST_BUILD_TIMEOUT (5m) while no board has been built yet, gets SIGTERM, then
   // SIGKILL 2 seconds later, and the next one starts only once it has exited.
   // A message or a steer rebuilds at once (`changed`), and so does a lost build's replacement. An
@@ -203,11 +204,7 @@ export async function serveDashboard({ host, port, args }) {
   let snapshot = null; // the last board built: { body, heavyBody, ids, running, heavyAt, startedAt, builtAt }
   let failure = null; // why the latest build failed, until one succeeds
   let worker = null; // { child, retiring, gone, killTimer }: the one worker, until it has exited
-  let build = null; // the build in flight: { id, startedAt, limitMs, timer }
-  // Builds that ran past their limit in a row. Each one doubles the next build's limit, up to the
-  // first build's: on a heavily loaded machine a build can need longer than 30s, and killing it at
-  // the same limit every time would leave the board stale for good.
-  let timeoutsInRow = 0;
+  let build = null; // the build in flight: { id, startedAt, limitMs, killMs, timer }
   let builds = 0, again = false; // builds started; whether one must start as soon as the worker is free
   let failedInRow = 0;
   let lastStart = 0, lastEnd = 0, lastTook = 0;
@@ -283,7 +280,6 @@ export async function serveDashboard({ host, port, args }) {
     snapshot = { body, heavyBody: String(heavyBody), ids: Array.isArray(ids) ? ids : [], running: Boolean(running), heavyAt: Number(heavyAt) || 0, startedAt: done.startedAt, builtAt: Date.now() };
     failure = null;
     failedInRow = 0;
-    timeoutsInRow = 0;
     for (const answer of [...waiting]) answer();
     firstBuild();
     // Escalate only from a build that started after the oldest check still waiting for one, so a
@@ -330,16 +326,18 @@ export async function serveDashboard({ host, port, args }) {
     wantRead = wantFile = wantCheck = false;
     clearTimeout(laterTimer);
     laterTimer = null;
-    const limitMs = snapshot ? Math.min(firstBuildTimeoutMs, buildTimeoutMs * 2 ** timeoutsInRow) : firstBuildTimeoutMs;
-    const w = worker, current = { id: ++builds, startedAt: Date.now(), limitMs };
+    // Past `limitMs` reads get the last board marked stale; only past `killMs` is the worker taken for
+    // hung and stopped. A slow build keeps going meanwhile: a new worker would start with cold caches
+    // and be slower still, so on a busy machine stopping at the stale limit never yields a board.
+    const limitMs = snapshot ? buildTimeoutMs : firstBuildTimeoutMs;
+    const killMs = snapshot ? killTimeoutMs : Math.max(firstBuildTimeoutMs, killTimeoutMs);
+    const w = worker, current = { id: ++builds, startedAt: Date.now(), limitMs, killMs };
     build = current;
     lastStart = current.startedAt;
     const overdueBuild = () => {
-      if (build !== current) return;
-      timeoutsInRow += 1;
-      retire(w, new Error(`state build timed out after ${current.limitMs / 1000}s`), true);
+      if (build === current) retire(w, new Error(`state build timed out after ${current.killMs / 1000}s`), true);
     };
-    current.timer = setTimeout(overdueBuild, current.limitMs);
+    current.timer = setTimeout(overdueBuild, current.killMs);
     try {
       w.child.send("build", (error) => { if (error) retire(w, error); });
     } catch (error) {
@@ -550,7 +548,7 @@ export async function serveDashboard({ host, port, args }) {
         // age in seconds and the problem's first line, as printable ASCII so no error text can
         // make the header invalid.
         const board = () => {
-          const overdue = build && Date.now() - build.startedAt >= build.limitMs ? `state build timed out after ${build.limitMs / 1000}s` : null;
+          const overdue = build && Date.now() - build.startedAt >= build.limitMs ? `state build has run past ${build.limitMs / 1000}s` : null;
           const problem = overdue || failure?.message;
           send(200, "application/json", snapshot.body, {
             "x-orch-heavy": snapshot.heavyBody,
