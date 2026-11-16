@@ -333,7 +333,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   AGENT_ORCH_AUTO_GC=off): skips live sessions' runs, and collects
                                   after 1h while the disk is low (AGENT_ORCH_MIN_FREE_DISK).
   runs                            List runs, newest first
-  stats [RUN] [--since DUR]        Task outcomes by agent/model and type (default: last 30d),
+  stats [RUN] [--since DUR]        Task outcomes by agent/model, type and agent/tier/type (default: last 30d),
                                   with input tokens per accepted task (all the group's input over
                                   its accepted tasks)
   skill [--loaded]                Whether the skill's instructions (SKILL.md, references/, policy.json)

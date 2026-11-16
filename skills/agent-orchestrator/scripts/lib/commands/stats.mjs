@@ -22,6 +22,7 @@ export function cmdStats(args) {
   const text = groups.byAgent.length ? [
     "By agent and model", table(rows(groups.byAgent, (g) => `${g.agent} ${g.modelLabel}`), columns),
     "By task type", table(rows(groups.byType, (g) => g.type), columns),
+    "By agent, tier and task type", table(rows(groups.byAgentTierType, (g) => `${g.agent} ${g.tier} ${g.type}`), columns),
   ].join("\n") : "no tasks in range";
   emit(args, groups, text);
 }

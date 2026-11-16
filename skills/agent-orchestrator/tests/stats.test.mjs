@@ -33,14 +33,14 @@ test('stats groups task outcomes and reports every column using all attempts', a
   await task(f, run, 'limited', { config: { status: 'failed', error: 'Usage limit reached' }, fields: { plan: { type: 'implement' } }, elapsed: 120000 });
   await task(f, run, 'transient', { config: { status: 'failed', error: 'HTTP 503 Service Unavailable' }, fields: { readOnly: true }, elapsed: 240000 });
   await task(f, run, 'stopped', { config: { status: 'stopped' }, fields: { babysit: true }, elapsed: 300000 });
-  const aborted = await task(f, run, 'aborted', { config: { status: 'aborted' }, elapsed: 360000 });
+  const aborted = await task(f, run, 'aborted', { config: { status: 'aborted' }, fields: { tier: 'standard', attemptTiers: { 1: 'standard' } }, elapsed: 360000 });
   // A relay that exits without a result is also aborted, and has no timing sample.
   fs.unlinkSync(aborted.resultFile);
   await task(f, run, 'decision', { config: { finalMessage: 'NEEDS DECISION:\nChoose a target' }, fields: { plan: { type: 'research' } } });
   await task(f, run, 'structured-decision', { config: { finalMessage: '```orch-result\n{"decisions":["Choose target"]}\n```' }, fields: { plan: { type: 'research' } } });
   await task(f, run, 'claude', { agent: 'claude', fields: { readOnly: true } });
   // A model change creates a separate agent/model group, without changing the relay fixture.
-  await task(f, run, 'other-model', { fields: { model: 'gpt-6-astra', effort: 'high' } });
+  await task(f, run, 'other-model', { fields: { model: 'gpt-6-astra', effort: 'high', tier: 'light', attemptTiers: { 1: 'light' } } });
   // Non-task metadata must not expand the population.
   writeJson(path.join(run.dir, 'subagents.json'), [{ agent: 'codex', state: 'failed' }]);
   const stats = await f.json(['stats', run.id]);
@@ -57,6 +57,11 @@ test('stats groups task outcomes and reports every column using all attempts', a
     medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 240 });
   assert.deepEqual(stats.byType.map((g) => g.type).sort(), ['babysit', 'implement', 'read-only', 'research', 'write']);
   assert.equal(stats.byType.find((g) => g.type === 'research').failed, 0);
+  const tierImplement = stats.byAgentTierType.find((g) => g.agent === 'codex' && g.type === 'implement');
+  assert.deepEqual(counts(tierImplement), counts(implement));
+  assert.ok(tierImplement.tier);
+  assert.deepEqual(stats.byAgentTierType.filter((g) => g.agent === 'codex' && g.type === 'write').map((g) => g.tier), ['light', 'standard']);
+  assert.deepEqual(stats.byAgentTierType.map((g) => g.type), [...stats.byAgentTierType.map((g) => g.type)].sort());
   const claude = stats.byAgent.find((g) => g.agent === 'claude');
   assert.equal(claude.tokensIn, 120);
   assert.equal(claude.tokensOut, 30);
@@ -64,7 +69,7 @@ test('stats groups task outcomes and reports every column using all attempts', a
   assert.equal(claude.medianReviewWaitMs, null);
   assert.equal(claude.tokensInPerAccepted, null);
   const text = (await f.command(['stats', run.id])).stdout;
-  for (const heading of ['By agent and model', 'By task type', 'TASKS', 'ATTEMPTS', 'FIRST ACCEPTED', 'ACCEPTED', 'INTEGRATED', 'FAILED', 'LIMIT HITS', 'TRANSIENT', 'FIRST ELAPSED', 'REVIEW WAIT', 'TOKENS IN', 'TOKENS OUT', 'TOKENS IN PER ACCEPTED']) assert.ok(text.includes(heading), heading);
+  for (const heading of ['By agent and model', 'By task type', 'By agent, tier and task type', 'TASKS', 'ATTEMPTS', 'FIRST ACCEPTED', 'ACCEPTED', 'INTEGRATED', 'FAILED', 'LIMIT HITS', 'TRANSIENT', 'FIRST ELAPSED', 'REVIEW WAIT', 'TOKENS IN', 'TOKENS OUT', 'TOKENS IN PER ACCEPTED']) assert.ok(text.includes(heading), heading);
   assert.match(text, /codex 6-astra high/);
   assert.match(text, /1\/2/);
 });
@@ -82,7 +87,7 @@ test('stats filters runs by creation time and single RUN bypasses the time range
   assert.equal((await f.json(['stats'])).byAgent[0].tasks, 2);
   assert.equal((await f.json(['stats', '--since', '7d'])).byAgent[0].tasks, 2);
   for (const duration of ['12h', '90m']) assert.equal((await f.json(['stats', '--since', duration])).byAgent[0].tasks, 1);
-  assert.deepEqual(await f.json(['stats', '--since', '1m']), { byAgent: [], byType: [] });
+  assert.deepEqual(await f.json(['stats', '--since', '1m']), { byAgent: [], byType: [], byAgentTierType: [] });
   for (const ref of [ancient.id, ancient.dir]) assert.equal((await f.json(['stats', ref, '--since', '1m'])).byAgent[0].tasks, 1);
   const invalid = await f.command(['stats', '--since', 'forever'], { code: 2 });
   assert.match(invalid.stderr, /bad duration/);
@@ -92,7 +97,7 @@ test('stats filters runs by creation time and single RUN bypasses the time range
 test('stats prints empty input and excludes prepared worktrees', async (t) => {
   const f = await fixture(t);
   assert.equal((await f.command(['stats'])).stdout.trim(), 'no tasks in range');
-  assert.deepEqual(await f.json(['stats']), { byAgent: [], byType: [] });
+  assert.deepEqual(await f.json(['stats']), { byAgent: [], byType: [], byAgentTierType: [] });
   const run = await f.newRun();
   await f.command(['worktree', run.id, 'prepared', '--no-prep']);
   assert.equal((await f.command(['stats', run.id])).stdout.trim(), 'no tasks in range');
