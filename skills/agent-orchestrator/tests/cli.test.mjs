@@ -194,6 +194,7 @@ test('decisions stay open and wait names the task; normal messages remain comple
 for (const [agent, error, limited] of [
   ['claude', 'Usage limit reached; resets at 20:00 UTC.', true],
   ['codex', 'You have hit your usage limit.', true],
+  ['codex', 'You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.', true],
   ['codex', 'Compilation failed: missing semicolon.', false],
 ]) {
   test(`${agent} failure: ${limited ? 'usage limit is highlighted' : 'ordinary error is not a usage limit'}`, async (t) => {

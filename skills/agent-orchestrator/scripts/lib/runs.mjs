@@ -1075,7 +1075,7 @@ function verificationFacts(run, id) {
 }
 
 // Errors that mean the agent's usage window is used up, as Claude Code and Codex word them.
-const USAGE_LIMIT_RE = /usage limit|limit reached|hit your (?:usage )?limit|rate_limit_reached|(?:5-hour|five[_ -]hour|weekly|seven[_ -]day) limit/i;
+const USAGE_LIMIT_RE = /usage limit|limit reached|hit your (?:usage )?limit|hit your spend cap|rate_limit_reached|(?:5-hour|five[_ -]hour|weekly|seven[_ -]day) limit/i;
 
 export function listTaskRecords(run) {
   const dir = path.join(run.dir, "tasks");

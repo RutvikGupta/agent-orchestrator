@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A Codex task stopped by a workspace spend cap ("You hit your spend cap set by the owner of your
+  workspace") now reads as a usage limit (`USAGE LIMIT` in `result`, "stopped on a usage limit" in
+  `wait`), not as an ordinary failure.
 - A session that two Claude processes run (a second `claude --resume` in another terminal or tmux)
   shows the state of its most active process on the dashboard, not of whichever one Claude Code
   lists last: an idle duplicate made a working session read idle.
