@@ -36,7 +36,7 @@
 - A live relay no longer reads as dead when `ps` cannot list the process table (it times out on a
   heavily loaded machine): `status` and `wait` reported such a task aborted, and `start` could launch a
   second agent for it.
-- A dashboard build past `AGENT_ORCH_BUILD_TIMEOUT` (30s) now only marks the board stale and keeps
+- A dashboard build past `AGENT_ORCH_BUILD_TIMEOUT` (now `2m`, was 30s) only marks the board stale and keeps
   running; the worker is stopped as hung only past `AGENT_ORCH_BUILD_KILL_TIMEOUT` (5m). Stopping it at
   30s threw away its caches, so on a busy machine every replacement started cold and the board stayed
   stale.

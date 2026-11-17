@@ -177,7 +177,9 @@ function userEnv() {
 // Serve the dashboard on host:port (or the next free port) until the process exits.
 export async function serveDashboard({ host, port, args }) {
   const http = await import("node:http");
-  const buildTimeoutMs = parseDuration(process.env.AGENT_ORCH_BUILD_TIMEOUT || "30s");
+  // A build running past this marks the board stale. Two minutes: on a heavily loaded machine an ordinary
+  // build takes over 30s, and a red mark on every such build hides the ones that matter.
+  const buildTimeoutMs = parseDuration(process.env.AGENT_ORCH_BUILD_TIMEOUT || "2m");
   // Until a first board exists every build is cold (no caches, often on a machine still busy after
   // a restart), so it gets its own, longer limit, never shorter than the later builds' one.
   const firstBuildTimeoutMs = Math.max(buildTimeoutMs, parseDuration(process.env.AGENT_ORCH_FIRST_BUILD_TIMEOUT || "5m"));

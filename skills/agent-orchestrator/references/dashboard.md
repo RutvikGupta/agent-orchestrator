@@ -15,7 +15,7 @@ act on. `SKILL.md` step 5 says when to open it.
   `$ORCH dashboard --stop` stops it sooner.
 - `$ORCH watch` shows the same tree in a terminal, for a user who asks for it.
 - The board is built in a separate worker process. While a build runs past
-  `AGENT_ORCH_BUILD_TIMEOUT` (default `30s`), the page shows the last board marked stale, and the
+  `AGENT_ORCH_BUILD_TIMEOUT` (default `2m`), the page shows the last board marked stale, and the
   build keeps going: a new worker would start with cold caches and be slower still. Only a build
   past `AGENT_ORCH_BUILD_KILL_TIMEOUT` (default `5m`, never less than the stale limit) is taken for
   hung, stopped and started again. Until the first board is built, each build gets
