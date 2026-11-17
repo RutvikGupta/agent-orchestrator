@@ -278,6 +278,20 @@ for (const mode of ['failure','timeout','missing','invalid']) {
   });
 }
 
+test('a busy Claude session whose transcript ended its turn reads idle: it only runs a background command', async (t) => {
+  const s = await setup(t);
+  s.set('claude', [{sessionId:'claude-main', kind:'interactive', status:'busy'}]);
+  // The main transcript ended its turn; make it quiet for a minute.
+  const main = path.join(s.f.claude, 'projects', 'fixture-project', 'claude-main.jsonl');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(main, old, old);
+  const board = await s.f.dashboard();
+  const rows = await s.rows(board);
+  const row = rows.find((r) => r.session === 'claude-main');
+  assert.equal(row.state, 'idle');
+  assert.equal(row.stateSource, 'claude-agents');
+});
+
 test('unreported, unknown and notLoaded statuses retain transcript state', async (t) => {
   const s = await setup(t);
   s.set('claude', [{sessionId:'claude-main',status:'new-vendor-status'}, {id:'running',state:'done'}, null]);

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A Claude session that Claude Code lists as busy only because a command it started in the background
+  runs (a `wait`, a test run) shows as idle on the dashboard once its transcript has ended the turn
+  and been quiet for 15 seconds, instead of running.
 - Codex `strong` runs `gpt-6.2-sol` (was `gpt-6.1-sol`) and `complex` runs `gpt-6.2-astra` (was
   `gpt-6-astra`), at the same efforts (`medium` and `high`).
 - `result` says when a final message has a `PARKED:` line that is neither its first line nor the last

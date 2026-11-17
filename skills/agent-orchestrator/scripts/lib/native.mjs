@@ -17,8 +17,19 @@ import { listRuns } from "./runs.mjs";
 import { readJson } from "./util.mjs";
 import { claudeSessions, codexThreads } from "./vendor-status.mjs";
 
+// How long a Claude session's transcript must be quiet, after its turn ended, before a busy listing
+// is read as a background command rather than a new turn.
+const BACKGROUND_QUIET_MS = 15000;
+
 export function nativeRow({ id, agent, parent, startedMs, lastMs, running, summary, sessionId, file, description, why }) {
-  const status = sessionId && (agent === "claude" ? claudeSessions() : codexThreads())?.get(sessionId);
+  let status = sessionId && (agent === "claude" ? claudeSessions() : codexThreads())?.get(sessionId);
+  // Claude Code lists a session as busy while a command it started in the background runs (a
+  // `wait`, a test run), even after its turn ended. Its transcript says the turn ended: the model is
+  // idle, so the row is too, once the transcript has been quiet for a moment (a new turn's first
+  // event can lag the listing).
+  if (agent === "claude" && status?.state === "running" && summary && summary.busy === false && lastMs && Date.now() - lastMs > BACKGROUND_QUIET_MS) {
+    status = { ...status, state: "idle" };
+  }
   if (status) running = status.state === "running";
   const quietMs = running && lastMs ? Date.now() - lastMs : null;
   const model = status?.model || summary.model || null;
