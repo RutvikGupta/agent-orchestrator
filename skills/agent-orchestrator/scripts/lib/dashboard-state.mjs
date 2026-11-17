@@ -17,7 +17,7 @@ import { claudeNativeAgents, listNative, mainRow, mainTranscript } from "./nativ
 import { reviveParked } from "./park.mjs";
 import { DASHBOARD_CALLER, ownershipOf, resetHostView, sessionsEnded } from "./ownership.mjs";
 import { ceilingFor, modelExceedsCeiling, readPolicy } from "./policy.mjs";
-import { exists, isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive } from "./runs.mjs";
+import { exists, isParked, listRuns, listTasks, loadTask, processSnapshot, relayAlive, resumeBlockedMs } from "./runs.mjs";
 import { parseDuration, tailText } from "./util.mjs";
 import { totals, totalsText, treeOrder } from "./views.mjs";
 
@@ -54,7 +54,11 @@ const boardRow = ({ result, activeMs, ...t }) => ({
 // ended its turn and waits on a background command of its own (`idle`, runs.mjs) with messages
 // unread is `unreachable`, at 2.7: nothing reaches it until that command ends, so it needs someone
 // at once, not only once it has been silent for 15 minutes; `steer` delivers them now.
-const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, unreachable: 2.7, "awaiting-review": 3, silent: 4 };
+// A parked task whose watcher's tries to resume it are all refused (`resumeWaits`, runs.mjs: the
+// reason its last check recorded) is `resume-blocked`, at 2.8, once the first refusal of the streak
+// (`resumeWaitsSince`) is AGENT_ORCH_RESUME_BLOCKED_AFTER (10m) old: the watcher keeps retrying, but
+// nothing resumes the task until someone clears the reason.
+const ATTENTION = { question: 0.5, "needs-decision": 1, failed: 2, stuck: 2.5, unreachable: 2.7, "resume-blocked": 2.8, "awaiting-review": 3, silent: 4 };
 const UNFAILED = new Set(["running", "prepared", "completed", "needs-decision", "idle"]);
 
 export function attentionOf(t, closed, now = Date.now()) {
@@ -64,6 +68,13 @@ export function attentionOf(t, closed, now = Date.now()) {
     const q = t.question;
     const reason = [firstLine(q.text, 140), q.options?.length ? `options: ${q.options.join(" | ")}` : null, q.recommend ? `recommends ${q.recommend}` : null, q.open > 1 ? `+${q.open - 1} more` : null];
     return { ...item("question", "question", reason.filter(Boolean).join(" · ")), sinceMs: Date.parse(q.time) || t.lastActiveMs || 0 };
+  }
+  if (t.phase === "parked" && t.parked?.resumeWaits) {
+    const since = Date.parse(t.parked.resumeWaitsSince) || 0;
+    if (since && now - since >= resumeBlockedMs()) {
+      const reason = `its watcher cannot resume it, and has tried for ${formatElapsed(now - since)}: ${firstLine(t.parked.resumeWaits, 200)}. To clear it: give the task its own worktree, pass --force to \`start\`, or wait for the other writer. The watcher keeps trying`;
+      return { ...item("resume-blocked", "resume blocked", reason), sinceMs: since };
+    }
   }
   // A parked babysitter (park.mjs) waits for its pull request: nothing to review, decide or fix. A
   // task that a stop ended (`stopped`, runs.mjs) was ended on purpose: it did not fail, and whoever

@@ -16,7 +16,7 @@ import { agoText } from "./format.mjs";
 import { parseDuration, writeJson } from "./util.mjs";
 
 // What an item of each kind waits for, after "<task> has waited 25m".
-const WAITS_FOR = { "awaiting-review": "for review", question: "for an answer", "needs-decision": "for a decision", stuck: "while stuck", silent: "while silent", unreachable: "with messages it cannot read", dead: "since its relay died" };
+const WAITS_FOR = { "awaiting-review": "for review", question: "for an answer", "needs-decision": "for a decision", stuck: "while stuck", silent: "while silent", unreachable: "with messages it cannot read", "resume-blocked": "while its resume is blocked", dead: "since its relay died" };
 
 // The notice for an item that went to the user because its agent is gone or cannot take it:
 // "orchestrator session 425c2bc2 is gone (its process has ended); review-me has waited 25m for
@@ -37,6 +37,7 @@ export function agentNoticeText(run, task, item, waitedMs) {
     stuck: `Read its log with ${cmd("log")}, then give it a hint with ${cmd("send").replace(/`$/, ' "<hint>" --steer`')}, or ${cmd("stop")} it.`,
     silent: `Check it with ${cmd("log")}, then nudge it with ${cmd("send").replace(/`$/, ' "<message>"`')}, or ${cmd("stop")} it.`,
     unreachable: `Deliver its messages now with ${cmd("steer")}, which resumes its session with them.`,
+    "resume-blocked": `Its watcher keeps trying and a message you send waits for the resume. See what blocks it with ${cmd("status")}; then give the task its own worktree, resume it yourself with ${cmd("start").replace(/`$/, " ... --force`")}, or wait for the other writer to finish.`,
     question: `Answer it with ${cmd("send").replace(/`$/, ' "<answer>"`')}.`,
   }[item.kind] || `Read it with ${cmd("result")}, then fix and resume it, or ${cmd("close")} it.`;
   return `Agent ${run}/${task.id} (attempt ${task.attempt || 1}), which you started, has waited ${agoText(waitedMs)} on you: ${item.label} — ${item.reason}.\n${todo}`;

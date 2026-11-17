@@ -39,7 +39,11 @@
 // for one task. A park ends with a claim, park-claim-<k>.json, created whole and exclusively with
 // the next k, naming its owner (PID and start time): exactly one resume (the watcher's or a `start`
 // by hand), `stop` or `close` wins it, before writing anything else. A resume records the relay it
-// starts in its claim at once. A claim whose owner died before saving the next attempt is abandoned:
+// starts in its claim at once. A `start` that finds the watcher holding the claim waits for it to end
+// (claimParked). A watcher whose resume is refused (the same-checkout rule, say) releases its claim,
+// records the refusal in park-check.json (`waiting`, and `waitingSince`, the streak's first), and
+// tries again at the next check; once the streak is old enough the task needs attention
+// (dashboard-state.mjs, attentionOf). A claim whose owner died before saving the next attempt is abandoned:
 // the next claimant adopts its relay when that still runs, and otherwise takes the park over.
 // `stop` and `close` always win: they mark the task first, a resume checks for that just before it
 // starts its relay and keeps it when it saves, and they stop a relay a resume started. A parked
@@ -470,8 +474,36 @@ function takeClaim(run, dir, by, since = null) {
   return { holder: "another command" };
 }
 
+// How long a `start` waits for the watcher's claim to end, and how often it looks. The watcher holds
+// its claim only while it tries a resume, which takes a few seconds (longer on a loaded machine) and
+// ends with a saved attempt or a released claim. AGENT_ORCH_PARK_CLAIM_WAIT (90s, 2m, 0 to not
+// wait) sets the wait; a bad value falls back to the default.
+const CLAIM_WAIT_MS = 20000;
+const CLAIM_POLL_MS = 250;
+export function claimWaitMs(value = process.env.AGENT_ORCH_PARK_CLAIM_WAIT) {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : CLAIM_WAIT_MS;
+}
+
+// Block this process for `ms` without spinning, so a claimant can look again.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// The refusal for a claimant that lost the park's claim to `holder`. A resume by the watcher is
+// told apart: its claim completed with a new attempt ("resumed it"), or it still holds the claim
+// (after the wait), and then what its last check recorded decides what is said. A check that
+// recorded `waiting` means the watcher's tries are refused, so it is not "resuming it right now".
+function refusalFor(task, dir, holder) {
+  if (holder !== "watcher") return `task ${task.id} is parked, and \`${holder}\` already ended its park right now; run \`status\` to see its new attempt`;
+  if (parkClaim(dir).state === "done") return `task ${task.id} is parked, and its watcher resumed it; run \`status\` to see its new attempt`;
+  const waiting = readJson(path.join(dir, PARK_CHECK_FILE))?.waiting;
+  if (waiting) return `task ${task.id} is parked, and its watcher's resume is blocked: ${waiting}; run start again`;
+  return `task ${task.id} is parked, and its watcher is resuming it right now; run \`status\` to see its new attempt`;
+}
+
 // For `start` and the watcher: claim a parked task's park before writing anything of the next
-// attempt, so that exactly one resume ends it and a resume that loses changes nothing. Null when the
+// attempt, so that exactly one resume ends it and a resume that loses changes nothing. A `start`
+// that finds the watcher holding the claim waits up to claimWaitMs() for it to end (its try at a
+// resume is short, and a refused one releases the claim), then claims again. Null when the
 // task is not parked; { refused } when a resume, stop or close holds the claim, or when an earlier
 // resume's relay was adopted instead (then also { adopted }). Otherwise: `since`, the task's close
 // and stop as the claimant saw them when it claimed, so that a stop or close that comes after the
@@ -483,13 +515,16 @@ export function claimParked(run, task, by = "start") {
   if (!isParked(run, task)) return null;
   const dir = attemptDir(run, task.id, task.attempt);
   const since = { closedAt: task.closedAt || null, stoppedAt: task.stoppedAt || null };
-  const won = takeClaim(run, dir, by, since);
+  let won = takeClaim(run, dir, by, since);
+  if (by !== "watcher" && !won.generation && !won.adopted && won.holder === "watcher") {
+    const until = Date.now() + claimWaitMs();
+    while (Date.now() < until && parkClaim(dir).state === "live") pause(CLAIM_POLL_MS);
+    won = takeClaim(run, dir, by, since);
+  }
   if (won.adopted) {
     return { adopted: won.adopted, refused: `task ${task.id}'s earlier resume died after starting its relay (pid ${won.adopted.pid}), which still runs: it is now attempt ${won.adopted.attempt}, so nothing new was started` };
   }
-  if (!won.generation) {
-    return { refused: `task ${task.id} is parked, and ${won.holder === "watcher" ? "its watcher is resuming it" : `\`${won.holder}\` already ended its park`} right now; run \`status\` to see its new attempt` };
-  }
+  if (!won.generation) return { refused: refusalFor(task, dir, won.holder) };
   return {
     since,
     spawned: (planned) => writeJson(won.file, { ...won.record, relay: { pid: planned.pid, started: processStarted(planned.pid) }, task: planned }),
@@ -903,7 +938,10 @@ export async function checkPark(dir, generation) {
   } catch (error) {
     claim.release();
     if (!(error instanceof StartRefused)) throw error;
-    writeJson(file, { ...record, waiting: error.message });
+    // `waitingSince` is the first refusal of this streak: kept while each check is refused, gone with
+    // the next record that has no `waiting` (a resume, or a check with nothing to resume for).
+    const since = previous?.waiting ? previous.waitingSince || previous.at || record.at : record.at;
+    writeJson(file, { ...record, waiting: error.message, waitingSince: since });
     return 0;
   }
   // The brief told the session what changed, so that state is now the last one reported.
