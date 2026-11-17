@@ -532,3 +532,40 @@ test('elapsed time shows seconds only under a minute, and only a running row cou
   assert.equal(ticking({ state: 'completed', startedAt: at }), false);
   assert.equal(ticking({ state: 'running' }), false, 'no start time, nothing to count from');
 });
+
+// A parked agent waits on a wake condition: it is neither working nor finished, so it has its own
+// colour rather than the idle grey, in its state text, its dot and the tree line beside it.
+test('a parked row has its own colour in the state text, the dot and the tree line', () => {
+  const css = fs.readFileSync(new URL('../scripts/dashboard/app.css', import.meta.url), 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet('const outcome=', 'const exitedLabel=')}${snippet('const cls=', '\n')};${snippet('const reviewing=', '\n')};${snippet('const dotClass=', '\n')};${snippet('const TONES=', '\n')};this.outcome=outcome;this.cls=cls;this.dotClass=dotClass;this.TONES=TONES;`, context);
+  const parked = { state: 'running', phase: 'parked' };
+  assert.equal(context.outcome(parked), 'parked');
+  assert.equal(context.cls('parked'), 's-parked');
+  assert.equal(context.dotClass(parked), 'd-park');
+  assert.equal(context.TONES['d-park'], 'var(--park)');
+  assert.notEqual(context.cls('idle'), 's-parked');
+  assert.equal(context.dotClass({ state: 'idle' }), '');
+  // Both themes define the colour, and it differs from the idle grey.
+  const park = [...css.matchAll(/--park:(#[0-9a-f]{6})/g)].map((m) => m[1]), idle = [...css.matchAll(/--idle:(#[0-9a-f]{6})/g)].map((m) => m[1]);
+  assert.equal(park.length, 2, 'light and dark themes define --park');
+  park.forEach((colour, i) => assert.notEqual(colour, idle[i]));
+  for (const rule of ['.s-parked{color:var(--park)}', '.dot.d-park{background:var(--park)}', '.caret.d-park{color:var(--park)}']) assert.ok(css.includes(rule), rule);
+});
+
+// A finished task whose result waits on review is the orchestrator's to act on: its row is tinted
+// purple and its dot pulses purple, as a running row's dot pulses, until it is accepted.
+test('a row awaiting review is tinted purple and its dot pulses', () => {
+  const css = fs.readFileSync(new URL('../scripts/dashboard/app.css', import.meta.url), 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet('const outcome=', 'const exitedLabel=')}${snippet('const reviewing=', '\n')};${snippet('const dotClass=', '\n')};this.reviewing=reviewing;this.dotClass=dotClass;`, context);
+  const waiting = { state: 'completed', phase: 'awaiting-review', attention: { kind: 'awaiting-review' } };
+  assert.equal(context.dotClass(waiting), 'd-review');
+  // Accepted, or a babysitter the board does not list for review: green as before.
+  assert.equal(context.dotClass({ state: 'completed', phase: 'accepted', attention: null }), 'd-ok');
+  assert.equal(context.dotClass({ state: 'needs-decision', attention: { kind: 'needs-decision' } }), 'd-ask');
+  assert.ok(app.includes('(reviewing(t)?" reviewing":"")'), 'the row carries the reviewing class');
+  assert.ok(app.includes('querySelectorAll(".dot.d-run,.dot.d-review")'), 'review dots pulse in step with running ones');
+  assert.match(css, /\.dot\.d-review\{background:var\(--ask\);animation:pulse /);
+  assert.match(css, /tbody\.session\.reviewing\{background:color-mix\(in srgb,var\(--ask\)/);
+});

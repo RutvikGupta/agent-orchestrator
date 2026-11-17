@@ -3,7 +3,7 @@ for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextN
 const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":(n/1e6).toFixed(1)+"M";
 const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
-const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="prepared"||s==="closed"||s==="idle"||s==="parked"||s==="stopped"?"s-idle":"s-bad";
+const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="parked"?"s-parked":s==="prepared"||s==="closed"||s==="idle"||s==="stopped"?"s-idle":"s-bad";
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
@@ -25,7 +25,7 @@ function treeGuides(rows){const out=new Map(),path=[];
 // height of the row, so a parent's line ends at the bottom of its last child's row. Each stretch
 // has the colour of the status it stands beside; the line that starts under an open parent has the
 // parent's. `second` is the row's second line.
-const TONES={"d-run":"var(--run)","d-ok":"var(--ok)","d-ask":"var(--ask)","d-bad":"var(--bad)"};
+const TONES={"d-run":"var(--run)","d-ok":"var(--ok)","d-ask":"var(--ask)","d-bad":"var(--bad)","d-park":"var(--park)","d-review":"var(--ask)"};
 function guideLayers(d,g,second){if(!g)return"";const L=[],x=k=>12+IND*(k-1)+"px",c=k=>TONES[g.tone?.[k]]||"var(--guide)";
   for(let k=1;k<d;k++)if(g.cont[k])L.push(["2px 100%",x(k)+" 0",c(k)]);
   if(d>0)L.push(["2px 100%",x(d)+" 0",c(d)]);
@@ -52,8 +52,10 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
   for(const b of root.querySelectorAll("tbody.session")){const old=before.get(b.dataset.key),dy=old==null?null:old-b.getBoundingClientRect().top;
     if(dy==null)b.animate([{opacity:0},{opacity:1}],{duration:350,easing:"ease-out"});
     else if(Math.abs(dy)>1)b.animate([{transform:"translateY("+dy+"px)"},{transform:"none"}],{duration:550,easing:"cubic-bezier(.2,.8,.2,1)"})}};
-const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run"))for(const a of d.getAnimations())a.startTime=0};
-const dotClass=t=>{const s=outcome(t);return s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="idle"||s==="prepared"||s==="closed"||s==="parked"?"":"d-bad"};
+// A finished task whose result waits on review pulses purple, like a running one, until it is accepted.
+const reviewing=t=>t.attention?.kind==="awaiting-review";
+const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run,.dot.d-review"))for(const a of d.getAnimations())a.startTime=0};
+const dotClass=t=>{const s=outcome(t);return reviewing(t)?"d-review":s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="parked"?"d-park":s==="idle"||s==="prepared"||s==="closed"?"":"d-bad"};
 // A row's elapsed time in the board's own format, but with no seconds once it passes a minute. A
 // running row's is counted here from its start, every second (tick), so it moves between board
 // reads; any other row shows what the board sent. A parked babysitter does not count up.
@@ -187,7 +189,7 @@ function sectionView(run){
   const hiddenBy=t=>{for(let p=t.parentKey;p;p=byKey.get(p)?.parentKey)if(!isOpen(run.id+"/"+p))return true;return false};
   const shown=listed.filter(t=>!hiddenBy(t)),guides=treeGuides(shown.map(t=>({key:t.key,depth:t.depth,tone:dotClass(t)})));
   const rows=shown.map(t=>{
-    const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
+    const key=run.id+"/"+t.key,c="session"+(sel===key?" sel":"")+(t.closed?" closed":"")+(reviewing(t)?" reviewing":""),nk=kids.get(t.key)||0,nd=below.get(t.key)||0,shut=nk>0&&!isOpen(key);
     const indent=(w,second)=>({class:"name",style:"padding-left:"+(6+t.depth*IND+w)+"px;--pad:"+(4+t.depth*IND)+"px"+guideLayers(t.depth,guides.get(t.key),second)});
     return $("tbody",{class:c,"data-key":key,tabindex:"0"},$("tr",{},
       $("td",{...indent(0)},
@@ -196,7 +198,7 @@ function sectionView(run){
         t.scopeViolations?.length?$("span",{class:"warn",title:"changed outside its planned files:\n"+t.scopeViolations.join("\n")},"⚠"):null,
         t.inbox?.unread>0?$("span",{class:"mail"},"✉ "+t.inbox.unread+" waiting"):null,
         shut&&nd?$("span",{class:"more"},"+"+nd+" hidden"+(busy.get(t.key)?" · "+busy.get(t.key)+" running":"")):null),$("td",{},t.kind||t.agent),$("td",{},t.modelLabel),$("td",{},t.mode),
-      $("td",{class:"state "+cls(outcome(t))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")),$("td",ticking(t)?{class:"num el","data-start":String(Date.parse(t.startedAt))}:{class:"num"},ticking(t)?elapsedText(Date.now()-Date.parse(t.startedAt)):shortElapsed(t.elapsed)),$("td",{class:"num"},t.steps),
+      $("td",{class:"state "+(reviewing(t)?"s-ask":cls(outcome(t)))},exitedLabel(t)+(outcome(t)==="running"?t.interrupting?" · resuming":t.idle?" · idle":"":"")),$("td",ticking(t)?{class:"num el","data-start":String(Date.parse(t.startedAt))}:{class:"num"},ticking(t)?elapsedText(Date.now()-Date.parse(t.startedAt)):shortElapsed(t.elapsed)),$("td",{class:"num"},t.steps),
       $("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensIn)),$("td",{class:"num"},(t.tokensExact?"":"~")+fmt(t.tokensOut)),
       $("td",{},t.session?t.session.slice(0,8):"-")),
       $("tr",{class:"nowrow"},$("td",{...indent(32,true),colspan:"10"},nowText(t))))});

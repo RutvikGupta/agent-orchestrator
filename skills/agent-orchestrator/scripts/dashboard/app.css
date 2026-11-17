@@ -1,7 +1,7 @@
 :root{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea;--card:#fafafa;--sel:#eef4ff;
---run:#a15c00;--ask:#8250df;--ok:#1a7f37;--review:#0969da;--bad:#c62828;--idle:#6e6e73;--guide:#a8a8b6;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+--run:#a15c00;--ask:#8250df;--ok:#1a7f37;--review:#0969da;--bad:#c62828;--idle:#6e6e73;--park:#0e7c86;--guide:#a8a8b6;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#ececf0;--muted:#9a9aa3;--line:#2c2c31;--card:#1d1d21;--sel:#1f2a3d;
---run:#f0a646;--ask:#c297ff;--ok:#4cc26b;--review:#4f9cf9;--bad:#ff6b6b;--idle:#9a9aa3;--guide:#6a6a7a}}
+--run:#f0a646;--ask:#c297ff;--ok:#4cc26b;--review:#4f9cf9;--bad:#ff6b6b;--idle:#9a9aa3;--park:#3ec5cf;--guide:#6a6a7a}}
 *{box-sizing:border-box}body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
 header{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--bg);flex:none}
 header h1{font-size:16px;margin:0}
@@ -77,14 +77,15 @@ td.name{border-top-color:transparent;background-repeat:no-repeat;background-orig
 tr.nowrow td.name{background-image:var(--gi,none);background-size:var(--gs,0 0);background-position:var(--gp,0 0)}
 .caret{display:inline-block;width:14px;text-align:center;color:var(--muted);font-size:10px;cursor:pointer;user-select:none}
 /* An arrow has its row's status colour, like the line that starts under it. */
-.caret.d-run{color:var(--run)}.caret.d-ok{color:var(--ok)}.caret.d-ask{color:var(--ask)}.caret.d-bad{color:var(--bad)}
+.caret.d-run{color:var(--run)}.caret.d-ok{color:var(--ok)}.caret.d-ask{color:var(--ask)}.caret.d-bad{color:var(--bad)}.caret.d-park{color:var(--park)}.caret.d-review{color:var(--ask)}
 .caret:hover{color:var(--fg)}.caret.blank{cursor:default}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 7px 1px 3px;background:var(--idle);vertical-align:middle}
-.dot.d-run{background:var(--run);animation:pulse 1600ms ease-in-out infinite}.dot.d-ok{background:var(--ok)}.dot.d-ask{background:var(--ask)}.dot.d-bad{background:var(--bad)}
+.dot.d-run{background:var(--run);animation:pulse 1600ms ease-in-out infinite}.dot.d-ok{background:var(--ok)}.dot.d-ask{background:var(--ask)}.dot.d-bad{background:var(--bad)}.dot.d-park{background:var(--park)}.dot.d-review{background:var(--ask);animation:pulse 1600ms ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}.more{color:var(--muted);font-size:12px;margin-left:6px}
 tbody.session{cursor:pointer;background:var(--card)}tbody.session:hover,tbody.session.sel{background:var(--sel)}tbody.session:focus{outline:none}
+tbody.session.reviewing{background:color-mix(in srgb,var(--ask) 12%,var(--card))}tbody.session.reviewing:hover,tbody.session.reviewing.sel{background:color-mix(in srgb,var(--ask) 22%,var(--card))}
 .tree{color:var(--muted);font-family:var(--mono);white-space:pre}
-.state{font-weight:600}.s-running{color:var(--run)}.s-completed{color:var(--ok)}.s-ask{color:var(--ask)}.s-bad{color:var(--bad)}.s-idle{color:var(--idle)}
+.state{font-weight:600}.s-running{color:var(--run)}.s-completed{color:var(--ok)}.s-ask{color:var(--ask)}.s-bad{color:var(--bad)}.s-idle{color:var(--idle)}.s-parked{color:var(--park)}
 .totals{padding:8px 12px;font-size:12px;border-top:1px solid var(--line)}
 /* A closed row is dimmed, but not the tree lines painted behind its first cell: there the text and
    the elements are dimmed, and the cell itself is left alone, so a line keeps one colour and width. */
