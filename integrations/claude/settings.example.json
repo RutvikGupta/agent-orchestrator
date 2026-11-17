@@ -15,6 +15,16 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.agents/skills/agent-orchestrator/scripts/hooks/orch-resume-guard.mjs || true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {

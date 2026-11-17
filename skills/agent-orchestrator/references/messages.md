@@ -208,6 +208,16 @@ or at its next `inbox` (Codex). Where an interrupt would deliver them now, a sec
 command. The dashboard shows the same line above its message box. In `status --json`, a task row's
 `inbox.delivery` holds it as `{ how, text, steer }`.
 
+## Reaching another session
+
+A session's name, the one `SendMessage` and `ListAgents` use, changes when it restarts (`/restart`), so
+a name that was reachable a minute ago may not be. When a name is unreachable, find the session by its
+id in `ListAgents` or `claude agents --json`: a session that is still listed with a live `pid` is
+running under its new name. Never resume a session that is still running: a second process on it
+writes the same transcript and leaves the first one unseen. The hook `scripts/hooks/orch-resume-guard.mjs`
+refuses such a `claude --resume` or `codex resume`, and `start ... -- --session <id>` refuses it too.
+Resume a session only when it truly ended, the way it was started, and tell the user.
+
 ## Messages from the user
 
 - The user can message a running task from the box under its details panel on the dashboard.
