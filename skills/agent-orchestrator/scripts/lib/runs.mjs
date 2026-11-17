@@ -528,6 +528,9 @@ export function parkedOf(run, task, result) {
     lastCheckAt: check?.at || null,
     lastCheckError: check?.error || null,
     resumeWaits: check?.waiting || null,
+    // When the first refusal of the current streak happened (park.mjs records it as `waitingSince`);
+    // an older record has none, and its last check's time is the earliest refusal it proves.
+    resumeWaitsSince: check?.waiting ? check.waitingSince || check.at || null : null,
     claim: claim.state,
     resuming: ["live", "done"].includes(claim.state) ? claim.record?.by || "another command" : null,
   };
@@ -734,11 +737,22 @@ export function idleText(idle) {
   return `idle: ended its turn and waits on its own background ${idle.background ? `command \`${shortText(idle.background, 80)}\`` : "work"}`;
 }
 
-// A parked row's activity line: what it waits for, and its watcher when that needs saying.
+// How long a watcher's tries to resume a parked task may all be refused before the task needs
+// attention (dashboard-state.mjs, attentionOf): AGENT_ORCH_RESUME_BLOCKED_AFTER (90s, 10m, ...),
+// default 10m. A bad value falls back to the default rather than stopping the caller.
+export function resumeBlockedMs(value = process.env.AGENT_ORCH_RESUME_BLOCKED_AFTER) {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : 600000;
+}
+
+// A parked row's activity line: what it waits for, and its watcher when that needs saying. A resume
+// the watcher has been refused for resumeBlockedMs() is said first, so the status table's cut keeps it.
 function parkedNow(p) {
   const watcher = p.resuming ? "resuming" : p.watcher === "dead" || p.watcher === "none" ? "watcher not running (status, start or the dashboard restarts it)" : null;
-  const extra = [watcher, p.resumeWaits ? `resume waits: ${p.resumeWaits}` : null, p.lastCheckError ? `last check failed: ${p.lastCheckError}` : null].filter(Boolean);
-  return shortText(`parked · ${p.waitsFor}${extra.length ? ` · ${extra.join(" · ")}` : ""}`, 300);
+  const since = Date.parse(p.resumeWaitsSince) || 0;
+  const blocked = p.resumeWaits && since && Date.now() - since >= resumeBlockedMs() ? `resume blocked for ${formatElapsed(Date.now() - since)}: ${p.resumeWaits}` : null;
+  const extra = [watcher, blocked ? null : p.resumeWaits ? `resume waits: ${p.resumeWaits}` : null, p.lastCheckError ? `last check failed: ${p.lastCheckError}` : null].filter(Boolean);
+  return shortText(`parked${blocked ? ` · ${blocked}` : ""} · ${p.waitsFor}${extra.length ? ` · ${extra.join(" · ")}` : ""}`, 300);
 }
 
 // What an earlier attempt's result.json says, reread only when the file changes: the dashboard

@@ -743,7 +743,7 @@ test('a command start of a parked task takes the park\'s claim, as every start d
   // The watcher holds the park: it is resuming the task.
   const claim = path.join(task.outDir, 'park-claim-1.json');
   writeJson(claim, { by: 'watcher', claimedAt: new Date().toISOString(), owner: { pid: process.pid } });
-  const refused = await f.command(['start', run.id, 'sitter', '--agent', 'command', '--why', 'Runs a command in its place', '--', 'sleep', '30'], { code: 1 });
+  const refused = await f.command(['start', run.id, 'sitter', '--agent', 'command', '--why', 'Runs a command in its place', '--', 'sleep', '30'], { code: 1, env: { AGENT_ORCH_PARK_CLAIM_WAIT: '0' } }); // the held claim is not waited for
   assert.match(refused.stderr, /task sitter is parked, and its watcher is resuming it right now/);
   assert.equal(readJson(f.taskFile(run, 'sitter')).attempt, 1);
   assert.equal(fs.existsSync(attemptDir(run, 'sitter', 2)), false);

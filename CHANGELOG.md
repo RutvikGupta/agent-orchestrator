@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A parked task whose watcher cannot resume it now says so. When the watcher's tries are refused
+  (another task writing in the same checkout, say) for `AGENT_ORCH_RESUME_BLOCKED_AFTER` (default
+  `10m`), the task gets a `resume blocked` attention item: `wait` exits 5, and `status`, the
+  dashboard and escalation show it, with what to do. `send` says the message is stored and the
+  resume blocked, instead of promising a resume in seconds. A `start` that meets the watcher's claim
+  waits up to 20 seconds for it (`AGENT_ORCH_PARK_CLAIM_WAIT`) instead of being refused with "its
+  watcher is resuming it right now" while the watcher was not resuming anything.
 - An agent no longer starts a second process on a Claude or Codex session that still runs. The
   Claude Code hook `scripts/hooks/orch-resume-guard.mjs` (matcher `Bash`, registered in
   `integrations/claude/settings.example.json`) refuses `claude --resume`, `claude -r`, `codex resume`

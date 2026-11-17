@@ -11,7 +11,7 @@ import { durationText } from "../format.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
 import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
-import { attemptAgent, describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
+import { PARK_CHECK_FILE, attemptAgent, describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { adoptResume, awaitInterrupt, claimResume, heldBy, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
 import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
 
@@ -41,6 +41,13 @@ function delivery(run, task, row = null) {
   if (task.readOnly) return will(`${unhooked}, and a read-only Claude agent has no shell to run \`inbox\`, so it will not read it; ${resume}`);
   if (!noted) return will(`${unhooked}, and this attempt's brief has no inbox note, so Claude will not read it; ${resume}`);
   return will(`${unhooked}, so Claude reads it the next time it runs \`inbox\`, at its next gate run`);
+}
+
+// Why a parked task's watcher cannot resume it, from its latest check (park.mjs records the refused
+// try as `waiting`), or null when its last try was not refused. Until that clears, a message waits
+// in the inbox: the resume that delivers it does not happen.
+function resumeBlock(task) {
+  return task.outDir ? readJson(path.join(task.outDir, PARK_CHECK_FILE))?.waiting || null : null;
 }
 
 // How a message sent now would reach this attempt of the task, and whether it would be read.
@@ -186,8 +193,13 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const g = plan?.stop || plan?.resume ? guard(run, `steer task ${id} of run ${run.id}`, caller ? { caller } : {}) : null;
   const claim = plan?.resume ? claimResume(task, "interrupt", { by: actorLabel(g.actor), ...plan.resume }) : null;
   const answers = from === "user" ? shownToUser(run, task, dir) : [];
+  // A parked task's watcher resumes it within seconds, unless its last try was refused: then the
+  // message is only stored, and the note says why instead of promising a resume.
+  const blocked = parked ? resumeBlock(task) : null;
   const { delivery: how, reaches } = parked
-    ? { delivery: "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
+    ? { delivery: blocked
+      ? `the message is stored, but the task's resume is blocked: ${blocked}; its watcher keeps trying and delivers the message with the resume once that clears`
+      : "the task is parked: its watcher resumes it within a few seconds, with this message in its brief", reaches: true }
     : resuming || claim?.busy
       ? { delivery: "an interrupt is resuming the agent's session: it reads this message with that resume, or after its next tool call", reaches: true }
       : plan?.resume
@@ -217,7 +229,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   else if (claim) steered = startClaimed(run, task, plan, g, claim);
   else if (plan) steered = { waiting: plan.wait, ...(plan.refused ? { refused: true } : {}) };
   else if (steer && resuming) steered = BUSY;
-  else if (steer && parked) steered = { waiting: "the task is parked: its watcher resumes it with this message within a few seconds, so it is not interrupted", refused: true };
+  else if (steer && parked) steered = { waiting: blocked ? `the task is parked and its resume is blocked: ${blocked}, so it is not interrupted` : "the task is parked: its watcher resumes it with this message within a few seconds, so it is not interrupted", refused: true };
   if (steered?.stopped) recordChange(run, g, { task: id, attempt: task.attempt || null, action: "steered" });
   return { message, delivery: how, reaches, steer: steered };
 }

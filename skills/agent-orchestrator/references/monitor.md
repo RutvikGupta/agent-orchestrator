@@ -135,6 +135,13 @@ more than a few minutes.
   `parked`, with what it waits for. `wait` treats it as running. It takes no parallel slot and keeps
   its checkout. `stop` and `close` end the watcher. `status`, `start`, `wait`, `dispatch` and the
   dashboard restart a watcher that died.
+- **A resume that is refused.** The watcher's resume goes through `start`'s checks, so another task
+  writing in the same checkout refuses it. The watcher releases its claim and tries again at the
+  next check; `status` shows `resume waits: <reason>`, and `send` says the message is stored and the
+  resume blocked. After `AGENT_ORCH_RESUME_BLOCKED_AFTER` (default `10m`) of refusals the task has a
+  `resume blocked` attention item: `wait` exits 5, and the dashboard and escalation list it. Give the
+  task its own worktree, pass `--force` to `start`, or wait for the other writer. A `start` that
+  finds the watcher mid-try waits up to 20 seconds (`AGENT_ORCH_PARK_CLAIM_WAIT`) for it to let go.
 - **A babysitter's fix.** When a babysitter's watch attempt ends with `NEEDS FIX:`, the task shows as
   running while the fix attempt starts, with `needs a fix · <reason> · starting its fix attempt at
   the complex tier`. When no fix starts, it shows as `needs-decision` and `wait` exits 5

@@ -25,6 +25,9 @@ const PARKED = [
   '```',
 ].join('\n');
 const SLOW = 20_000; // a watcher's check is a fresh Node process, slow on a loaded machine
+// A start that finds the watcher's claim held waits for it (park.mjs, claimParked); tests that hold
+// that claim themselves and expect the refusal at once turn the wait off.
+const NO_CLAIM_WAIT = { AGENT_ORCH_PARK_CLAIM_WAIT: '0' };
 
 // A fake gh on PATH serving pull request #42, which `set` changes; the same protocol as
 // regression-github.test.mjs. Watchers check every second.
@@ -250,7 +253,7 @@ test('stop ends a park; a dead watcher is reported and restarted once; a hand re
   // While a resume holds the claim, a start by hand is refused.
   const held = { by: 'watcher', claimedAt: new Date().toISOString(), owner: liveOwner() };
   writeJson(claimFile(run, 'sit', 1, 1), held);
-  const refused = await f.command(['start', run.id, 'sit', '--agent', 'claude', '--brief', f.brief('hand'), '--', '--session', 'fixture-claude'], { code: 1 });
+  const refused = await f.command(['start', run.id, 'sit', '--agent', 'claude', '--brief', f.brief('hand'), '--', '--session', 'fixture-claude'], { code: 1, env: NO_CLAIM_WAIT });
   assert.match(refused.stderr, /parked, and its watcher is resuming it/);
   writeJson(claimFile(run, 'sit', 1, 1), { ...held, released: true });
 
@@ -329,7 +332,7 @@ test('a resume that loses the claim changes nothing on disk', async (t) => {
   fs.mkdirSync(next);
   fs.writeFileSync(path.join(next, 'orch-brief.md'), 'WINNING RESUME EVENT');
   const before = fs.readFileSync(f.taskFile(run, 'sit'), 'utf8');
-  const lost = await f.command(['start', run.id, 'sit', '--agent', 'claude', '--brief', f.brief('loser'), '--', '--session', 'fixture-claude'], { code: 1 });
+  const lost = await f.command(['start', run.id, 'sit', '--agent', 'claude', '--brief', f.brief('loser'), '--', '--session', 'fixture-claude'], { code: 1, env: NO_CLAIM_WAIT });
   assert.match(lost.stderr, /parked, and its watcher is resuming it/);
   assert.deepEqual(fs.readdirSync(next), ['orch-brief.md']);
   assert.equal(fs.readFileSync(path.join(next, 'orch-brief.md'), 'utf8'), 'WINNING RESUME EVENT');
