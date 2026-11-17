@@ -472,6 +472,9 @@ function touched(key){if(sel!==key)return;compose();repaint(key)}
 // A long message starts folded to its first line; the arrow before it opens and folds it, and the
 // arrow in the heading does the same for every long message at once. A choice holds while the page
 // is open (msgFold: message id -> true when open).
+// A row with a fold arrow folds from a click anywhere on it, not only on the arrow. A click on a
+// button or link inside it, or one that ends a text selection in it, is left alone.
+const foldClick=fn=>e=>{const s=getSelection();if(e.target.closest("button,a,input,textarea,select")||(s&&!s.isCollapsed&&e.currentTarget.contains(s.anchorNode)))return;fn()};
 const msgFold=new Map(),longText=x=>x.length>280||x.split("\n").length>4;
 function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t);if(!sent.length&&!mine.length)return[];
   const word={sending:"sending…",queued:"queued",failed:"failed"},pic=n=>n?"\n("+imageCount(n)+" attached)":"";
@@ -479,11 +482,11 @@ function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t)
   const open=i=>msgFold.has(i.id)?msgFold.get(i.id):!longText(i.text),long=items.filter(i=>longText(i.text)),anyOpen=long.some(open);
   const flip=(list,to)=>{for(const i of list)msgFold.set(i.id,to);repaint(key)};
   const arrow=i=>longText(i.text)?$("button",{type:"button",class:"mt "+(open(i)?"open":"shut"),"aria-label":open(i)?"fold this message":"show the whole message","aria-expanded":String(open(i)),onclick:()=>flip([i],!open(i))}):null;
-  return[$("h3",{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),"aria-label":anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
-    ...items.map(i=>i.m?$("div",{class:"msg"+(i.m.from==="user"?" you":"")+(open(i)?"":" shut")},
+  return[$("h3",long.length?{class:"fold",onclick:foldClick(()=>flip(long,!anyOpen))}:{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),"aria-label":anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
+    ...items.map(i=>i.m?$("div",{class:"msg"+(i.m.from==="user"?" you":"")+(open(i)?"":" shut")+(longText(i.text)?" fold":""),...(longText(i.text)?{onclick:foldClick(()=>flip([i],!open(i)))}:{})},
       $("span",{class:"k"},arrow(i),(i.m.from==="user"?"you":"orchestrator")+" · "+hhmm(i.m.time)+" · "+(i.m.read?"read":"queued")+(!open(i)&&i.m.replies?.length?" · "+i.m.replies.length+(i.m.replies.length===1?" reply":" replies"):"")),$("pre",{},i.text),
       ...(i.m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+hhmm(r.time)),rich(r.text))))
-    :$("div",{class:"msg you "+i.e.status+(open(i)?"":" shut"),"data-lid":String(i.e.lid)},$("span",{class:"k"},arrow(i),"you · "+hhmm(i.e.at)+" · "+word[i.e.status]),$("pre",{},i.text),
+    :$("div",{class:"msg you "+i.e.status+(open(i)?"":" shut")+(longText(i.text)?" fold":""),"data-lid":String(i.e.lid),...(longText(i.text)?{onclick:foldClick(()=>flip([i],!open(i)))}:{})},$("span",{class:"k"},arrow(i),"you · "+hhmm(i.e.at)+" · "+word[i.e.status]),$("pre",{},i.text),
       i.e.status==="failed"?$("div",{style:"grid-column:2"},$("span",{class:"state s-bad"},"Not sent: "+i.e.error+" "),
         $("button",{type:"button",class:"linkish",onclick:()=>dismiss(key,i.e.lid)},"dismiss")):null))]}
 // The free disk space under the state root, from /api/health: amber below twice the minimum, red below
@@ -555,7 +558,7 @@ function showQueue(t,key){const box=document.getElementById("compose-queue"),row
     oldest=Math.min(...queued.map(r=>r.since).filter(Number.isFinite)),due=Number.isFinite(oldest)?oldest+HINT_MS:null,late=due!=null&&Date.now()>=due,when=t?.inbox?.delivery?.text;
   hintDue=due!=null&&!late?due:null;
   const shut=queueShut();
-  box.replaceChildren(...(rows.length?[$("div",{class:"qh"},
+  box.replaceChildren(...(rows.length?[$("div",{class:"qh fold",onclick:foldClick(()=>{setQueueShut(!shut);showQueue(t,key)})},
       $("button",{type:"button",class:"qt "+(shut?"shut":"open"),"aria-expanded":String(!shut),"aria-label":shut?"Show the waiting messages":"Hide the waiting messages",onclick:()=>{setQueueShut(!shut);showQueue(t,key)}}),
       "Waiting for the agent ("+rows.length+")",
       queued.length?$("button",{type:"button",class:"now",onclick:()=>sendNow(t)},"Send now"):null),

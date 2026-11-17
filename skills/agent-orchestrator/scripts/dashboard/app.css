@@ -45,6 +45,7 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
 /* A folded message shows its first line only; its replies are counted beside its time. */
 .msg pre{min-width:0}.msg.shut pre{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msg.shut .r{display:none}
 .mt{border:0;background:none;color:var(--muted);cursor:pointer;padding:0 5px 0 0;font-size:10px;line-height:1;vertical-align:1px}.mt:hover,.mt:focus-visible{color:var(--fg);outline:none}
+.fold{cursor:pointer}.msg.fold:hover{background:var(--sel)}h3.fold:hover .mt,.qh.fold:hover .qt{color:var(--fg)}
 .mt.open::before{content:"▼"}.mt.shut::before{content:"▶"}.msg .k{font-size:12px;color:var(--muted)}.msg.you .k{color:var(--ask)}
 #runs{overflow:auto;padding:16px 20px}#detail{overflow:auto;padding:16px 20px;min-width:0}
 main.no-detail{grid-template-columns:minmax(0,1fr)}main.no-detail #splitter,main.no-detail #detail,main.no-detail #compose,main.no-detail~#jump{display:none}

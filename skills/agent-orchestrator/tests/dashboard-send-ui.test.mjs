@@ -949,3 +949,39 @@ test('sending, queued, read, failed and steering behave the same while the board
   assert.equal(page.queue().hidden, true);
   assert.equal(page.stamp().className, 'live');
 });
+
+// A row with a fold arrow folds from a click anywhere on it. A click on a button inside it, or one
+// that ends a text selection in it, does not fold it.
+test('a long message, the Messages heading and the waiting list fold from a click anywhere on their row', async () => {
+  const page = await openPage();
+  page.board.add('alpha', { text: `A long message.\n${'another line\n'.repeat(6)}`, from: 'orchestrator', read: true });
+  page.board.add('alpha', { text: 'short', from: 'orchestrator', read: true });
+  await page.choose('alpha');
+  const msgs = () => page.el('detail').querySelectorAll('.msg'), shut = (el) => el.classList.contains('shut');
+  assert.ok(shut(msgs()[0]) && msgs()[0].classList.contains('fold'), 'a long message starts folded and folds from its row');
+  assert.ok(!msgs()[1].classList.contains('fold'), 'a short message has nothing to fold');
+  await msgs()[0].click();
+  assert.ok(!shut(msgs()[0]), 'a click on the row opens it');
+  await msgs()[0].click();
+  assert.ok(shut(msgs()[0]), 'and folds it again');
+  await msgs()[0].dispatch('click', { target: msgs()[0].querySelector('.mt') });
+  assert.ok(shut(msgs()[0]), 'a click on the arrow is left to the arrow');
+  page.ctx.getSelection = () => ({ isCollapsed: false, anchorNode: msgs()[0].querySelector('pre') });
+  await msgs()[0].dispatch('click', { currentTarget: msgs()[0] });
+  assert.ok(shut(msgs()[0]), 'a click that ends a text selection in the row does not fold it');
+  page.ctx.getSelection = () => ({ isCollapsed: true, anchorNode: null });
+  await page.el('detail').querySelector('h3.fold').click();
+  assert.ok(!shut(msgs()[0]), 'a click on the Messages heading opens every long message');
+
+  page.board.delivery = 'It reads them after its next tool call.';
+  page.board.add('beta', { text: 'for beta', from: 'orchestrator' });
+  await page.choose('beta');
+  const box = page.el('compose-queue'), rows = () => page.queue().rows.length;
+  assert.equal(rows(), 1);
+  await box.querySelector('.qh').click();
+  assert.equal(rows(), 0, 'a click on the waiting list heading collapses it');
+  await box.querySelector('.qh').dispatch('click', { target: box.querySelector('.qt') });
+  assert.equal(rows(), 0, 'a click on its arrow is left to the arrow');
+  await box.querySelector('.qh').click();
+  assert.equal(rows(), 1, 'and opens it again');
+});

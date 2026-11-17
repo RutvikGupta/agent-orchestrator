@@ -5,6 +5,9 @@
 - Dashboard colours: a parked task shows in teal (its state, dot and tree line) instead of the idle
   grey. A finished task whose result waits on review gets a purple-tinted row and a purple dot that
   pulses like a running task's.
+- Dashboard: a long message in a task's thread, the "Messages" heading and the "Waiting for the agent"
+  heading fold and open from a click anywhere on their row, not only on the arrow. A click on a
+  button inside the row, or one that ends a text selection, leaves it as it is.
 - A Claude session that Claude Code lists as busy only because a command it started in the background
   runs (a `wait`, a test run) shows as idle on the dashboard once its transcript has ended the turn
   and been quiet for 15 seconds, instead of running.
