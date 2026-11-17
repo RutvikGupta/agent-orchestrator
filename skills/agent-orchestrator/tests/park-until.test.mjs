@@ -131,6 +131,17 @@ test('a PARKED: with nothing to wake it ends completed, and result says why it d
   assert.match((await f.command(['result', run.id, 'idler'])).stdout, /^not parked: its final message says PARKED:, but nothing would wake it/m);
 });
 
+test('a PARKED: line in the middle of the final message does not park, and result says so', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  await f.start(run, 'middle', { config: { finalMessage: 'The suite is still running.\n\nPARKED: waits for the suite\n\nStatus so far: tests pass.' } });
+  const row = await f.finished(run, 'middle');
+  assert.equal(row.state, 'completed');
+  assert.equal(row.parked, undefined);
+  assert.match(row.notParked, /has a `PARKED:` line, but not as the first line or the last line/);
+  assert.match((await f.command(['result', run.id, 'middle'])).stdout, /^not parked: its final message has a `PARKED:` line/m);
+});
+
 test('a wake condition that cannot run, or whose longest wait passes, wakes the task with what happened', async (t) => {
   const f = await fixture(t);
   f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: 'Handled.' });

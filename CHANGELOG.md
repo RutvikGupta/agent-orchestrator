@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `result` says when a final message has a `PARKED:` line that is neither its first line nor the last
+  line before the `orch-result` block, so the task did not park.
 - A parked task whose watcher cannot resume it now says so. When the watcher's tries are refused
   (another task writing in the same checkout, say) for `AGENT_ORCH_RESUME_BLOCKED_AFTER` (default
   `10m`), the task gets a `resume blocked` attention item: `wait` exits 5, and `status`, the

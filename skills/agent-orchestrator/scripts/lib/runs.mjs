@@ -632,7 +632,13 @@ export function recordChild(parentRun, parent, run, child, attempt) {
 
 // Why a completed attempt whose final message says `PARKED:` did not park, or null.
 function notParkedWhy(run, task, result) {
-  if (result?.status !== "completed" || parkedText(result.finalMessage) === null || task.closedAt || task.stoppedAt) return null;
+  if (result?.status !== "completed" || task.closedAt || task.stoppedAt) return null;
+  if (parkedText(result.finalMessage) === null) {
+    // A PARKED: line elsewhere in the message: the agent meant to park, and would otherwise end
+    // completed with nothing to wake it and nothing to say why.
+    const body = String(result.finalMessage || "").split(/^[\t ]*```orch-result[\t ]*\r?$/m)[0];
+    return /^PARKED:/m.test(body) ? "its final message has a `PARKED:` line, but not as the first line or the last line before the orch-result block, so it did not park" : null;
+  }
   if (attemptAgent(task, task.attempt) === COMMAND_AGENT) return "a command task never parks";
   if (parkBasis(run, task, result)) return null;
   return `its final message says PARKED:, but nothing would wake it: it recorded no wake condition with \`park-until\` in this attempt, and no task it started was still running when it ended. It ended as completed`;
