@@ -349,7 +349,7 @@ test('a delegated task never starts a stronger tier than its own, on either agen
     ['luna', 'claude', 'standard', 2, 'codex light (gpt-6-luna)'],
     ['luna', 'codex', 'standard', 2, 'codex light (gpt-6-luna)'],
     ['luna', 'claude', 'light', 0],
-    ['sol', 'claude', 'complex', 2, 'codex strong (gpt-6.1-sol)'],
+    ['sol', 'claude', 'complex', 2, 'codex strong (gpt-6.2-sol)'],
     ['sol', 'claude', 'standard', 0],
     ['opus', 'claude', 'frontier', 2, 'claude complex (claude-opus-5-5)'],
     ['opus', 'codex', 'complex', 0],

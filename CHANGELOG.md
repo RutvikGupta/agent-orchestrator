@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Codex `strong` runs `gpt-6.2-sol` (was `gpt-6.1-sol`) and `complex` runs `gpt-6.2-astra` (was
+  `gpt-6-astra`), at the same efforts (`medium` and `high`).
 - `result` says when a final message has a `PARKED:` line that is neither its first line nor the last
   line before the `orch-result` block, so the task did not park.
 - A parked task whose watcher cannot resume it now says so. When the watcher's tries are refused

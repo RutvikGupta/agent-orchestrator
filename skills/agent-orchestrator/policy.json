@@ -48,13 +48,13 @@
         "use": "well-specified, bounded coding: small changes with clear done criteria, tests for existing behavior, lint or type fixes, reviews of small diffs"
       },
       "strong": {
-        "model": "gpt-6.1-sol",
+        "model": "gpt-6.2-sol",
         "rank": 3,
         "effort": "medium",
         "use": "bounded work that needs more judgment: live web research, reviews of medium diffs, debugging in a known area, a standard attempt that failed. Near-astra quality at a lower cost"
       },
       "complex": {
-        "model": "gpt-6-astra",
+        "model": "gpt-6.2-astra",
         "rank": 4,
         "effort": "high",
         "use": "hard or high-risk implementation: several modules, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed strong attempt"
