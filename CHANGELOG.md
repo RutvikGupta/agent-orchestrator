@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- An agent no longer starts a second process on a Claude or Codex session that still runs. The
+  Claude Code hook `scripts/hooks/orch-resume-guard.mjs` (matcher `Bash`, registered in
+  `integrations/claude/settings.example.json`) refuses `claude --resume`, `claude -r`, `codex resume`
+  and `codex exec resume` of a running session, also inside `tmux`, `nohup` or `bash -c`, and tells
+  the agent to message the session; `start ... -- --session <id>` refuses the same. A session
+  restarted under a new name had looked ended, and a copy of it ran beside the original.
+  `AGENT_ORCH_RESUME_GUARD=off` turns the hook off.
 - A session that two Claude processes run (a second `claude --resume` in another terminal or tmux)
   shows the state of its most active process on the dashboard, not of whichever one Claude Code
   lists last: an idle duplicate made a working session read idle.

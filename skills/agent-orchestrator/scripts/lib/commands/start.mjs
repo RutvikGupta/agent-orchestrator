@@ -10,6 +10,7 @@ import { startDetached } from "../detach.mjs";
 import { ensureFinishWatcher, runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote, inboxWake } from "../inbox.mjs";
 import { BABYSIT_BRIEF_FILE, HANDOFF_FILE, claimParked, coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, handoffWhy, reviveParked } from "../park.mjs";
+import { liveClaudeSession, liveSessionReason, processExists, sessionIdPrefix } from "../session-guard.mjs";
 import { resumeLock } from "../steer.mjs";
 import { phaseMap, reviewRoundsOf, verificationsOf } from "../lifecycle.mjs";
 import { escalationFor, failureHint } from "../escalation.mjs";
@@ -310,7 +311,9 @@ function prepareStart(args, extra = {}) {
     refuse(`a babysitter watches at the light, ${BABYSIT_WATCH_TIER} (the default) or ${BABYSIT_FIX_TIER} tier, and its fix attempts run ${BABYSIT_FIX_TIER}; drop --tier ${watchTier}`, 2);
   }
   refuseStronger(key, tier, babysit && (fixAttempt || !args.tier));
-  if (!args.check && relayAlive(prev.pid, null, prev.outDir)) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  const ownRelayRuns = relayAlive(prev.pid, null, prev.outDir);
+  if (!args.check && ownRelayRuns) refuse(`task ${id} is already running (pid ${prev.pid})`);
+  if (key === "claude" && !ownRelayRuns) refuseRunningSession(id, args.passthrough);
   const cd = path.resolve(args.cd || prev.cd || run.repo);
   if (!fs.existsSync(cd)) refuse(missingDirectory(run, id, prev, cd));
   // The orchestrator chooses the agent and tier by assessing the task; record why. A follow-up
@@ -630,6 +633,26 @@ function withoutSession(argv) {
     out.push(argv[i]);
   }
   return out;
+}
+
+// Refuses a start whose `--session` is a Claude session that a process still runs: a second process
+// on it makes two processes write one session. The caller skips this while the task's own relay
+// runs: the process on the session may be that relay's, and a start then is refused as "already
+// running" anyway (a `--check` passes). It asks `claude agents --json`, and any
+// failure of that, or an id that is not a session id (a name, a path), lets the start go on. A
+// process that was told to end a moment ago, as an interrupt does, gets two seconds to go.
+function refuseRunningSession(id, passthrough) {
+  const wanted = sessionIdPrefix(sessionOf(passthrough));
+  if (!wanted) return;
+  let live = null;
+  try {
+    live = liveClaudeSession(wanted, { timeoutMs: 1900 });
+    for (let waited = 0; live && waited < 2000 && processExists(live.pid); waited += 200) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    if (live && !processExists(live.pid)) live = null;
+  } catch {
+    live = null;
+  }
+  if (live) refuse(`cannot start ${id}: ${liveSessionReason(live)}`);
 }
 
 // The session id that relay arguments resume, or null.
