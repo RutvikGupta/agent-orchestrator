@@ -1,6 +1,7 @@
 // The dashboard's local web server: serves the page in scripts/dashboard/ and its JSON API, and
 // pushes a "change" event to open tabs as soon as an agent writes.
 
+import { awakeClock } from "./awake-clock.mjs";
 import { CLI_PATH } from "./config.mjs";
 import { fork, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -203,13 +204,19 @@ export async function serveDashboard({ host, port, args }) {
   // sooner after the last build's end than twice that build's duration, so a slow board cannot
   // keep a core busy.
   const POLL_MS = 2000, HEAVY_MS = 5000, VIEWER_MS = 30_000, KILL_AFTER_MS = 2000, FIRST_BOARD_MS = 10_000, PACE_MS = 1000;
+  // The longest the worker rests after a build, however long that build seemed to take.
+  const MAX_REST_MS = 60_000;
+  // Builds are timed and paced on this clock, which stops while the machine sleeps. On the wall
+  // clock a build in flight through a sleep counted as a build that long: the board then stood still
+  // for twice the sleep after the machine woke, or the worker was stopped as hung.
+  const clock = awakeClock();
   let snapshot = null; // the last board built: { body, heavyBody, ids, running, heavyAt, startedAt, builtAt }
   let failure = null; // why the latest build failed, until one succeeds
   let worker = null; // { child, retiring, gone, killTimer }: the one worker, until it has exited
-  let build = null; // the build in flight: { id, startedAt, limitMs, killMs, timer }
+  let build = null; // the build in flight: { id, startedAt, began, limitMs, killMs, timer }; `began` is on the awake clock
   let builds = 0, again = false; // builds started; whether one must start as soon as the worker is free
   let failedInRow = 0;
-  let lastStart = 0, lastEnd = 0, lastTook = 0;
+  let lastStart = 0, lastEnd = 0, lastTook = 0; // on the awake clock
   let wantRead = false, wantFile = false, wantCheck = false, laterTimer = null;
   let lastPoll = 0; // the last /api/state request
   let escalate = null, escalateFrom = null, checkIdle = () => {};
@@ -227,8 +234,8 @@ export async function serveDashboard({ host, port, args }) {
     const done = build;
     clearTimeout(done.timer);
     build = null;
-    lastEnd = Date.now();
-    lastTook = lastEnd - done.startedAt;
+    lastEnd = clock.now();
+    lastTook = lastEnd - done.began;
     return done;
   };
   // A build lost with its worker is retried by the next worker: always after a timeout, whose
@@ -333,11 +340,16 @@ export async function serveDashboard({ host, port, args }) {
     // and be slower still, so on a busy machine stopping at the stale limit never yields a board.
     const limitMs = snapshot ? buildTimeoutMs : firstBuildTimeoutMs;
     const killMs = snapshot ? killTimeoutMs : Math.max(firstBuildTimeoutMs, killTimeoutMs);
-    const w = worker, current = { id: ++builds, startedAt: Date.now(), limitMs, killMs };
+    const w = worker, current = { id: ++builds, startedAt: Date.now(), began: clock.now(), limitMs, killMs };
     build = current;
-    lastStart = current.startedAt;
+    lastStart = current.began;
+    // The timer also counts the time the machine slept: the build is hung only once it has run
+    // for `killMs` awake, so a timer that fires sooner waits for the rest.
     const overdueBuild = () => {
-      if (build === current) retire(w, new Error(`state build timed out after ${current.killMs / 1000}s`), true);
+      if (build !== current) return;
+      const left = current.killMs - (clock.now() - current.began);
+      if (left > 0) current.timer = setTimeout(overdueBuild, left);
+      else retire(w, new Error(`state build timed out after ${current.killMs / 1000}s`), true);
     };
     current.timer = setTimeout(overdueBuild, current.killMs);
     try {
@@ -353,7 +365,7 @@ export async function serveDashboard({ host, port, args }) {
   };
   const later = () => {
     if (build || laterTimer) return;
-    const wait = Math.max(lastStart + PACE_MS, lastEnd + 2 * lastTook) - Date.now();
+    const wait = Math.max(lastStart + PACE_MS, lastEnd + Math.min(2 * lastTook, MAX_REST_MS)) - clock.now();
     if (wait > 0) {
       laterTimer = setTimeout(pacedBuild, wait);
       return;
@@ -365,7 +377,10 @@ export async function serveDashboard({ host, port, args }) {
   // all there is nothing to serve, so build now.
   const revalidate = () => {
     if (!snapshot) return build ? undefined : startBuild();
-    if (Date.now() - snapshot.builtAt < POLL_MS && Date.now() - snapshot.heavyAt < HEAVY_MS) return;
+    // A board dated after now (the wall clock was set back) is old: it would otherwise count as new
+    // until the clock caught up.
+    const age = Date.now() - snapshot.builtAt;
+    if (age >= 0 && age < POLL_MS && Date.now() - snapshot.heavyAt < HEAVY_MS) return;
     wantRead = true;
     later();
   };
@@ -550,7 +565,7 @@ export async function serveDashboard({ host, port, args }) {
         // age in seconds and the problem's first line, as printable ASCII so no error text can
         // make the header invalid.
         const board = () => {
-          const overdue = build && Date.now() - build.startedAt >= build.limitMs ? `state build has run past ${build.limitMs / 1000}s` : null;
+          const overdue = build && clock.now() - build.began >= build.limitMs ? `state build has run past ${build.limitMs / 1000}s` : null;
           const problem = overdue || failure?.message;
           send(200, "application/json", snapshot.body, {
             "x-orch-heavy": snapshot.heavyBody,

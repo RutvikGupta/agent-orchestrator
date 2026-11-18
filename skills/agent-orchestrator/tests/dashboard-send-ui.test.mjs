@@ -985,3 +985,30 @@ test('a long message, the Messages heading and the waiting list fold from a clic
   await box.querySelector('.qh').click();
   assert.equal(rows(), 1, 'and opens it again');
 });
+
+// A read of the board that never answers (a stopped or hung server) is given up after its limit, so
+// the reads behind it run: the page does not stand still until someone reloads it.
+test('a board read that never answers is given up, and the page reads again', async (t) => {
+  const page = await openPage();
+  page.ctx.AbortSignal = { timeout: (ms) => ({ ms }) };
+  const answer = page.ctx.fetch, limits = [];
+  let hung = true, giveUp = null;
+  page.ctx.fetch = (url, init = {}) => {
+    if (url !== 'api/state' || !hung) return answer(url, init);
+    limits.push(init.signal?.ms);
+    return new Promise((_, reject) => { giveUp = () => reject(new Error('The operation timed out.')); });
+  };
+  vm.runInContext('soon()', page.ctx);
+  await flush();
+  vm.runInContext('soon()', page.ctx); // a second refresh waits behind the first
+  await flush();
+  assert.deepEqual(limits, [20000], 'one read, with its time limit');
+  // The limit passes. The page says so, and the refresh that waited reads the board.
+  page.board.add('alpha', { text: 'arrived while the read hung', from: 'orchestrator', read: true });
+  hung = false;
+  giveUp();
+  await flush();
+  assert.equal(page.el('stamp').textContent, '', 'the read after the hung one did not clear "disconnected"');
+  await page.choose('alpha');
+  assert.ok(page.thread().some(([, , text]) => text === 'arrived while the read hung'), 'the board on the page is still the old one');
+});

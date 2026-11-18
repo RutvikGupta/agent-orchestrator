@@ -21,6 +21,11 @@ act on. `SKILL.md` step 5 says when to open it.
   hung, stopped and started again. Until the first board is built, each build gets
   `AGENT_ORCH_FIRST_BUILD_TIMEOUT` instead (default `5m`, never less than the other limits): a first
   build reads everything with cold caches, often on a machine that is still busy after a restart.
+- Those limits, and the rest between builds (twice the last build's time, at most a minute), count
+  only the time the machine was awake. A laptop that sleeps with a build in flight shows a current
+  board within seconds of waking: the build is not taken for hung, and no rest follows the sleep.
+  The page gives up a board read that gets no answer in 20 seconds, says "disconnected", and reads
+  again.
 - Every five minutes it stops orphaned build daemons (`reclaim`; `AGENT_ORCH_RECLAIM=off` turns it
   off). Five minutes after it starts, and five minutes after each pass ends, it collects unused
   worktrees (`gc --auto`; `AGENT_ORCH_AUTO_GC=off` turns it off). The two never run at the same

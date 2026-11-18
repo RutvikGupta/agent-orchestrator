@@ -12,7 +12,9 @@ import { eventually, fixture, readJson } from './helpers.mjs';
 // stale boards after failures, and escalation from fresh builds only. The dashboard's server and
 // its state worker load PRELOAD, which the test steers through files in a control folder (ctl).
 //
-// Server: its clock stands still at its start plus the milliseconds in ctl/clock. The timers whose
+// Server: its clock stands still at its start plus the milliseconds in ctl/clock. ctl/asleep holds
+// the milliseconds the machine slept: they move the wall clock and the monotonic clock together, as
+// a sleep does, while ctl/clock moves only the wall clock, as time awake does here. The timers whose
 // callbacks are named in TIMERS never fire on their own: ctl/timers logs each one set, cleared or
 // fired, with its delay, and the test fires them. On SIGUSR2 the server runs the commands in ctl/do
 // ("check" runs the escalation checks, which otherwise never run; "fire NAME" fires the pending
@@ -45,11 +47,11 @@ const hold = (name) => {
 };
 if (ctl && process.argv[2] === 'dashboard') {
   const base = realNow();
-  Date.now = () => {
-    let skew = 0;
-    try { skew = Number(fs.readFileSync(at('clock'), 'utf8')) || 0; } catch {}
-    return base + skew;
-  };
+  const skew = (name) => { try { return Number(fs.readFileSync(at(name), 'utf8')) || 0; } catch { return 0; } };
+  Date.now = () => base + skew('clock') + skew('asleep');
+  const { performance } = require('node:perf_hooks');
+  const realPerformanceNow = performance.now.bind(performance);
+  performance.now = () => realPerformanceNow() + skew('asleep');
   const controlled = new Set(${JSON.stringify(TIMERS)});
   const pending = new Map();
   let ids = 0;
@@ -204,6 +206,8 @@ async function setup(t, { env = {}, prepare = async () => {}, announced = true, 
     lines,
     // Move the server's clock forward.
     advance(ms) { fs.writeFileSync(at('clock'), String((Number(fs.existsSync(at('clock')) ? fs.readFileSync(at('clock'), 'utf8') : 0) || 0) + ms)); },
+    // The machine sleeps for `ms`: every clock of the server jumps, and it ran nothing meanwhile.
+    sleep(ms) { fs.writeFileSync(at('asleep'), String((Number(fs.existsSync(at('asleep')) ? fs.readFileSync(at('asleep'), 'utf8') : 0) || 0) + ms)); },
     // Run commands in the server ("check", "fire NAME") and wait until it has.
     async control(...commands) {
       const acks = lines('acks').length;
@@ -423,6 +427,12 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
   await b.rebuild();
   await eventually(() => b.exists('blocked'), 'the build did not hang');
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [3000]);
+  // Fired before the build has run for its limit, the watchdog waits for the rest.
+  b.advance(2000);
+  await b.control('fire overdueBuild');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [1000]);
+  assert.equal(b.workers().length, 1);
+  b.advance(1000);
   await b.control('fire overdueBuild');
   await eventually(() => b.output().includes('state build timed out after 3s'), 'the deadline did not stop the build');
   b.remove('ignoreterm'); // later workers honor SIGTERM
@@ -431,7 +441,7 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
   const stale = await b.state();
   assert.equal(stale.text, initial.text);
   assert.equal(stale.response.headers.get('x-orch-error'), 'state build timed out after 3s');
-  assert.equal(stale.response.headers.get('x-orch-stale'), '5');
+  assert.equal(stale.response.headers.get('x-orch-stale'), '8');
   assert.equal((await b.get('/api/health')).status, 200);
   const sent = await b.post('sent while the hung worker is being stopped');
   assert.ok(alive(first.pid), 'the worker ignoring SIGTERM died before its grace ended');
@@ -451,6 +461,7 @@ test('an overdue build is stopped with SIGTERM, then SIGKILL; a replacement star
   const count = b.workers().length;
   for (let i = 1; i <= 2; i++) {
     await eventually(() => b.builds().at(-1).pid === b.workers().at(-1).pid && !b.builds().at(-1).ended && b.pending('overdueBuild').length === 1, `hung build ${i} did not start`);
+    b.advance(3000);
     await b.control('fire overdueBuild');
     await eventually(() => b.workers().length === count + i, `replacement ${i} did not start`);
   }
@@ -501,6 +512,63 @@ test('a build past its stale limit keeps running: reads get the cached board mar
   assert.equal((await b.state()).response.headers.get('x-orch-error'), null);
   assert.equal(b.workers().length, 1, 'a slow build was replaced');
   assert.equal(b.workers()[0].pid, worker.pid);
+});
+
+// A laptop sleeps with a build in flight. The server's timers and its wall clock kept counting, so on
+// waking the watchdog fires and the build seems to have taken as long as the sleep. Neither may count:
+// the worker was not hung, and resting twice the sleep would leave the board standing still.
+test('a build in flight while the machine sleeps is not taken for hung, and the next build does not wait out the sleep', async (t) => {
+  const b = await setup(t);
+  await b.tab();
+  const [worker] = b.workers();
+  b.touch('hang');
+  await b.rebuild();
+  await eventually(() => b.exists('blocked'), 'the build did not start');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [300_000]);
+  b.sleep(20 * 60_000);
+  await b.control('fire overdueBuild');
+  assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [300_000], 'the watchdog did not give the build its whole time awake');
+  assert.equal(b.workers().length, 1, 'the worker was replaced');
+  assert.ok(alive(worker.pid), 'the worker was stopped');
+  assert.equal((await b.state()).response.headers.get('x-orch-error'), null, 'a build that slept is not overdue');
+  b.touch('release');
+  await b.settled();
+  assert.equal(occurrences(b.output(), 'timed out'), 0, b.output());
+  // The read during that build asked for another. The build took no time awake, so that one is due a
+  // second after it started, not twice the sleep later.
+  assert.deepEqual(b.pending('pacedBuild').map((x) => x.ms), [1000]);
+  b.advance(1000);
+  const sends = b.sends();
+  await b.control('fire pacedBuild');
+  assert.equal(b.sends(), sends + 1, 'the paced build did not start');
+  await b.settled();
+  // A sleep with no build in flight: the first read after it asks for a build, paced as ever.
+  b.sleep(8 * 60 * 60_000);
+  await b.state();
+  assert.deepEqual(b.pending('pacedBuild').map((x) => x.ms), [1000]);
+  b.advance(1000);
+  await b.control('fire pacedBuild');
+  assert.equal(b.sends(), sends + 2, 'the build after the sleep did not start');
+  await b.settled();
+});
+
+// However long a build took, the worker rests at most a minute before the next one.
+test('the rest after a slow build is twice its time, and never more than a minute', async (t) => {
+  const b = await setup(t, { env: { AGENT_ORCH_BUILD_TIMEOUT: '10m', AGENT_ORCH_BUILD_KILL_TIMEOUT: '10m' } });
+  await b.tab();
+  b.touch('hang');
+  await b.rebuild();
+  await eventually(() => b.exists('blocked'), 'the build did not start');
+  b.advance(100_000);
+  b.touch('release');
+  await b.settled();
+  const sends = b.sends();
+  await b.state();
+  assert.deepEqual(b.pending('pacedBuild').map((x) => x.ms), [60_000]);
+  b.advance(60_000);
+  await b.control('fire pacedBuild');
+  assert.equal(b.sends(), sends + 1, 'the paced build did not start');
+  await b.settled();
 });
 
 test('a worker error while its process lives stops that process before another starts', async (t) => {
@@ -687,6 +755,7 @@ test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lo
   // A read waits for the first board, through the lost build and its replacement.
   const waiting = b.get('/api/state');
   await eventually(() => b.pending('answerWaitingRead').length === 1, 'the read did not wait for the first board');
+  b.advance(90_000);
   await b.control('fire overdueBuild');
   await eventually(() => b.output().includes('state build timed out after 90s'), `the first build was not stopped at its deadline:\n${b.output()}`);
   // Its replacement is a first build too.

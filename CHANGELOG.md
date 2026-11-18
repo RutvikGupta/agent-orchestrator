@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The dashboard no longer stands still after the machine sleeps. Its server timed each build on the
+  wall clock and then rested twice that long, so a build in flight through a sleep counted as a build
+  that long: the board stayed as it was for twice the sleep after waking (reads got the old board,
+  with no stale mark), or, past `AGENT_ORCH_BUILD_KILL_TIMEOUT`, the worker was stopped as hung.
+  Builds are now timed and paced on a clock that stops while the machine sleeps or the server is
+  stopped, and the rest between builds is at most a minute. The page gives up a board read that gets
+  no answer in 20 seconds and reads again, instead of waiting behind it until a reload.
 - Dashboard colours: a parked task shows in teal (its state, dot and tree line) instead of the idle
   grey. A finished task whose result waits on review gets a purple-tinted row and a purple dot that
   pulses like a running task's.

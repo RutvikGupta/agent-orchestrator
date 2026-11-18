@@ -124,7 +124,10 @@ async function refresh(){
   // Reads overlap (a click, a push and the timer all start one). One that started earlier but answers
   // after a newer one is dropped, so the board never steps back to a state before a message was stored.
   const mine=refresh.sent=(refresh.sent||0)+1;
-  let text,heavy={running:0,waiting:0},stale=null;try{const r=await fetch("api/state"),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="";return}
+  // A read that never answers (a stopped or hung server) would hold every later refresh behind it,
+  // so it is given up after 20 seconds: the page says "disconnected" and reads again.
+  const limit=typeof AbortSignal!=="undefined"&&AbortSignal.timeout?{signal:AbortSignal.timeout(20000)}:{};
+  let text,heavy={running:0,waiting:0},stale=null;try{const r=await fetch("api/state",limit),v=r.headers.get("x-orch-server");if(server&&v&&v!==server){keepState();location.reload();return}server=v;heavy=JSON.parse(r.headers.get("x-orch-heavy")||"null")||heavy;text=await r.text();stale=staleNote(r,text)}catch{const st=document.getElementById("stamp");st.className="live off";st.textContent="disconnected";st.title="";return}
   if(mine<(refresh.applied||0))return;refresh.applied=mine;
   // The mark follows every answer, whether or not the board changed: a green dot while the board is
   // current, red "stale: <reason>" while it is a cached one (or the server has none to send yet).
