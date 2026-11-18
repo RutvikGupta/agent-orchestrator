@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Waiting needs no model, now said for a wait followed by fixed commands too (wait for a sync, then
+  trigger a run): it is one command task, never an agent of any tier, and an agent that must judge
+  after a wait parks. `SKILL.md`, the delegation note `start` appends, `references/agents.md` (a
+  wait-then-trigger example) and the policy notes say so, and `start` notes a model task whose
+  `--why` describes waiting.
 - The dashboard no longer stands still after the machine sleeps. Its server timed each build on the
   wall clock and then rested twice that long, so a build in flight through a sleep counted as a build
   that long: the board stayed as it was for twice the sleep after waking (reads got the old board,

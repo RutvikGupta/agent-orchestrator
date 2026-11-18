@@ -108,7 +108,8 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   assert.ok(noteLength > 0 && noteLength < 2500, `the note stays short: ${noteLength} characters`);
   // Delegate through the skill, rather than doing parts one after another.
   assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
-  assert.match(note, /run it as a command task with no model .*never as an agent that runs it and waits/);
+  // A command, or a wait then fixed commands, is a command task; an agent that must judge after a wait parks.
+  assert.match(note, /Never start an agent to wait or to run a command: make it one command task \(`start <run> <task> --agent command .*until <check>; do sleep 30; done; <commands>'`\)\. To judge after a wait, park \(`park-until -- <check>`\)/);
   assert.match(note, /Never forward your whole task to a single agent.*split it, or do it yourself.*say so with `node .*orch\.mjs ask/);
   assert.match(note, /two or more independent parts, split it and start one agent per part/);
   assert.match(note, /slow side work \(test suites, gates, builds, deploys, long runs, reviews/);
@@ -272,4 +273,24 @@ test('a finished task whose PID another task\'s relay now holds is not running, 
   assert.deepEqual(await states(), { ended: 'completed', live: 'running' });
   f.release(live);
   await f.finished(run, 'live');
+});
+
+// Waiting needs no model: `start` notes a model task whose --why says it waits, and names the task to stop.
+test('start notes a model task whose --why describes waiting, and only that', async (t) => {
+  const f = await fixture(t);
+  const run = await f.newRun();
+  const start = (id, why, flags = []) => f.command(['start', run.id, id, '--agent', 'claude', '--tier', 'light', '--why', why, '--read-only', '--brief', f.brief(id), ...flags]);
+  const waits = await start('trigger', 'light: waits for a sync, triggers one staged DAG run and starts a wait task; nothing to judge');
+  assert.match(waits.stdout, /note: this --why describes waiting, which needs no model\. A wait then fixed commands is one command task/);
+  assert.match(waits.stdout, new RegExp(`stop ${run.id} trigger$`, 'm'));
+  for (const why of ['polls CI until it is green', 'keeps checking the merge queue', 'monitors the DAG run']) {
+    const id = `w${why.length}`;
+    assert.match((await start(id, why)).stdout, /describes waiting/, why);
+    await f.finished(run, id);
+  }
+  // Work that mentions a wait without doing one gets no note.
+  const fixes = await start('fix-wait', 'fixes the script that hangs while the sync runs; mechanical');
+  assert.doesNotMatch(fixes.stdout, /describes waiting/);
+  await f.finished(run, 'trigger');
+  await f.finished(run, 'fix-wait');
 });

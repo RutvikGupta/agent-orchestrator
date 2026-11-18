@@ -172,6 +172,18 @@ brief. Work that only runs a command and waits belongs here, not in an agent's s
   `AGENT_ORCH_TASK`, `AGENT_ORCH_DEPTH`, and `agent-env.json`). So an agent it starts, such as a
   review script's `claude -p` or `codex exec`, is linked to the task, and the board shows it in the
   task's own row (`references/dashboard.md`, "Agents it finds on its own").
+- **Wait, then act.** A wait followed by fixed commands is one command task, never an agent of any
+  tier: an agent spends tokens on every check while it waits. The script waits, then runs the
+  commands; give it a `--timeout`:
+
+  ```bash
+  $ORCH start <run> trigger-e2e --agent command --timeout 20m \
+    --why "waits for the sync, then triggers the run; nothing to judge" \
+    -- sh -c 'until sh tmp/synced.sh <namespace> <commit>; do sleep 30; done; <trigger command>'
+  ```
+
+  When the step after the wait needs judgment (read the result, then decide), the agent that must
+  judge parks with `park-until -- <check>` and acts when its watcher wakes it ("Cost and limits").
 - **When it succeeds.** It exits 0 and, with `--done`, a line of its output contains the marker.
   Otherwise it fails. `--timeout` stops it after DUR, with the status `timeout`.
 - **What it records.** `relay.log` holds its full stdout and stderr together. `events.jsonl` holds

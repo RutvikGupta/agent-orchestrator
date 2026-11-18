@@ -18,7 +18,7 @@ Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SK
 
 - When the task has two or more independent parts, split it and start one agent per part.
 - When it has slow side work (test suites, gates, builds, deploys, long runs, reviews, the other model's opinion), start an agent for it and keep working.
-- When you only need a command's or script's output, run it as a command task with no model (\`start <run> <task> --agent command --why "..." -- <argv>\`), never as an agent that runs it and waits.
+- Never start an agent to wait or to run a command: make it one command task (\`start <run> <task> --agent command -- sh -c 'until <check>; do sleep 30; done; <commands>'\`). To judge after a wait, park (\`park-until -- <check>\`).
 
 Size each piece on its own: the lightest tier that does it as well as the top one (its SKILL.md, "Choose the agent and model"). Running tests or gates, reproducing a bug, lookups, and mechanical edits fit \`light\`; small well-specified changes, docs, and reviews of small diffs fit \`standard\`. Name the deciding factor in \`--why\`. Do a few-minute or tightly coupled edit yourself. Do not weigh usage limits.
 

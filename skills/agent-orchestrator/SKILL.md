@@ -43,11 +43,11 @@ investigations, test runs, reviews, research). These rules hold at every level, 
   out, and how its result will be checked. Never start an agent only because a slot is free: published
   coding-team results show 3 to 7 times the tokens of one agent. Keep tightly coupled work with one
   owner, and give each agent its goal, done criteria, scope, your brief's constraints and gates.
-- **Delegate work, never waiting.** Work that only runs a command and waits needs no model: run it as a
-  command task (`$ORCH start <run> <task> --agent command --why "..." -- <argv>`; first read
-  `references/agents.md`, "Command tasks"), because an agent that waits spends tokens watching and hides
-  any agent it starts. A task that waits for something outside it parks (`$ORCH park-until -- <command>`,
-  last line `PARKED: waits for <what>`; `references/messages.md`) and never sleeps or polls for minutes.
+- **Delegate work, never waiting.** A command, or a wait then fixed commands (sync, then trigger), needs no
+  model: run it as one command task (`$ORCH start <run> <task> --agent command --why "..." -- <argv>`;
+  `references/agents.md`, "Command tasks"), never as an agent of any tier, which spends tokens watching.
+  A task that waits and then must judge parks (`$ORCH park-until -- <command>`, last line
+  `PARKED: waits for <what>`; `references/messages.md`) and never sleeps or polls for minutes.
 - **Start every agent through `$ORCH start` or `dispatch`,** never your host's own sub-agent tool
   (Codex's `spawn_agent`, Claude Code's Agent tool) or a script that runs `claude -p` or `codex exec`
   itself: only then does it show on the board, run your chosen tier, and report back. A script that

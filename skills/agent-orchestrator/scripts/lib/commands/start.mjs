@@ -23,6 +23,12 @@ import { CHILDREN_FILE, attemptAgent, commandText, describe, listTasks, loadRun,
 import { die, emit, findRelay, parseDuration, readJson } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
+// A model task whose --why says it waits: waiting needs no model. A word match cannot tell "waits
+// for a sync" from "fix the script that waits", so `start` notes it rather than refusing.
+const WAITING_WHY = /\b(?:wait(?:s|ing)?\s+(?:for|until|on)|poll(?:s|ing)?\b|keeps?\s+(?:checking|watching|polling)|monitor(?:s|ing)?\b|sleeps?\s+until)/i;
+export const waitingWhy = (why) => WAITING_WHY.test(String(why ?? ""));
+export const waitingNote = (runId, taskId) => `note: this --why describes waiting, which needs no model. A wait then fixed commands is one command task (--agent command --timeout DUR -- sh -c 'until <check>; do sleep 30; done; <commands>'); an agent that must judge after a wait parks (park-until). If that fits, stop this task: node ${CLI_PATH} stop ${runId} ${taskId}`;
+
 export class StartRefused extends Error {
   constructor(message, code = 1) {
     super(message);
@@ -564,7 +570,8 @@ function prepareStart(args, extra = {}) {
     if (startedBy || babysit || fs.existsSync(path.join(taskDir(run, id), CHILDREN_FILE))) watchForFinish(run, task);
     if (startedBy) noteChild(run, id, attempt, startedBy);
     const warn =
-      sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "";
+      (sharesRepo && !args["read-only"] ? "\nnote: writing in the main checkout; use a worktree when other tasks write in parallel" : "") +
+      (!babysit && waitingWhy(args.why) ? `\n${waitingNote(run.id, id)}` : "");
     return {
       task,
       text: `started ${id} → ${key} ${model} (${effort ? `effort ${effort}` : "default effort"}${tier ? `, ${tier} tier` : ""}, ${task.readOnly ? "read-only" : "write"}${babysit ? ", babysitter: may commit and push" : task.readOnly ? "" : noPublish || net.sandboxed ? ", does not publish" : ", may commit and push"}${task.readOnly ? "" : net.sandboxed ? (net.network === "on" ? ", sandboxed, network on" : ", sandboxed, offline") : ", no sandbox"}) pid ${started.pid}, attempt ${attempt}\n  why: ${why}\n  cd:  ${cd}\n  out: ${outDir}${warn}${net.note ? `\nnote: ${net.note}` : ""}${escalation ? `\nnote: ${escalation}` : ""}${babysitLine(watchTier, fixAttempt, tier)}${implementer?.fresh ? `\nnote: started a fresh session from the babysit brief and the handoff note instead of continuing session ${sessionOf(args.passthrough) || "(the latest)"}: ${handoffWhy(implementer)} (limit ${implementer.limit}, ${implementer.cold ? "cold" : "warm"})` : ""}\nnext: node ${path.join(SKILL_DIR, "scripts", "orch.mjs")} wait ${run.id}`,
