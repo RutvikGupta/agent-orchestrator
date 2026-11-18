@@ -8,9 +8,9 @@ description: >-
   never by remaining usage, and records why. Opens a live dashboard and babysits every pull request
   it opens until it lands. Use when the user asks to orchestrate, fan out, parallelize, or
   coordinate work across agents, run background agents, split a job between Claude and Codex, get a
-  second opinion or a cross-model review, or watch what launched sessions are doing. Once invoked,
-  delegate by default. For one task sent to one named agent, the claude-delegate or codex-delegate
-  skill alone is enough.
+  second opinion or a cross-model review, or watch what launched sessions are doing. Delegates only
+  where it pays for its cost, and weighs each model's cost against the task's complexity. For one
+  task sent to one named agent, the claude-delegate or codex-delegate skill alone is enough.
 license: MIT
 compatibility: >-
   Node 18+, git, and the claude-delegate and/or codex-delegate skills installed under
@@ -28,21 +28,22 @@ Implementers see only your brief and their folder; you own plan, briefs, review,
 
 ## Delegate well
 
-Delegate by default: you plan, brief, review and integrate; agents do the rest (implementation,
-investigations, test runs, reviews, research). These rules hold at every level, main or delegated:
+Do the work yourself, one agent with its tools, by default. Delegate only where the gain in result or
+time is worth the cost: agents add briefs, duplicated context, review and coordination failures
+(published results: 3 to 10 times the tokens and 2.6 to 5.8 times the latency, for small gains in
+success). These rules hold at every level, main or delegated:
 
-- **Work inline only** on a few-minute edit, or on what is tied to this conversation, such as
-  answering the user or a decision that needs what only you know.
-- **Break your task down and delegate the pieces:** start an agent for each, then review and integrate
-  what each hands back. Run independent work in parallel up to the limit (`references/plan.md`).
+- **Delegate where it pays:** parallel independent parts, slow side work (tests, builds, research), a
+  large read whose summary is all you need, another model's review, or verification of costly work.
+  When it is not plainly cheap, check the break-even (`references/tiers.md`, "Return on cost").
 - **Keep your own context lean.** A `light` or `standard` task fetches, reads and summarizes the large
   codebase, log, diff or query output: you read its short result and evidence paths, never an agent's
   transcript, because every later call re-reads what you read. Keep the run state (requirements,
   decisions, task ids, next steps) in a file.
 - **Before each start, pass the delegation test:** know what the task owns, what context it can leave
-  out, and how its result will be checked. Never start an agent only because a slot is free: published
-  coding-team results show 3 to 7 times the tokens of one agent. Keep tightly coupled work with one
-  owner, and give each agent its goal, done criteria, scope, your brief's constraints and gates.
+  out, and how its result will be checked. Never start an agent only because a slot is free. Keep
+  tightly coupled work with one owner, and give each agent its goal, done criteria, scope, your brief's
+  constraints and gates.
 - **Delegate work, never waiting.** A command, or a wait then fixed commands (sync, then trigger), needs no
   model: run it as one command task (`$ORCH start <run> <task> --agent command --why "..." -- <argv>`;
   `references/agents.md`, "Command tasks"), never as an agent of any tier, which spends tokens watching.
@@ -71,10 +72,8 @@ this skill"; otherwise `~/.agents/skills/agent-orchestrator`). Once per session:
 
 ```bash
 ORCH="node <skill-dir>/scripts/orch.mjs"     # write the expanded path in each command
-$ORCH agents --refresh                        # which agents are ready, and their usage limits
+$ORCH agents --refresh                        # which agents are ready (READY yes), and their usage limits
 ```
-
-An agent is usable only when `agents` shows `READY` as `yes` (`references/agents.md`).
 
 - **Claude Code as orchestrator.** `start` and `dispatch` return at once. Run `$ORCH wait <run>
   --timeout 0` with the Bash tool's `run_in_background: true`, keep working, and when it exits,
@@ -106,17 +105,17 @@ prefer an agent because it is the CLI you run in, and none is the default.
 - **Between agents, compare records.** When the task's abilities (`references/agents.md`, "What each
   agent can do") and the user's choice leave both possible, compare them at the task's tier in `$ORCH
   stats` ("By agent, tier and task type"): the better first-try acceptance on this kind of task wins;
-  within about 10 points, the fewer input tokens per accepted task; with under 5 finished tasks of
+  within about 10 points, the lower cost per accepted task; with under 5 finished tasks of
   that kind for either, alternate, so both build a record. Implementation is ordinary work for Codex.
-- **Start low.** Take the lightest tier that does the task well, never a bigger model for comfort; when
-  unsure between two, the lower one if the gates or review would catch a failure that is cheap to redo,
-  and a tier above `standard` only where the table requires it.
+- **Weigh cost against complexity.** The table sets the lowest tier the task's complexity allows
+  (costly or subtle mistakes need `complex`). At or above it, take the tier and agent with the lowest
+  cost per accepted task for this kind of work (`$ORCH cost`; `$ORCH stats`), never a bigger model
+  for comfort. In November 2026, per accepted task, Opus cost 5 times Sonnet; Codex `standard`, 1/14.
 - `start` refuses a new task without `--tier` and `--why`: one line on the deciding factor, such as
   `"light: runs the tests; nothing to judge"`; for `complex` or `frontier` the table's criterion, and
   between agents the numbers that decided it. A command task takes `--why` but no tier.
-- `policy.json` fixes each tier's model and effort (`start` enforces them; never pass `--model`). Only
-  `frontier` takes `--effort` (`medium` or `high`). Models, costs and each agent's record:
-  `references/tiers.md`.
+- `policy.json` fixes each tier's model, effort and default budget (never pass `--model`); only
+  `frontier` takes `--effort` (`medium` or `high`). Prices, costs and records: `references/tiers.md`.
 
 | The task | Tier |
 | --- | --- |
@@ -169,6 +168,7 @@ run `dispatch` after every `integrate`. A task the plan omits needs `start --unp
 ```bash
 $ORCH wait <run> [<task-id>...] [--all] [--timeout 9m|0]   # 0 a result, 3 timeout, 5 attention, 6 a message; `tell` notes print with the next exit
 $ORCH status <run>          # every task: state, elapsed, steps, tokens in/out, current activity
+$ORCH cost [<run> <task>]   # spend against the tier's budget; no task: each tier's cost
 $ORCH log <run> <task-id>   # tail of a running or failed task's relay output
 ```
 

@@ -107,7 +107,7 @@ test('a delegated write brief ends with the delegation note: split, lightest tie
   const noteLength = delegationNoteLength(note);
   assert.ok(noteLength > 0 && noteLength < 2500, `the note stays short: ${noteLength} characters`);
   // Delegate through the skill, rather than doing parts one after another.
-  assert.match(note, /orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\) rather than doing things one after another/);
+  assert.match(note, /Delegate only where an agent pays for its cost, through the agent-orchestrator skill \(`node .*orch\.mjs`; read its SKILL\.md first, above all "Delegate well", then `new` a run and `start` each agent\):/);
   // A command, or a wait then fixed commands, is a command task; an agent that must judge after a wait parks.
   assert.match(note, /Never start an agent to wait or to run a command: make it one command task \(`start <run> <task> --agent command .*until <check>; do sleep 30; done; <commands>'`\)\. To judge after a wait, park \(`park-until -- <check>`\)/);
   assert.match(note, /Never forward your whole task to a single agent.*split it, or do it yourself.*say so with `node .*orch\.mjs ask/);

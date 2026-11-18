@@ -10,6 +10,7 @@ import { inboxFields, readInbox } from "./inbox.mjs";
 import { attemptReasonOf, isClosedPreparation, lifecycleFields, verificationsOf, verificationsPath } from "./lifecycle.mjs";
 import { reportFields } from "./report.mjs";
 import { codexRolloutFor } from "./codex.mjs";
+import { attemptCost, attemptModel } from "./cost.mjs";
 import { commandRuns, newSummary, shellNow, summarizeEvents, summarizeRollout } from "./events.mjs";
 import { firstLine, formatElapsed, shortText } from "./format.mjs";
 import { COMMAND_AGENT, modelLabel } from "./policy.mjs";
@@ -608,7 +609,7 @@ export function lateNotices(run, task) {
 }
 
 // The tasks a task started, once each: { run, task } from its children.jsonl.
-function childrenOf(run, id) {
+export function childrenOf(run, id) {
   let text = "";
   try {
     text = fs.readFileSync(path.join(taskDir(run, id), CHILDREN_FILE), "utf8");
@@ -975,8 +976,9 @@ export function describe(run, task) {
   const elapsedMs = started && ended ? ended - started : null;
 
   // Tokens and cost add up across attempts; activity and session come from the current attempt.
+  // Cost is what Claude reported for a finished attempt, else an estimate from tokens (cost.mjs).
   const tokens = { input: 0, cached: 0, output: 0 };
-  let costUsd = null;
+  let costUsd = null, costExact = true;
   let exact = true;
   let current = newSummary();
   const attempts = attemptDirs(run, task);
@@ -1000,7 +1002,11 @@ export function describe(run, task) {
     tokens.input += t.input;
     tokens.cached += t.cached;
     tokens.output += t.output;
-    if (s.costUsd != null) costUsd = (costUsd || 0) + s.costUsd;
+    const cost = attemptCost(agent, { ...s, tokens: t }, attemptModel(task, i + 1, agent));
+    if (cost) {
+      costUsd = (costUsd || 0) + cost.usd;
+      if (!cost.exact) costExact = false;
+    } else if (t.input || t.output) costExact = false;
     if (!s.exact && (s.tokens.input || s.tokens.output)) exact = false;
     current = s;
     seen.push({ dir, agent, summary: s, tokens: t });
@@ -1054,6 +1060,7 @@ export function describe(run, task) {
     tokensOut: tokens.output,
     tokensExact: exact,
     costUsd,
+    costExact: costUsd === null ? null : costExact,
     model: task.model || result?.model || current.model || null,
     tier: task.tier || null,
     startedAt: task.startedAt || null,

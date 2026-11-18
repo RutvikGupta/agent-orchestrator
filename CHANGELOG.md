@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Cost and return on cost. A new `prices.json` holds each model's price, and `policy.json` each
+  tier's default budget. Every task's cost is known in dollars (API-equivalent): what Claude reported for a finished
+  attempt, else an estimate from its tokens. `stats` shows `cost` and `cost per accepted`, `agents`
+  adds the dollars per accepted task to each tier's record, and the new `orch.mjs cost` shows a task's
+  spend with its agents' against its tier's budget, or, with no task, what each tier costs here.
+  `start` puts the model's price and where its budget comes from in every brief, with what to do
+  past it.
+  `SKILL.md` now delegates only where it pays (a single agent by default, with a break-even check in
+  `references/tiers.md`, "Return on cost"), and picks the tier by cost per accepted task at or above
+  the floor the task's complexity sets.
 - A task that finishes while the agent that started it is between attempts no longer waits on it
   unseen. Its finish notice reaches only a running agent and was dropped, so the task sat in the
   dashboard's "awaiting review" until someone noticed. Each new attempt's brief now lists the tasks

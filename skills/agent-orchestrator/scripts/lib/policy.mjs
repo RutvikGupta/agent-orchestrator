@@ -61,6 +61,7 @@ export function policyProblems(policy) {
       }
       if (tier.rank !== undefined && !(Number.isInteger(tier.rank) && tier.rank > 0)) problems.push(`${at}.rank must be a positive whole number`);
       if (tier.use !== undefined && typeof tier.use !== "string") problems.push(`${at}.use must be a string`);
+      if (tier.budget !== undefined && !(typeof tier.budget === "number" && tier.budget > 0)) problems.push(`${at}.budget must be a positive number of US dollars`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
       problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: every babysitter's fix attempts, and that of tasks recorded before tiers`);

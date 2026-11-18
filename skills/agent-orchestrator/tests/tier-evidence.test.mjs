@@ -40,7 +40,8 @@ test('the tier summary counts a task at the tier of its first attempt and rates 
   const light = entry(items, 'light');
   // The cost of an accepted task is all five tasks' 1000 input tokens over the three that were accepted.
   assert.deepEqual(light, { agent: 'codex', tier: 'light', tasks: 5, reviewed: 4, firstAttemptAccepted: 2,
-    firstAttemptAcceptance: 0.5, accepted: 3, tokensInPerAccepted: 333, medianFirstAttemptMs: 180000 });
+    firstAttemptAcceptance: 0.5, accepted: 3, tokensInPerAccepted: 333, costPerAccepted: null, medianCost: null,
+    medianFirstAttemptMs: 180000 });
   assert.equal(entry(items, 'standard').tasks, 0);
   assert.equal(evidenceText(light),
     'last 30d: 5 tasks, 50% accepted first try (2 of 4 reviewed), median first attempt 3m00s, 333 input tokens per accepted task');
@@ -163,8 +164,8 @@ test('agents, the --tier error and stats show each tier\'s results from the last
 
   const expected = {
     // 840 input tokens (the redone task used 240) over the four accepted tasks.
-    light: 'last 30d: 6 tasks, 60% accepted first try (3 of 5 reviewed), median first attempt 3m30s, 210 input tokens per accepted task',
-    standard: 'last 30d: 5 tasks, 100% accepted first try (4 of 4 reviewed), median first attempt 1m00s, 150 input tokens per accepted task',
+    light: 'last 30d: 6 tasks, 60% accepted first try (3 of 5 reviewed), median first attempt 3m30s, 210 input tokens ($0.00) per accepted task',
+    standard: 'last 30d: 5 tasks, 100% accepted first try (4 of 4 reviewed), median first attempt 1m00s, 150 input tokens ($0.00) per accepted task',
     strong: tooFew(4),
     complex: tooFew(0),
   };
@@ -177,9 +178,12 @@ test('agents, the --tier error and stats show each tier\'s results from the last
   const { light: claudeLight } = policy.claude.tiers;
   assert.ok(agents.includes(`  claude --tier light    → ${claudeLight.model}, effort ${claudeLight.effort} [${tooFew(0)}]: ${claudeLight.use}`));
   // The same numbers as JSON.
-  assert.deepEqual(entryOf(await evidence(f), 'codex', 'light'),
+  const { costPerAccepted, medianCost, ...counts } = entryOf(await evidence(f), 'codex', 'light');
+  assert.deepEqual(counts,
     { agent: 'codex', tier: 'light', tasks: 6, reviewed: 5, firstAttemptAccepted: 3, firstAttemptAcceptance: 0.6,
       accepted: 4, tokensInPerAccepted: 210, medianFirstAttemptMs: 210000 });
+  // The seeded tokens are priced at gpt-6-luna's rates (prices.json): a few hundredths of a cent.
+  assert.ok(costPerAccepted > 0 && costPerAccepted < 0.001 && medianCost > 0, `${costPerAccepted} ${medianCost}`);
 
   // The error that asks for --tier carries the numbers on each tier's line, for both agents.
   const refused = await f.command(['start', run.id, 'fresh', '--agent', 'codex', '--why', 'Evidence', '--brief', f.brief('fresh')], { code: 2 });
@@ -329,7 +333,7 @@ test('the summary keeps one record per task and reads again only the tasks that 
   assert.equal((await lightOf()).tokensInPerAccepted, 320);
   // The error that asks for --tier reads the same records.
   const refused = await f.command(['start', run.id, 'fresh', '--agent', 'codex', '--why', 'Evidence', '--brief', f.brief('fresh')], { code: 2 });
-  assert.match(refused.stderr, /\[last 30d: 5 tasks, 100% accepted first try \(5 of 5 reviewed\), median first attempt 1m00s, 320 input tokens per accepted task\]/);
+  assert.match(refused.stderr, /\[last 30d: 5 tasks, 100% accepted first try \(5 of 5 reviewed\), median first attempt 1m00s, 320 input tokens \(\$0\.00\) per accepted task\]/);
 
   // A new task, and then a verdict on it, change only its own record: the doctored one stays. The new
   // task's 120 tokens count at once, though it is not accepted.

@@ -1,4 +1,5 @@
 // `stats`: historical evidence about delegated tasks, grouped independently by agent and type.
+import { usdText } from "../cost.mjs";
 import { compact, formatElapsed, table } from "../format.mjs";
 import { listRuns, loadRun } from "../runs.mjs";
 import { sinceDuration, taskStats } from "../stats.mjs";
@@ -17,8 +18,9 @@ export function cmdStats(args) {
     "first elapsed": formatElapsed(g.medianFirstAttemptMs), "review wait": formatElapsed(g.medianReviewWaitMs),
     "tokens in": compact(g.tokensIn), "tokens out": compact(g.tokensOut),
     "tokens in per accepted": compact(g.tokensInPerAccepted),
+    cost: usdText(g.costUsd), "cost per accepted": usdText(g.costPerAccepted),
   }));
-  const columns = ["group", "tasks", "attempts", "first accepted", "accepted", "integrated", "failed", "limit hits", "transient", "first elapsed", "review wait", "tokens in", "tokens out", "tokens in per accepted"];
+  const columns = ["group", "tasks", "attempts", "first accepted", "accepted", "integrated", "failed", "limit hits", "transient", "first elapsed", "review wait", "tokens in", "tokens out", "tokens in per accepted", "cost", "cost per accepted"];
   const text = groups.byAgent.length ? [
     "By agent and model", table(rows(groups.byAgent, (g) => `${g.agent} ${g.modelLabel}`), columns),
     "By task type", table(rows(groups.byType, (g) => g.type), columns),

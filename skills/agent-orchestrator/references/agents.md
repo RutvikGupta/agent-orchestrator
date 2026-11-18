@@ -340,6 +340,9 @@ so that one stays listed after it exits. Two things record them:
     delegated. A window whose reset time has passed is shown as reset.
 - Every task is a full agent session on the user's subscription or API key. Give every write task
   a `--timeout` (`1h` to `2h` for implementation, `20m` for a review).
+- **Every task has a cost and a budget.** `start` writes the model's price and the task's budget into
+  its brief; `$ORCH cost` shows what a task and the tasks it started have spent against it, and, with
+  no task, what each tier costs here per accepted task (`references/tiers.md`, "Return on cost").
 - **Waiting needs no model.** A task that waits for something outside it parks (`SKILL.md`, "Delegate
   well"): `$ORCH park-until [--every 2m] [--for 6h] [--why TEXT] -- <command>`. A watcher with no
   model checks the command, and resumes the same session when it exits 0, when `--for` passes, when a

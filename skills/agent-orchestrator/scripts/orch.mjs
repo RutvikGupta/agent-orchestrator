@@ -31,6 +31,7 @@ import { cmdQuestions } from "./lib/commands/questions.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdSkill } from "./lib/commands/skill.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
+import { cmdCost } from "./lib/commands/cost.mjs";
 import { cmdModel } from "./lib/commands/model.mjs";
 import { cmdRename, resolveTaskNames } from "./lib/commands/rename.mjs";
 import { cmdStart } from "./lib/commands/start.mjs";
@@ -360,8 +361,11 @@ Usage: node orch.mjs <command> [args] [--json]
                                   after 1h while the disk is low (AGENT_ORCH_MIN_FREE_DISK).
   runs                            List runs, newest first
   stats [RUN] [--since DUR]        Task outcomes by agent/model, type and agent/tier/type (default: last 30d),
-                                  with input tokens per accepted task (all the group's input over
-                                  its accepted tasks)
+                                  with input tokens and dollars per accepted task (all the group's
+                                  input and cost over its accepted tasks)
+  cost [RUN TASK]                 What a task and the tasks it started have cost, against its tier's
+                                  budget (inside a task, its own); without a task, what each tier
+                                  costs here per accepted task. API-equivalent dollars.
   skill [--loaded]                Whether the skill's instructions (SKILL.md, references/, policy.json)
                                   changed since this session or task first ran an orch.mjs command:
                                   the fingerprint recorded for the caller, the current one, and the
@@ -428,6 +432,7 @@ const specs = {
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },
+  cost: {},
   skill: { bool: ["loaded"] },
   "pr-watch": { value: ["repo", "timeout", "interval"], bool: ["once"] },
   brief: { value: ["type", "out"], bool: ["force", "read-only", "adopt"] },
@@ -473,6 +478,7 @@ const handlers = {
   gc: cmdGc,
   runs: cmdRuns,
   stats: cmdStats,
+  cost: cmdCost,
   skill: cmdSkill,
   "pr-watch": cmdPrWatch,
   brief: cmdBrief,

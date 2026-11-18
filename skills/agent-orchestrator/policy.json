@@ -6,19 +6,22 @@
         "model": "claude-haiku-5-5",
         "rank": 1,
         "effort": "xhigh",
-        "use": "mechanical steps with nothing to judge: running tests or gates and reporting, fetching CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merging or enqueueing; inventories, summaries, mechanical edits"
+        "use": "mechanical steps with nothing to judge: running tests or gates and reporting, fetching CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merging or enqueueing; inventories, summaries, mechanical edits",
+        "budget": 1
       },
       "standard": {
         "model": "claude-sonnet-5-5",
         "rank": 2,
         "effort": "xhigh",
-        "use": "small changes with clear done criteria and follow-on fixes; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; a first review of a small diff; status reports; pull-request babysitting (watching, triaging wakes, fetching CI results, routine upkeep), whose code fixes resume on complex"
+        "use": "small changes with clear done criteria and follow-on fixes; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; a first review of a small diff; status reports; pull-request babysitting (watching, triaging wakes, fetching CI results, routine upkeep), whose code fixes resume on complex",
+        "budget": 10
       },
       "complex": {
         "model": "claude-opus-5-5",
         "rank": 4,
         "effort": "xhigh",
-        "use": "implementation across modules or with costly mistakes; fixing a babysitter's code or review findings; independent reviews of large or risky diffs; a failed standard attempt"
+        "use": "implementation across modules or with costly mistakes; fixing a babysitter's code or review findings; independent reviews of large or risky diffs; a failed standard attempt",
+        "budget": 50
       },
       "frontier": {
         "model": "claude-fable-5-2",
@@ -28,7 +31,8 @@
           "medium",
           "high"
         ],
-        "use": "design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed complex attempt. Not for routine or mechanical work, small reviews or waiting. --effort high (default) or medium, never above"
+        "use": "design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed complex attempt. Not for routine or mechanical work, small reviews or waiting. --effort high (default) or medium, never above",
+        "budget": 100
       }
     }
   },
@@ -39,27 +43,32 @@
         "model": "gpt-6-luna",
         "rank": 1,
         "effort": "medium",
-        "use": "work with nothing to judge: running tests or gates and reporting, lookups, inventories and summaries, reproducing a bug from given steps, mechanical edits"
+        "use": "work with nothing to judge: running tests or gates and reporting, lookups, inventories and summaries, reproducing a bug from given steps, mechanical edits",
+        "budget": 0.25
       },
       "standard": {
         "model": "gpt-6.1-terra",
         "rank": 2,
         "effort": "medium",
-        "use": "well-specified, bounded coding: small changes with clear done criteria, tests for existing behavior, lint or type fixes, reviews of small diffs"
+        "use": "well-specified, bounded coding: small changes with clear done criteria, tests for existing behavior, lint or type fixes, reviews of small diffs",
+        "budget": 1
       },
       "strong": {
         "model": "gpt-6.2-sol",
         "rank": 3,
         "effort": "medium",
-        "use": "bounded work that needs more judgment: live web research, reviews of medium diffs, debugging in a known area, a standard attempt that failed. Near-astra quality at a lower cost"
+        "use": "bounded work that needs more judgment: live web research, reviews of medium diffs, debugging in a known area, a standard attempt that failed. Near-astra quality at a lower cost",
+        "budget": 3
       },
       "complex": {
         "model": "gpt-6.2-astra",
         "rank": 4,
         "effort": "high",
-        "use": "hard or high-risk implementation: several modules, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed strong attempt"
+        "use": "hard or high-risk implementation: several modules, costly or subtle mistakes, a large unfamiliar subsystem, a large or risky review, a failed strong attempt",
+        "budget": 15
       }
     }
   },
-  "rankNote": "rank is how strong a tier's model is, on one scale for both agents. A delegated task may start tasks at its own rank or lower, never higher (start refuses it)."
+  "rankNote": "rank is how strong a tier's model is, on one scale for both agents. A delegated task may start tasks at its own rank or lower, never higher (start refuses it).",
+  "budgetNote": "budget: a tier's default cost budget per task in US dollars, used until the tier has 5 finished tasks on this machine; after that the budget is the tier's measured cost per accepted task (orch.mjs cost)."
 }

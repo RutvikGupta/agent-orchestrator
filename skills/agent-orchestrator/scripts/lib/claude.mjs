@@ -112,6 +112,8 @@ export function applyClaudeEvent(s, e, cwd) {
       const prev = s.messages.get(m.id) || {};
       const merged = { ...prev };
       for (const [k, v] of Object.entries(m.usage)) if (typeof v === "number") merged[k] = Math.max(prev[k] || 0, v);
+      // Each call is priced at its own model (cost.mjs): a session can change model between calls.
+      if (m.model) merged.model = m.model;
       s.messages.set(m.id, merged);
     }
     for (const b of m.content || []) {

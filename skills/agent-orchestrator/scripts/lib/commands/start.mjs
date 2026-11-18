@@ -5,7 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
-import { HANDOFF_RULES, decisionNote, handoffNote, nestingNote, publishHoldNote, waitingChildrenNote, watchTierNote } from "../briefs.mjs";
+import { HANDOFF_RULES, costNote, decisionNote, handoffNote, nestingNote, publishHoldNote, waitingChildrenNote, watchTierNote } from "../briefs.mjs";
+import { priceOf } from "../cost.mjs";
 import { startDetached } from "../detach.mjs";
 import { ensureFinishWatcher, runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote, inboxWake } from "../inbox.mjs";
@@ -18,7 +19,7 @@ import { readPlan, runningConflicts } from "../plan.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
-import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
+import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, readPolicy, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { CHILDREN_FILE, attemptAgent, childrenWaitingOn, commandText, describe, listTasks, loadRun, loadTask, recordChild, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay, parseDuration, readJson } from "../util.mjs";
 
@@ -452,7 +453,13 @@ function prepareStart(args, extra = {}) {
         // makes a finished task (its implementer) the babysitter, in that task's session, is.
         if (!args.fromHandoff && (!args.passthrough.includes("--session") || !prev.babysit)) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
       }
-      fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key) + waitingChildrenNote(childrenWaitingOn(run, id)));
+      // What this model costs, and the tier's default budget. The measured budget comes from `cost`:
+      // a start never reads the tier summary, which goes through every finished task.
+      let defaultBudget = null;
+      try { defaultBudget = tier ? readPolicy()[key]?.tiers?.[tier]?.budget ?? null : null; } catch { defaultBudget = null; }
+      const costText = model ? costNote({ agent: key, tier: tier || "no tier", model, price: priceOf(model), defaultBudget }) : "";
+      // The inbox note stays last: agents and tests find it at the end of the brief.
+      fs.appendFileSync(brief, decisionNote(babysit) + costText + waitingChildrenNote(childrenWaitingOn(run, id)) + inboxNote(run, id, key));
       // Files the brief points to, such as the messages a parked task's watcher delivers in full.
       for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
     } catch (error) {

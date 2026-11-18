@@ -14,7 +14,7 @@ export function nestingNote(depth) {
 
 ## Delegating further
 
-Delegate through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, above all "Delegate well", then \`new\` a run and \`start\` each agent) rather than doing things one after another:
+Delegate only where an agent pays for its cost, through the agent-orchestrator skill (\`node ${CLI_PATH}\`; read its SKILL.md first, above all "Delegate well", then \`new\` a run and \`start\` each agent):
 
 - When the task has two or more independent parts, split it and start one agent per part.
 - When it has slow side work (test suites, gates, builds, deploys, long runs, reviews, the other model's opinion), start an agent for it and keep working.
@@ -162,5 +162,20 @@ export function waitingChildrenNote(children) {
 These finished while you were not running, or before you acted on them. Read each result, then \`accept\` it (with \`--note\`), resume it, or \`close\` it if you no longer need it:
 
 ${lines.join("\n")}
+`;
+}
+
+// Appended to every model task's brief: what its model costs, where its budget comes from, and how
+// to keep the work worth its cost (cost.mjs, commands/cost.mjs).
+export function costNote({ agent, tier, model, price, defaultBudget }) {
+  const rate = price ? ` at $${price.input} input and $${price.output} output per million tokens` : "";
+  const fallback = defaultBudget ? `, or $${defaultBudget} (its default) until the tier has 5 finished tasks` : "";
+  return `
+
+---
+
+## Cost
+
+You run \`${model}\` (${agent} ${tier})${rate}. Your budget is the ${tier} tier's cost per accepted task on this machine${fallback}. Check it, and what you and the agents you started have spent, with \`node ${CLI_PATH} cost\` at each gate run and before you start agents. Past the budget, stop and judge before you spend more: when the task is harder than your tier, say so (\`node ${CLI_PATH} ask "<why>"\`, or end with \`NEEDS DECISION:\`); when you are going in circles, change the approach. Re-reading your context is most of the cost: keep long output (logs, diffs, query results) out of your session. Start an agent only when it pays for itself, at the cheapest tier that does its part well.
 `;
 }

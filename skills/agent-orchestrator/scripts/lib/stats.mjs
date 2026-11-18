@@ -3,13 +3,22 @@ import fs from "node:fs";
 import path from "node:path";
 import { decisionsIn } from "./briefs.mjs";
 import { RUNS_DIR, STATE_ROOT } from "./config.mjs";
+import { attemptCost, attemptModel, usdText } from "./cost.mjs";
 import { summarizeEvents } from "./events.mjs";
 import { compact, formatElapsed } from "./format.mjs";
 import { phaseOf } from "./lifecycle.mjs";
-import { loadPolicy, modelLabel } from "./policy.mjs";
+import { loadPolicy, modelLabel, readPolicy } from "./policy.mjs";
 import { reportFields } from "./report.mjs";
 import { attemptAgent, describe, relayAlive } from "./runs.mjs";
 import { die, readJson, writeJson } from "./util.mjs";
+
+// The policy, read once per process, to name the model each earlier attempt's tier ran (cost.mjs);
+// null when it cannot be read, and the task's own model is used.
+let policyOnce;
+const tierPolicy = () => {
+  if (policyOnce === undefined) { try { policyOnce = readPolicy(); } catch { policyOnce = null; } }
+  return policyOnce;
+};
 
 export function sinceDuration(value = "30d") {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value);
@@ -35,14 +44,16 @@ function outcome(run, task, dir, results) {
   // Local paths matter for archived/copied runs, whose task.outDir can point at live state.
   const local = { ...task, outDir: path.join(dir, `attempt-${task.attempt}`) };
   if (result?.status !== "completed") return describe(run, local);
-  let tokensIn = 0, tokensOut = 0;
+  let tokensIn = 0, tokensOut = 0, costUsd = 0;
   for (let n = 1; n <= task.attempt; n++) {
-    const summary = summarizeEvents(attemptAgent(task, n), path.join(dir, `attempt-${n}`, "events.jsonl"), task.cd);
+    const agent = attemptAgent(task, n);
+    const summary = summarizeEvents(agent, path.join(dir, `attempt-${n}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
     tokensOut += summary.tokens.output;
+    costUsd += attemptCost(agent, summary, attemptModel(task, n, agent, tierPolicy()))?.usd || 0;
   }
   const state = decisionsIn(result.finalMessage) ? "needs-decision" : "completed";
-  const row = { state, result, tokensIn, tokensOut, limitHit: false, phase: phaseOf(task, state) };
+  const row = { state, result, tokensIn, tokensOut, costUsd, limitHit: false, phase: phaseOf(task, state) };
   return { ...row, ...reportFields(run, local, row) };
 }
 
@@ -53,11 +64,11 @@ function group(items, identity) {
     const key = JSON.stringify(labels);
     if (!groups.has(key)) groups.set(key, { ...labels, tasks: 0, attempts: 0, firstAttemptAccepted: 0,
       accepted: 0, integrated: 0, failed: 0, limitHits: 0, transientErrors: 0,
-      tokensIn: 0, tokensOut: 0, elapsed: [], reviewWait: [] });
+      tokensIn: 0, tokensOut: 0, costUsd: 0, elapsed: [], reviewWait: [] });
     const g = groups.get(key);
     g.tasks++;
     g.attempts += item.attempts;
-    for (const field of ["firstAttemptAccepted", "accepted", "integrated", "failed", "limitHits", "transientErrors", "tokensIn", "tokensOut"]) g[field] += item[field];
+    for (const field of ["firstAttemptAccepted", "accepted", "integrated", "failed", "limitHits", "transientErrors", "tokensIn", "tokensOut", "costUsd"]) g[field] += item[field] || 0;
     if (item.elapsedMs !== null) g.elapsed.push(item.elapsedMs);
     if (item.reviewWaitMs !== null) g.reviewWait.push(item.reviewWaitMs);
   }
@@ -66,6 +77,8 @@ function group(items, identity) {
     // What an accepted task cost: every input token the group's tasks used, accepted or not, over the accepted ones.
     return { ...numbers, firstAttemptAcceptance: g.accepted ? g.firstAttemptAccepted / g.accepted : null,
       tokensInPerAccepted: g.accepted ? Math.round(g.tokensIn / g.accepted) : null,
+      // The same for dollars: what each accepted task cost, its failed and reworked attempts included.
+      costPerAccepted: g.accepted ? g.costUsd / g.accepted : null,
       medianFirstAttemptMs: median(elapsed), medianReviewWaitMs: median(reviewWait) };
   });
 }
@@ -116,7 +129,7 @@ function taskItems(runs) {
       failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
       limitHits: Number(Boolean(row.limitHit)), transientErrors: Number(row.health === "transient-error" || task.retries > 0),
       reviewWaitMs: task.acceptedAt ? interval(results[task.acceptedAttempt]?.finishedAt, task.acceptedAt) : null,
-      tokensIn: row.tokensIn, tokensOut: row.tokensOut });
+      tokensIn: row.tokensIn, tokensOut: row.tokensOut, costUsd: row.costUsd || 0 });
   }
   return items;
 }
@@ -171,6 +184,10 @@ export function tierSummary(items, policy) {
         firstAttemptAcceptance: reviewed.length ? acceptedFirst / reviewed.length : null,
         accepted: accepted.length,
         tokensInPerAccepted: accepted.length ? Math.round(mine.reduce((sum, item) => sum + item.tokensIn, 0) / accepted.length) : null,
+        // Dollars only when some task could be priced (prices.json): unknown is not free.
+        costPerAccepted: accepted.length && mine.some((item) => Number.isFinite(item.costUsd))
+          ? mine.reduce((sum, item) => sum + (item.costUsd || 0), 0) / accepted.length : null,
+        medianCost: median(mine.map((item) => item.costUsd).filter((usd) => Number.isFinite(usd))),
         medianFirstAttemptMs: median(mine.map((item) => item.elapsedMs).filter((ms) => ms !== null)) });
     }
   }
@@ -183,7 +200,8 @@ export function evidenceText(entry) {
   if (!entry || entry.tasks < EVIDENCE_MIN_TASKS) return `${window}: too few tasks (${entry?.tasks ?? 0} finished, ${EVIDENCE_MIN_TASKS} needed)`;
   const first = entry.firstAttemptAcceptance === null ? "no reviewed task yet"
     : `${Math.round(entry.firstAttemptAcceptance * 100)}% accepted first try (${entry.firstAttemptAccepted} of ${entry.reviewed} reviewed)`;
-  const tokens = entry.tokensInPerAccepted === null ? "no accepted task yet" : `${compact(entry.tokensInPerAccepted)} input tokens per accepted task`;
+  const tokens = entry.tokensInPerAccepted === null ? "no accepted task yet"
+    : `${compact(entry.tokensInPerAccepted)} input tokens${entry.costPerAccepted == null ? "" : ` (${usdText(entry.costPerAccepted)})`} per accepted task`;
   return `${window}: ${entry.tasks} tasks, ${first}, median first attempt ${formatElapsed(entry.medianFirstAttemptMs)}, ${tokens}`;
 }
 
@@ -251,15 +269,17 @@ function tierItem(dir, cutoff) {
   if (!Number.isFinite(at)) at = newestFileTime(path.join(dir, `attempt-${task.attempt}`)) ?? Date.parse(task.startedAt || task.createdAt);
   at = Number.isFinite(at) ? at : null;
   if (at === null || at < cutoff) return { settled: true, at, item: null };
-  let tokensIn = 0;
+  let tokensIn = 0, costUsd = 0;
   let firstSummary = null;
   attempts.forEach((attempt, i) => {
-    const summary = summarizeEvents(attemptAgent(task, i + 1), path.join(dir, `attempt-${i + 1}`, "events.jsonl"), task.cd);
+    const agent = attemptAgent(task, i + 1);
+    const summary = summarizeEvents(agent, path.join(dir, `attempt-${i + 1}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
+    costUsd += attemptCost(agent, summary, attemptModel(task, i + 1, agent, tierPolicy()))?.usd || 0;
     if (i === 0) firstSummary = summary;
   });
   return { settled: true, at,
-    item: { ...baseItem(task, first.result), tokensIn,
+    item: { ...baseItem(task, first.result), tokensIn, costUsd,
       // A babysitter's tier is fixed, not chosen, so the tier summary leaves it out.
       chosen: !task.babysit,
       first: { agent: attemptAgent(task, 1), ...firstRan(task, first.result, firstSummary) },
@@ -284,7 +304,7 @@ function statKey(file) {
 // their own. A task that finished before the window keeps only its time, so that the file holds
 // no record of work the summary no longer counts. A task whose last attempt still runs is not kept.
 const EVIDENCE_CACHE = path.join(STATE_ROOT, "tier-evidence.json");
-const EVIDENCE_VERSION = 3;
+const EVIDENCE_VERSION = 4;
 
 // The tier summary over the tasks that finished in the last EVIDENCE_DAYS days, in every run (an old
 // run may hold a task that finished today). null when it cannot be read: callers then print no

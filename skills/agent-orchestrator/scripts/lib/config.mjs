@@ -56,6 +56,9 @@ export const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, ".codex");
 
 // Files under the skill and the state root.
 export const POLICY_PATH = path.join(SKILL_DIR, "policy.json");
+// Model prices for cost estimates (cost.mjs), apart from the policy: `describe` reads them for every
+// task, and must not read the policy for a task whose tier is known.
+export const PRICES_PATH = path.join(SKILL_DIR, "prices.json");
 export const USAGE_CACHE = path.join(STATE_ROOT, "usage.json");
 export const PR_DIR = path.join(STATE_ROOT, "prs");
 export const EXTERNAL_FILE = path.join(STATE_ROOT, "external.jsonl"); // agents started outside the orchestrator (external.mjs)

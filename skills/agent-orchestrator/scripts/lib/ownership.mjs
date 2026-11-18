@@ -37,7 +37,7 @@ export const DASHBOARD_CALLER = Object.freeze({ kind: "user", via: "dashboard", 
 // wake condition) or on no run. `result` closes a task
 // and `status` and `wait` revive parked watchers and retry tasks only for the owner.
 export const OPEN_COMMANDS = new Set([
-  "status", "wait", "result", "log", "recover", "agents", "stats", "lesson", "runs", "watch", "nap",
+  "status", "wait", "result", "log", "recover", "agents", "stats", "cost", "lesson", "runs", "watch", "nap",
   "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch", "skill", "model", "questions",
   "park-until",
 ]);
