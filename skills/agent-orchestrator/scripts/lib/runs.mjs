@@ -625,6 +625,26 @@ function childrenOf(run, id) {
   return [...seen.values()];
 }
 
+// The tasks that task `id` of `run` started and that wait on it: finished and awaiting its review,
+// or asking it to decide, and not closed. A finish notice reaches only a running agent, so one that
+// came while the agent was between attempts is lost; its next attempt's brief lists these instead.
+export function childrenWaitingOn(run, id) {
+  const waiting = [];
+  for (const c of childrenOf(run, id)) {
+    try {
+      const childRun = { ...readJson(path.join(RUNS_DIR, c.run, "run.json")), dir: path.join(RUNS_DIR, c.run) };
+      const task = loadTask(childRun, c.task);
+      if (!task || task.closedAt || String(task.mode || "").startsWith("babysit") || task.babysit) continue;
+      const row = describe(childRun, task);
+      const kind = row.state === "needs-decision" ? "needs your decision" : row.phase === "awaiting-review" ? "awaiting your review" : null;
+      if (kind) waiting.push({ run: c.run, task: c.task, name: task.name || null, state: row.state, kind });
+    } catch {
+      // A child run that is gone or unreadable waits on nobody.
+    }
+  }
+  return waiting;
+}
+
 // Record that task `parent` (of run `parentRun`) started `child` of run `run`, for parkBasis.
 export function recordChild(parentRun, parent, run, child, attempt) {
   fs.appendFileSync(path.join(taskDir(parentRun, parent), CHILDREN_FILE), `${JSON.stringify({ run: run.id, task: child, attempt, at: new Date().toISOString() })}\n`);

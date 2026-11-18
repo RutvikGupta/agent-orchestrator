@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
-import { HANDOFF_RULES, decisionNote, handoffNote, nestingNote, publishHoldNote, watchTierNote } from "../briefs.mjs";
+import { HANDOFF_RULES, decisionNote, handoffNote, nestingNote, publishHoldNote, waitingChildrenNote, watchTierNote } from "../briefs.mjs";
 import { startDetached } from "../detach.mjs";
 import { ensureFinishWatcher, runById, startedByCaller, watchForFinish } from "../finish-notice.mjs";
 import { inboxNote, inboxWake } from "../inbox.mjs";
@@ -19,7 +19,7 @@ import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
 import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, strongerThan, tierOrder, tierText } from "../policy.mjs";
-import { CHILDREN_FILE, attemptAgent, commandText, describe, listTasks, loadRun, loadTask, recordChild, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
+import { CHILDREN_FILE, attemptAgent, childrenWaitingOn, commandText, describe, listTasks, loadRun, loadTask, recordChild, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay, parseDuration, readJson } from "../util.mjs";
 
 // A refused start. `dispatch` reports it and goes on with its other tasks; `start` exits with it.
@@ -452,7 +452,7 @@ function prepareStart(args, extra = {}) {
         // makes a finished task (its implementer) the babysitter, in that task's session, is.
         if (!args.fromHandoff && (!args.passthrough.includes("--session") || !prev.babysit)) fs.copyFileSync(briefSource, path.join(taskDir(run, id), BABYSIT_BRIEF_FILE));
       }
-      fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key));
+      fs.appendFileSync(brief, decisionNote(babysit) + inboxNote(run, id, key) + waitingChildrenNote(childrenWaitingOn(run, id)));
       // Files the brief points to, such as the messages a parked task's watcher delivers in full.
       for (const [name, text] of Object.entries(args.attemptFiles || {})) fs.writeFileSync(path.join(outDir, path.basename(name)), text);
     } catch (error) {

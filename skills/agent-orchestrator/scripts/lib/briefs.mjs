@@ -147,3 +147,20 @@ export function decisionsIn(text) {
   const lines = [m[1], ...rest.slice(1, end === -1 ? undefined : end)].map((l) => l.replace(/^\s*(?:[-*]|\d+\.)\s*/, "").trim()).filter(Boolean);
   return lines.length ? lines : ["(no question given; read the final message)"];
 }
+
+// Appended to a new attempt's brief: the tasks this agent started that still wait on it
+// (runs.mjs, childrenWaitingOn). Their finish notices may have come while it was not running.
+export function waitingChildrenNote(children) {
+  if (!children.length) return "";
+  const lines = children.map((c) => `- \`${c.name || c.task}\` in run \`${c.run}\` (${c.state}, ${c.kind}): \`node ${CLI_PATH} result ${c.run} ${c.task}\``);
+  return `
+
+---
+
+## Tasks you started that wait on you
+
+These finished while you were not running, or before you acted on them. Read each result, then \`accept\` it (with \`--note\`), resume it, or \`close\` it if you no longer need it:
+
+${lines.join("\n")}
+`;
+}

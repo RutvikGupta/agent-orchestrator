@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A task that finishes while the agent that started it is between attempts no longer waits on it
+  unseen. Its finish notice reaches only a running agent and was dropped, so the task sat in the
+  dashboard's "awaiting review" until someone noticed. Each new attempt's brief now lists the tasks
+  the agent started that still wait on it (awaiting its review or its decision, not closed), with the
+  `result` command for each.
+
 - Waiting needs no model, now said for a wait followed by fixed commands too (wait for a sync, then
   trigger a run): it is one command task, never an agent of any tier, and an agent that must judge
   after a wait parks. `SKILL.md`, the delegation note `start` appends, `references/agents.md` (a
