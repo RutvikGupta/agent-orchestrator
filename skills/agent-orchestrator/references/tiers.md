@@ -91,6 +91,13 @@ costs.
   independent parts, large reads whose summary is enough, and a second model's review usually pass;
   a split of tightly coupled work, an agent per small step, and orchestration for a quick question do
   not.
+- **Splitting coupled work loses outright.** In studies Google Cloud cited in November 2026, two agents changing
+  overlapping code succeeded about 30% less often than one agent doing both, and agent teams scored 39%
+  to 70% lower than one agent where each step depends on the last (and up to 81% higher where the parts
+  were independent). A split of coupled work costs more and fails more: keep it with one owner.
+- **A cheaper tier tried more than once can beat a dearer tier tried once,** when a test can pick the
+  winner (best of N on a cheap tier, in `references/patterns.md`). Without such a test, more attempts
+  stop helping quickly; move up a tier instead.
 - **Measure on this work,** not on public benchmarks, and read each tier's figures against the tasks
   you gave it, which you chose by difficulty.
 

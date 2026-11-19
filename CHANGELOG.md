@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Two patterns, each only where it costs less than the alternative (`references/patterns.md`): best
+  of N (2 or 3 attempts on a cheap tier, a test picks the winner, the rest stopped at once) in place
+  of one attempt a tier up, and a team of 2 or 3 single-focus reviewers for a large or risky diff.
+  `references/tiers.md` ("Return on cost") adds the published evidence that splitting coupled work
+  lowers success.
 - Cost and return on cost. A new `prices.json` holds each model's price, and `policy.json` each
   tier's default budget. Every task's cost is known in dollars (API-equivalent): what Claude reported for a finished
   attempt, else an estimate from its tokens. `stats` shows `cost` and `cost per accepted`, `agents`

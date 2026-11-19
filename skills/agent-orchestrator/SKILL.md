@@ -296,5 +296,5 @@ with its implementer").
 | `references/babysit.md` | Before you start a babysitter, and when one finishes (step 8); it fills in the template `references/babysit-brief.md` |
 | `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers; when `start` exits 7 (the machine is full or short of memory: `wait`, or `start --wait`) |
 | `references/ownership.md` | Before you act on a run you did not launch, after an exit 4, or when you changed another session's task |
-| `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, or a long sequential queue |
+| `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, a long sequential queue, best of N on a cheap tier, or a team of reviewers for a large or risky diff |
 | `references/troubleshooting.md` | When a command, task or gate fails in a way the step you are on does not cover, and when you find a bug in this skill |
