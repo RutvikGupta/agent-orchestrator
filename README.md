@@ -1,6 +1,6 @@
 # Agent Orchestrator
 
-Agent Orchestrator runs Claude Code and Codex CLI sessions as background agents on one machine.
+Agent Orchestrator runs Claude Code, Codex CLI and Gemini through Cursor’s `agent` sessions as background agents on one machine.
 An orchestrating session, usually your own Claude Code or Codex session, plans the work, briefs and
 dispatches agents (each writer in its own git worktree), then reviews and integrates their results.
 Everything shows on a live local dashboard.
@@ -29,7 +29,7 @@ The attention lane: decisions, failures, results awaiting review and silent task
 
 - **Plan as data**: a JSON plan of tasks, owned paths and dependencies; `brief` drafts each brief from a template.
 - **Dispatch**: `dispatch` starts every ready task up to a parallel limit, each writer in its own worktree.
-- **Per-task models**: the orchestrator picks Codex `standard`/`complex` or Claude `light`/`standard`/`complex` per task, Opus when in doubt.
+- **Per-task models**: the orchestrator chooses by task complexity and measured results: Claude `light`/`standard`/`complex`/`frontier`, Codex and Gemini `light`/`standard`/`strong`/`complex`.
 - **Monitoring**: `wait` returns when a task finishes or needs you, `status` lists tasks, `pr-watch` watches pull requests.
 - **Review receipts**: `result` matches reported checks to the agent's log, `verify` reruns them, `verdict` records rounds, `accept --note` says why.
 - **Messaging**: `send`, `steer` and `reply` talk to a running agent, which waits with `nap` so messages reach it at once.
@@ -80,7 +80,7 @@ usage. `RUN` is a run id, a run directory, or `latest`.
 
 ## Install
 
-Requires Node.js 18 or newer (22 for the tests), git, `jq`, and Claude Code or Codex CLI logged in;
+Requires Node.js 18 or newer (22 for the tests), git, `jq`, and at least one of Claude Code, Codex CLI or Cursor’s `agent` logged in;
 `gh` for pull-request features. Built on macOS.
 
 ```bash
@@ -88,7 +88,7 @@ git clone https://github.com/RutvikGupta/agent-orchestrator.git ~/agent-orchestr
 cd ~/agent-orchestrator && ./install.sh
 ```
 
-`install.sh` links the skills into `~/.agents/skills/` and `~/.claude/skills/`, and the hooks into
+`install.sh` links `agent-orchestrator`, `claude-delegate`, `codex-delegate` and `cursor-delegate` into `~/.agents/skills/` and `~/.claude/skills/`, and the hooks into
 `~/.claude/`. It moves anything in the way to `~/.agents/backups/`. Because these are links, changes
 to the checkout reach every session at once.
 
@@ -109,7 +109,7 @@ node ~/.agents/skills/agent-orchestrator/scripts/orch.mjs dashboard --detach --o
 
 ## Credits
 
-The delegate skills come from the MIT-licensed
+The Claude and Codex delegate skills come from the MIT-licensed
 [delegate-skills](https://github.com/amElnagdy/delegate-skills) project. The Claude relay carries a
 local patch (`skills/agent-orchestrator/references/claude-delegate-network.patch`) for network,
-sandbox and publishing options.
+sandbox and publishing options. The Cursor relay is maintained in this repository.

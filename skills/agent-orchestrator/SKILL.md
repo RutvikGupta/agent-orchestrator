@@ -1,19 +1,19 @@
 ---
 name: agent-orchestrator
 description: >-
-  Orchestrate coding work across Claude Code (`claude`) and OpenAI Codex (`codex`) on this machine:
+  Orchestrate coding work across Claude Code (`claude`), OpenAI Codex (`codex`) and Gemini through Cursor (`agent`):
   plan the work as data, run up to 8 tasks at once as background agent sessions, review and accept
-  every result, integrate it in dependency order, and verify the whole request. Chooses Claude or
-  Codex and the lightest model tier per task by assessing it and comparing their measured records,
+  every result, integrate it in dependency order, and verify the whole request. Chooses Claude, Codex or
+  Gemini and the lightest model tier per task by assessing it and comparing their measured records,
   never by remaining usage, and records why. Opens a live dashboard and babysits every pull request
   it opens until it lands. Use when the user asks to orchestrate, fan out, parallelize, or
-  coordinate work across agents, run background agents, split a job between Claude and Codex, get a
+  coordinate work across agents, run background agents, split a job among Claude, Codex and Gemini, get a
   second opinion or a cross-model review, or watch what launched sessions are doing. Delegates only
   where it pays for its cost, and weighs each model's cost against the task's complexity. For one
-  task sent to one named agent, the claude-delegate or codex-delegate skill alone is enough.
+  task sent to one named agent, the claude-delegate, codex-delegate or cursor-delegate skill alone is enough.
 license: MIT
 compatibility: >-
-  Node 18+, git, and the claude-delegate and/or codex-delegate skills installed under
+  Node 18+, git, and the relevant claude-delegate, codex-delegate or cursor-delegate skill installed under
   ~/.agents/skills, with their CLIs installed and logged in. The orchestrator must be able to run
   shell commands and read files.
 metadata:
@@ -23,7 +23,7 @@ metadata:
 # Agent Orchestrator
 
 You are the **orchestrator**: you plan the user's request as tasks, brief each to an **implementer**
-session (Claude Code or Codex) running in the background, review its work, and integrate it.
+session (Claude Code, Codex or Gemini) running in the background, review its work, and integrate it.
 Implementers see only your brief and their folder; you own plan, briefs, review, merge and commit.
 
 ## Delegate well
@@ -50,7 +50,7 @@ success). These rules hold at every level, main or delegated:
   A task that waits and then must judge parks (`$ORCH park-until -- <command>`, last line
   `PARKED: waits for <what>`; `references/messages.md`) and never sleeps or polls for minutes.
 - **Start every agent through `$ORCH start` or `dispatch`,** never your host's own sub-agent tool
-  (Codex's `spawn_agent`, Claude Code's Agent tool) or a script that runs `claude -p` or `codex exec`
+  (Codex's `spawn_agent`, Claude Code's Agent tool) or a script that runs `claude -p`, `codex exec` or `agent -p`
   itself: only then does it show on the board, run your chosen tier, and report back. A script that
   must start its own agent runs as a command task (`references/agents.md`, "Model ceilings").
 - **Size each piece on its own** ("Choose the agent and model"), never by its parent's tier, and tell
@@ -62,7 +62,7 @@ success). These rules hold at every level, main or delegated:
   coupled edit yourself too. (A main session may hand a whole task to one agent.)
 - **Never hand your task to a stronger model,** directly or through a script; say so with `$ORCH
   ask` or `NEEDS DECISION:`. `start` refuses a tier above your task's `rank` in `policy.json`, on
-  either agent, except for a babysitter (step 8). (A main session starts any tier.)
+  any agent, except for a babysitter (step 8). (A main session starts any tier.)
 - Review, integrate and close your agents' work before you finish, and cover it in your report.
 
 ## Setup
@@ -102,41 +102,40 @@ prefer an agent because it is the CLI you run in, and none is the default.
 
 - **The user's choice wins:** use the agent the user named for a task, and treat a split they
   proposed as a starting point (say where you change it). The model policy still applies.
-- **Between agents, compare records.** When the task's abilities (`references/agents.md`, "What each
-  agent can do") and the user's choice leave both possible, compare them at the task's tier in `$ORCH
-  stats` ("By agent, tier and task type"): the better first-try acceptance on this kind of task wins;
-  within about 10 points, the lower cost per accepted task; with under 5 finished tasks of
-  that kind for either, alternate, so both build a record. Implementation is ordinary work for Codex.
-- **Weigh cost against complexity.** The table sets the lowest tier the task's complexity allows
-  (costly or subtle mistakes need `complex`). At or above it, take the tier and agent with the lowest
-  cost per accepted task for this kind of work (`$ORCH cost`; `$ORCH stats`), never a bigger model
-  for comfort. In November 2026, per accepted task, Opus cost 5 times Sonnet; Codex `standard`, 1/14.
-- `start` refuses a new task without `--tier` and `--why`: one line on the deciding factor, such as
-  `"light: runs the tests; nothing to judge"`; for `complex` or `frontier` the table's criterion, and
-  between agents the numbers that decided it. A command task takes `--why` but no tier.
+- **Between agents, compare records.** Compare eligible Claude, Codex and Gemini tasks at the tier in
+  `$ORCH stats`: best first-try acceptance for that task kind wins; within about 10 points, lowest
+  cost per accepted task wins. While any candidate has under 5 finished tasks of that kind,
+  alternate, starting the next task on the candidate with the fewest. Implementation is ordinary work
+  for Codex.
+- **Gemini Neon for coding.** For implementation, debugging and code review at `strong` or `complex`
+  (Claude `complex`), Gemini 4 Neon is a candidate beside Opus and astra: it leads public agentic
+  coding indexes at a lower price per token. While Gemini has under 5 finished tasks of that coding
+  kind, its turn comes first: start the next on Gemini. After that, records decide. Hydrogen at
+  `light` and `standard` competes on records like other light tiers (`references/tiers.md`).
+- **Not Gemini:** babysitting (Claude only), live web research (Codex only, `--web-search live`),
+  `frontier` work (Claude Fable), and tasks needing `--offline`.
+- **Weigh cost against complexity.** The table sets the lowest tier allowed; at or above it use the
+  lowest cost per accepted task (`$ORCH cost`; `$ORCH stats`), never a bigger model for comfort.
+- `start` requires `--tier` and `--why`: name the deciding numbers between agents, including Gemini's,
+  or "Gemini's first coding tasks of this kind". For `complex` or `frontier` name the table's criterion.
+  A command task takes `--why` but no tier.
 - `policy.json` fixes each tier's model, effort and default budget (never pass `--model`); only
   `frontier` takes `--effort` (`medium` or `high`). Prices, costs and records: `references/tiers.md`.
 
 | The task | Tier |
 | --- | --- |
-| Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` |
-| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard`; Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area) |
-| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` |
+| Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` (Gemini Hydrogen) |
+| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard` (Gemini Hydrogen); Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area); Gemini `strong` (Neon) for coding |
+| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` (Gemini Neon) |
 | Design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed `complex` attempt. Never routine or mechanical work, small reviews or waiting. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for less hard work) |
-| A review, verification or second opinion of another agent's work | The other agent: `standard` for a small diff, `complex` for a large or risky one, `frontier` when the review itself is difficult |
+| A review, verification or second opinion of another agent's work | An agent other than the author: `standard` for a small diff, `complex` for a large or risky one, `frontier` when the review itself is difficult |
 
 
 ### Usage limits
 
-Never weigh either agent's usage when you delegate, choose an agent or tier, or schedule work: never
-defer a task, move it to the other agent, or do it yourself because a window is nearly used up, and
-never mention usage in `--why`. Act only when a task stopped on a usage limit (`USAGE LIMIT` in
-`wait` or `result`), never on what `agents` shows, even a window at 100%: team plans add more. Then:
-
-1. Ping the user once per limit, with the agent and the error's reset time if it gives one: a Slack
-   DM through the `post-on-slack` skill where it is available, otherwise in your reply.
-2. Resume the work on the other agent if it is ready (a fresh session, a full brief, and a `--why`
-   naming the limit). If both are limited, say so in the ping, and retry once one works again.
+Never choose by usage or move work because a window is nearly used. Act only after a task stops on a
+usage limit: ping the user, then resume on another ready agent. Follow `references/monitor.md`,
+"Usage limits" for the complete rules.
 
 ## 2. Create the run and record the plan
 
@@ -154,7 +153,7 @@ start first, dispatch them, and write the others while they run.
 
 ```bash
 $ORCH dispatch <run> [--follow] [--max N] [--dry-run]
-$ORCH start <run> <task-id> --agent claude|codex --tier <tier> --why "<assessment>" --brief <brief-file> \
+$ORCH start <run> <task-id> --agent claude|codex|gemini --tier <tier> --why "<assessment>" --brief <brief-file> \
   [--read-only] [--timeout 2h] [-- <agent-specific relay flags>]
 ```
 
@@ -202,7 +201,7 @@ a reply that says "pending". **Before you steer or message an agent, read `refer
 
 ```bash
 $ORCH result <run> <task-id>   # report, checks with their evidence, scope, health, session
-$ORCH review <run> <task-id>   # the other model reviews the work, read-only
+$ORCH review <run> <task-id>   # another agent reviews the work, read-only
 $ORCH rework <run> <task-id>   # resume the author with the review's findings
 $ORCH accept <run> <task-id> --note "<why>"   # refuses a passing check whose latest run failed
 ```
@@ -224,8 +223,8 @@ A pull request you open, or push the run's work to, is part of the job until it 
 report done while nobody watches it. Skip babysitting only when the user says not to, or when the
 repository's rules hand pull requests to someone else. Once it is ready for review (not a draft,
 every planned change pushed, your gates passing on the pushed head), start a babysitter without
-asking; before then, neither start one nor ask about one. A Claude task babysits, never Codex (you,
-a Codex task, or `spawn_agent`) or your host's sub-agents. **Before you start one, and when it
+asking; before then, neither start one nor ask about one. A Claude task babysits, never Codex, Gemini
+or your host's sub-agents. **Before you start one, and when it
 finishes, read `references/babysit.md`.**
 
 ```bash
@@ -239,7 +238,7 @@ with a last line `NEEDS FIX: PR #<n> <one line>`; the orchestrator then resumes 
 once on `complex` to fix, push, reply and park, and the next wake resumes at the watch tier.
 
 Whichever agent implemented a pull request, a babysitter takes it: the Claude implementer's own session,
-or a new one that starts from a Codex implementer's handoff note (`references/babysit.md`, "Keep it
+or a new one that starts from a Codex or Gemini implementer's handoff note (`references/babysit.md`, "Keep it
 with its implementer").
 
 ## 9. Close what you no longer need, clean up, and report

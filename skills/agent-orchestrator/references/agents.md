@@ -2,7 +2,8 @@
 
 Read this before you brief or start an agent whose abilities, modes, flags or model ceiling matter,
 and before your first command task. Facts come from each delegate skill's relay
-(`~/.agents/skills/<agent>-delegate/`). Its `SKILL.md` and `references/dispatch-and-poll.md` remain
+(`~/.agents/skills/<agent>-delegate/`; Gemini's relay is `cursor-delegate`, which runs Cursor's
+`agent` CLI). Its `SKILL.md` and `references/dispatch-and-poll.md` remain
 the authority on flags; check `relay.mjs --help` for the installed version. Which agent and tier to
 use is decided in `SKILL.md` ("Choose the agent and model"); the models live in `../policy.json`.
 
@@ -11,32 +12,34 @@ use is decided in `SKILL.md` ("Choose the agent and model"); the models live in 
 These are hard limits of the relays on this machine:
 
 - **Run commands without editing** (reproduce a bug, run tests or scripts and report, read
-  `git log`): Codex `--read-only`. On Claude, use a write task whose brief forbids edits (see
-  `--read-only` below).
+  `git log`): Codex `--read-only`. On Claude or Gemini, use a write task whose brief forbids edits
+  (see `--read-only` below).
 - **Look things up on the live web:** only Codex, with `-- --web-search live`. The Claude relay
-  removes Claude's web tools.
-- **Review a diff on its own:** Codex can run `git diff`. A Claude reviewer needs the diff pasted
-  into its brief.
-- **Network access** (GitHub, package installs, APIs): every write task has it; a read-only Codex
-  task does not (see "Unavailable in the child" below).
+  removes Claude's web tools. Gemini is not used for live web research.
+- **Review a diff on its own:** Codex can run `git diff`. A Claude or Gemini reviewer needs the
+  diff pasted into its brief.
+- **Network access** (GitHub, package installs, APIs): every write task has it (a Gemini write task
+  runs without Cursor's sandbox); a read-only Codex task does not (see "Unavailable in the child"
+  below).
 
 ## Modes and flags
 
-| | Claude Code (`claude`) | Codex (`codex`) |
-| --- | --- | --- |
-| Model and effort | `--tier` picks them (`SKILL.md`, "Choose the agent and model") | `--tier` picks them (`SKILL.md`, "Choose the agent and model") |
-| Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) |
-| Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; publishes as `SKILL.md` ("Guardrails") allows, and nested `claude` is denied; `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief |
-| `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run |
-| Session id (for `-- --session`; a follow-up's tier: `references/review.md`, "Escalate a tier") | `sessionId` | `threadId` |
-| Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost |
-| Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` |
-| `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged |
-| Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged |
-| `--sandbox` | Write-task file tools stay in the working directory. Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access |
-| `--babysit` | May publish to its pull request; runs `standard` unless `--tier light` or `complex` (`references/babysit.md`, "Start it") | Not supported: a babysitter is a Claude task, and a Codex implementer's pull request goes to one |
-| Unavailable in the child | MCP servers, skill invocation (it reads a skill's `SKILL.md` instead, as briefs ask for testing skills), slash commands, subagents, web tools | MCP servers it is not configured with; with `--sandbox` or `--read-only`, the network |
-| Login | `claude auth status` / `claude auth login` | `codex login status` / `codex login` |
+| | Claude Code (`claude`) | Codex (`codex`) | Gemini (Cursor `agent`) |
+| --- | --- | --- | --- |
+| Model and effort | `--tier` picks them (`SKILL.md`, "Choose the agent and model") | `--tier` picks them (`SKILL.md`, "Choose the agent and model") | `--tier` picks them, with no `--model` or `--effort` override |
+| Loads project instructions | `CLAUDE.md` (not `AGENTS.md`) | `AGENTS.md` (not `CLAUDE.md`) | Not documented |
+| Write mode (default) | `acceptEdits`; file tools can read and write home and the agent's `$TMPDIR`; only Read, Glob, Grep, Edit, Write, and shell tools; no shell sandbox, shell pre-approved; publishes as `SKILL.md` ("Guardrails") allows, and nested `claude` is denied; `--no-publish` denies `git commit`, `git push` and `gh` writes | `danger-full-access`: no sandbox, full network; nothing denied beyond the brief | Cursor's sandbox off (`--sandbox disabled --force`); Cursor permission rules deny Read and Write of credential files, and force pushes, admin merges, `gh secret`, repository create or delete and GitHub token reads; `--no-publish` also denies commits, pushes and `gh` writes; `--offline` is refused |
+| `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run | Cursor plan mode, with `Write(**)` denied and a tripwire that reports `readOnlyViolation` |
+| Session id (for `-- --session`; a follow-up's tier: `references/review.md`, "Escalate a tier") | `sessionId` | `threadId` | `sessionId`; `-- --session ID` resumes the Cursor session |
+| Messages from the orchestrator | Context after its next tool call, through the user's `PostToolUse` hook | `$ORCH inbox <run> <task> --ack` at each gate | `$ORCH inbox <run> <task> --ack` at each gate |
+| Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost | Totals at the end of each attempt only; no cost from the CLI, so the orchestrator estimates it (`references/tiers.md`, "Prices") |
+| Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` | `--deny RULE` and `--allow RULE` (Cursor permission rules, such as `Shell(git push *)` or `Read(/abs/path/**)`); no budget or turn limit flag is documented |
+| `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged | Not documented |
+| Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged | Cursor permission rules deny Read and Write of the same credential files as Claude's file tools. A shell command can still read them |
+| `--sandbox` | Write-task file tools stay in the working directory. Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access | Turns Cursor's sandbox on |
+| `--babysit` | May publish to its pull request; runs `standard` unless `--tier light` or `complex` (`references/babysit.md`, "Start it") | Not supported: a babysitter is a Claude task, and a Codex implementer's pull request goes to one | Not supported: a babysitter is a Claude task, and a Gemini implementer's pull request goes to one |
+| Unavailable in the child | MCP servers, skill invocation (it reads a skill's `SKILL.md` instead, as briefs ask for testing skills), slash commands, subagents, web tools | MCP servers it is not configured with; with `--sandbox` or `--read-only`, the network | Not documented |
+| Login | `claude auth status` / `claude auth login` | `codex login status` / `codex login` | `agent status` / `agent login` |
 
 ## Practical notes
 
@@ -45,8 +48,26 @@ These are hard limits of the relays on this machine:
   a Sonnet babysitter, which starts from the implementer's handoff note (`references/babysit.md`,
   "Keep it with its implementer"). Which agent implements a task is chosen by the agents' records
   (`SKILL.md`, "Choose the agent and model").
+- **Gemini is a third implementer.** It is Gemini 4 through Cursor's `agent` CLI, started with
+  `--agent gemini` and run by the `cursor-delegate` relay. Its `light` and `standard` tiers run
+  Hydrogen, and `strong` and `complex` run Neon (`references/tiers.md`, "The models"). Cursor
+  permission rules enforce its limits, not only the brief: they deny the credential files and the
+  dangerous publish commands. They live in a per-run Cursor config folder, so the user's own Cursor
+  config is untouched, and Cursor still reads its login from the keychain. The relay sets
+  `CURSOR_CONFIG_DIR` per run and writes `result.json` (session and usage), Claude-shaped
+  `events.jsonl` and raw `cursor-events.jsonl`. Its flags include `--brief`, `--cd`, `--out-dir`,
+  `--model`, `--effort`, `--read-only`, `--sandbox`, `--deny`, `--allow`, `--session` and `--timeout`.
+  The relay combines model and effort as Cursor's `ID-LEVEL`. A Gemini implementer's
+  pull request goes to a Claude babysitter, which starts from the implementer's handoff note, as a
+  Codex implementer's does (`references/babysit.md`, "Keep it with its implementer"). When to choose
+  it: `references/tiers.md`, "Choosing between the agents".
+- **Who reviews.** `review` starts another agent as the read-only reviewer: Codex for Claude's work,
+  Claude for Codex's, and Codex for Gemini's. `review --agent <agent>` picks a different one. A
+  Gemini reviewer gets the diff in its brief, as a Claude reviewer does.
 - **Sandboxing a task:** outside the sandbox, a task reaches SSH, the keychain and tool state as the
   user does. `--sandbox` confines a task again; `--offline` confines it and blocks the network.
+  On Gemini, `--sandbox` turns Cursor's sandbox on and `--offline` is refused, so a task that needs
+  `--offline` does not go to Gemini.
   In Claude's sandbox the relay's own sandbox settings replace any in the user's or the project's
   Claude settings, and its proxy refuses SSH, so `start` rewrites GitHub SSH remotes to HTTPS
   (environment `GIT_CONFIG_*`) for sandboxed Claude tasks.
@@ -265,8 +286,8 @@ command task has one.
     Claude model, an effort to `AGENT_ORCH_MAX_EFFORT`.
 - **`$ORCH start` inside the command** obeys the ceiling too: it refuses a tier stronger than the
   ceiling, and caps its effort at `AGENT_ORCH_MAX_EFFORT`.
-- **For a script's own agent,** `$ORCH model --agent claude|codex [--tier TIER]` prints the words to
-  add to the `claude` or `codex` command line. A script passes them as separate arguments:
+- **For a script's own agent,** `$ORCH model --agent <agent> [--tier TIER]` prints the words to
+  add to the agent's command line. Check the installed command's help for supported agents. A script passes them as separate arguments:
 
   ```
   --model MODEL --effort LEVEL                      (claude)
@@ -274,7 +295,7 @@ command task has one.
   ```
 
   - With no effort to print, it prints `--model MODEL` alone.
-  - `--agent` is required (`orch: --agent must be claude or codex`, exit 2). An unknown tier is
+  - `--agent` is required; an unknown agent exits 2. An unknown tier is
     refused, also with exit 2, and the tiers are listed.
   - Without `--tier` it uses the ceiling's tier for that agent, or `standard` when there is no
     ceiling.
@@ -329,10 +350,11 @@ so that one stays listed after it exits. Two things record them:
 - **`$ORCH agents`** lists each CLI, its version, its login state, whether its delegate relay is
   installed, and the model policy. Beside each tier it shows that tier's results on this machine
   over the last 30 days; `references/tiers.md` says what the figures mean.
-- **Usage limits.** Both subscriptions meter use in a 5-hour window and a weekly window.
-  `$ORCH agents` shows the share of each window that is used, and the dashboard header shows the same.
-  The reading is for information only, even a window at 100% or a limit status (`SKILL.md`, "Usage
-  limits").
+- **Usage limits.** The Claude and Codex subscriptions meter use in a 5-hour window and a weekly
+  window. `$ORCH agents` shows the share of each window that is used, and the dashboard header shows
+  the same. The reading is for information only, even a window at 100% or a limit status (`SKILL.md`,
+  "Usage limits"). No limit reading is documented for Gemini. A task that a limit stops resumes on
+  another ready agent, any of the other two.
   - Claude reports its limits in every headless session's stream (`rate_limit_event`). `orch.mjs`
     caches the newest reading it sees, and `agents --refresh` takes a fresh one with a minimal turn.
   - Codex writes its limits into its session logs (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`),
@@ -349,7 +371,9 @@ so that one stays listed after it exits. Two things record them:
   message arrives, or when one of the task's child tasks finishes (`references/messages.md`; a
   babysitter's park: `references/babysit.md`). A task never sleeps, naps or polls in its session for
   more than a few minutes: `nap` refuses once its naps in one attempt pass 10 minutes.
-- Claude's `--max-budget-usd` and `--max-turns` cap a runaway session. Codex has no budget flag; use
-  `--timeout`, and the tier that the task's complexity calls for.
+- Claude's `--max-budget-usd` and `--max-turns` cap a runaway session. Codex has no budget flag, and
+  none is documented for Gemini; use `--timeout`, and the tier that the task's complexity calls for.
+  A Gemini task's cost is an estimate from the token totals that its attempt reports at the end
+  (`references/tiers.md`, "Prices").
 - A resumed Codex thread re-reads its whole history on every turn, so long rework loops on Codex
   grow its input tokens quickly.

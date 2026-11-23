@@ -1,4 +1,4 @@
-<!-- tier: light or standard for a mechanical change or a well-specified one to 1 to 5 files with clear done criteria; complex for several modules, an open approach, or costly or subtle mistakes -->
+<!-- tier: light or standard for a mechanical change or a well-specified one to 1 to 5 files with clear done criteria; complex for several modules, an open approach, or costly or subtle mistakes; Gemini Neon is a candidate for coding at strong or complex -->
 {{role}}
 
 ## Goal

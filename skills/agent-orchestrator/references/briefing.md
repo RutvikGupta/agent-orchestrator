@@ -1,7 +1,7 @@
 # Writing briefs (step 3)
 
 Read this before you write your first brief in a session. Also follow the agent's
-`~/.agents/skills/<agent>-delegate/references/writing-the-brief.md`.
+delegate skill’s `references/writing-the-brief.md` if present (`cursor-delegate` for Gemini).
 
 ## What `brief` does
 
@@ -49,7 +49,7 @@ Every brief must stand alone. The templates give it this shape:
 - the **context** the agent cannot discover quickly: relevant files, decisions already made, and the
   agreed shape of each interface in `uses` and `produces`;
 - the **scope**;
-- the **house rules**, copied in, because Claude loads only `CLAUDE.md` and Codex only `AGENTS.md`;
+- the **house rules**, copied in, so every agent receives them;
 - the **gates**: the project's real test, lint and build commands, plus the applicable testing
   skill;
 - the **report contract**.

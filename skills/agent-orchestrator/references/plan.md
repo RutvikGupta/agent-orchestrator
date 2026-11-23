@@ -22,7 +22,7 @@ the user's choices, and when to ask before dispatching.
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts. `dispatch` waits for them, `start` refuses without them, and `integrate` takes tasks in this order |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out and runs `standard`), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex or Gemini `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out and runs `standard`), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
 | `brief` | The brief file, relative to the run directory |
 
 ## Tiers in the plan
@@ -56,7 +56,7 @@ starts.
 - Runs that delegated agents start allow fewer: 6 at the second level, 4 at the third, and 2 at the
   fourth.
 - Agents below the fourth level (`AGENT_ORCH_MAX_DEPTH`, default 4) cannot delegate.
-- The machine has its own limit beside this per-run one. It counts the live Claude and Codex agents
+- The machine has its own limit beside this per-run one. It counts the live Claude, Codex and Gemini agents
   of every run, and requires enough available memory: `AGENT_ORCH_MAX_TOTAL` (default 75% of RAM in
   GiB, at least 4) and `AGENT_ORCH_MIN_FREE_AGENT` (default `1.5GB`). A start must pass both limits.
   When the machine is full, `start` exits 7 (`start --wait [DUR]` waits for room), and `dispatch`

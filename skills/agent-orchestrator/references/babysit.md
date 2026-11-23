@@ -35,8 +35,8 @@ $ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits
 
 When a Claude task of the run implemented the pull request, that task keeps it: make it the
 babysitter instead of starting a new task. Its session already holds the pull request's context,
-and the run keeps one task for it, whose row, attempts and token totals go on adding up. A Codex
-implementer hands its pull request over instead ("Hand it over from a Codex implementer", below).
+and the run keeps one task for it, whose row, attempts and token totals go on adding up. A Codex or Gemini
+implementer hands its pull request over instead ("Hand it over from a Codex or Gemini implementer", below).
 
 1. Once the task has finished (it is not running), write the babysitter brief to a file of its own
    (`$ORCH brief <run> <task> --type babysit --out <file>`), and fill it in as above.
@@ -63,9 +63,9 @@ implementer hands its pull request over instead ("Hand it over from a Codex impl
 3. Rename it, so that its name shows it babysits that pull request:
    `$ORCH rename <run> <task> --to babysit-<n>`.
 
-### Hand it over from a Codex implementer
+### Hand it over from a Codex or Gemini implementer
 
-Claude cannot continue a Codex session, so a pull request that a Codex task implemented goes to a new
+Claude cannot continue a Codex or Gemini session, so a pull request that either task implemented goes to a new
 babysitter task. That task starts from the babysit brief and the implementer's handoff note:
 
 1. The implement brief (`references/briefs/implement.md`, "Handoff note") asks every implementer

@@ -72,7 +72,7 @@ and repeats the call while it exits 3, as it does with `wait`.
 `SKILL.md` step 4 says which tasks to start by hand; research with live web search is one that needs
 relay flags.
 
-- `start` runs the agent's `<agent>-delegate/scripts/relay.mjs` as a detached background process
+- `start` runs the agent's delegate relay (`cursor-delegate/scripts/relay.mjs` for Gemini) as a detached background process
   and returns at once.
 - It looks for the relay in the folder that holds this skill, then `~/.agents/skills`,
   `~/.claude/skills` and `~/.codex/skills`. `AGENT_ORCH_SKILLS_DIR` replaces that search path.
@@ -81,7 +81,8 @@ relay flags.
 - `start` also checks the machine for an agent task (below, "Machine limit"). `--wait [DUR]` waits
   for room instead of failing.
 - Flags after `--` go to the relay unchanged; `relay.mjs --help` lists them. Common ones: Codex
-  `--network-access` and `--web-search live`; Claude `--max-turns 60` and `--max-budget-usd 10`.
+  `--network-access` and `--web-search live`; Claude `--max-turns 60` and `--max-budget-usd 10`;
+  Gemini `--deny RULE` and `--allow RULE`.
 
 ### Plan checks
 
@@ -101,7 +102,7 @@ does not name needs `--unplanned` too. `--force` never skips the machine limit (
 
 ### Machine limit
 
-Besides the per-run parallel limit, `start` refuses a Claude or Codex agent when the machine is
+Besides the per-run parallel limit, `start` refuses a Claude, Codex or Gemini agent when the machine is
 full. The details are in `references/memory.md`, "Agent admission".
 
 - The limit is `AGENT_ORCH_MAX_TOTAL` live agents across all runs (default 75% of RAM in GiB, at

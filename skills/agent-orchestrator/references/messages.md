@@ -96,7 +96,7 @@ $ORCH send <run> <task-id> "<message>" [--steer]    # or --file FILE
 ```
 
 - A Claude agent gets the message as context after its next tool call, through the user's
-  `PostToolUse` hook. A Codex agent reads it with `$ORCH inbox <run> <task-id> --ack` at each gate,
+  `PostToolUse` hook. A Codex or Gemini agent reads it with `$ORCH inbox <run> <task-id> --ack` at each gate,
   as its brief tells it.
 - Every brief tells agents to wait with `$ORCH nap <duration>`, `wait` or `pr-watch` for a few
   minutes at most. They return as soon as a message arrives. A longer wait parks
@@ -107,7 +107,7 @@ $ORCH send <run> <task-id> "<message>" [--steer]    # or --file FILE
     with `PARKED:`.
   - To wait for tasks it started, nothing needs recording.
   - A babysitter keeps parking as its brief says.
-- **The nap budget.** Inside a Claude or Codex task, each `nap` adds its duration to a total for
+- **The nap budget.** Inside a Claude, Codex or Gemini task, each `nap` adds its duration to a total for
   the attempt (`naps.json` in the attempt's folder). Once the total would pass
   `AGENT_ORCH_NAP_BUDGET` (default `10m`), `nap` refuses with exit 2 and a message that says to park
   with `park-until`. Outside a task, and in a command task, `nap` is unchanged, and so is a

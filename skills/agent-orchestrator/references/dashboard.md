@@ -43,7 +43,7 @@ act on. `SKILL.md` step 5 says when to open it.
 - For a task, the panel also shows its receipts: its brief, one line per attempt (clicking one shows
   that attempt's log), each check's saved evidence, and your `verify` runs, `verdict` rounds and
   acceptance.
-- The header shows both agents' usage limits, and the free disk space on the volume that holds
+- The header shows available agent usage limits, and the free disk space on the volume that holds
   the state root, for example "disk 42 GB free". It turns amber, with "· low", below twice
   `AGENT_ORCH_MIN_FREE_DISK` (default `15GB`), and red, with "· below minimum", below the minimum,
   when no worktree can be created. Its tooltip gives the volume's size and the commands that free
@@ -158,7 +158,8 @@ So review results as `wait` returns them, and handle attention as soon as `wait`
 ## Agents it finds on its own
 
 - **Agents a task's shell starts.** A task whose shell starts headless agents (a script that runs
-  `claude -p` or `codex exec`, such as a review script) shows them, whatever the script or model.
+  `claude -p` or `codex exec`, such as a review script) shows those agents, whatever the script or model.
+  Headless `agent -p` processes started outside the orchestrator are not listed.
   A finished agent stays listed while its task shows. Which agents are seen with no dashboard
   running is in `references/agents.md`, "Agents started outside the orchestrator".
   - **A command task** has no model, so the agents its command runs are its work, and they get no

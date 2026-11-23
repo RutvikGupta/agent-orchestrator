@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add Gemini 4 through Cursor’s `agent`: a `cursor-delegate` relay, orchestrator tiers and
+  permissions, and three-agent selection guidance including Neon for coding.
+
 - Two patterns, each only where it costs less than the alternative (`references/patterns.md`): best
   of N (2 or 3 attempts on a cheap tier, a test picks the winner, the rest stopped at once) in place
   of one attempt a tier up, and a team of 2 or 3 single-focus reviewers for a large or risky diff.
