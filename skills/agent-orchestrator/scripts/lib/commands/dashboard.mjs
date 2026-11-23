@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH, DASHBOARD_FILE, STATE_ROOT } from "../config.mjs";
+import { CLI_PATH, DASHBOARD_FILE, STATE_ROOT, nodeBin } from "../config.mjs";
 import { keyedUrl, openBrowser, serveDashboard } from "../dashboard-server.mjs";
 import { startDetached } from "../detach.mjs";
 import { die, emit, readJson } from "../util.mjs";
@@ -108,7 +108,7 @@ export async function cmdDashboard(args) {
     let pid;
     try {
       ({ pid } = startDetached({
-        command: process.execPath,
+        command: nodeBin(),
         args: [self, "dashboard", "--host", host, "--port", String(port), "--idle-exit", idle],
         cwd: process.cwd(),
         env: process.env,

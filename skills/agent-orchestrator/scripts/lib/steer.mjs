@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
+import { CLI_PATH, SKILL_ROOTS, nodeBin } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { claudeTurnEnded, subagentEvent } from "./claude.mjs";
 import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
@@ -516,7 +516,7 @@ export function launchInterrupt(run, task, claim) {
   try {
     // On macOS it starts through launchd, outside the terminal application (detach.mjs).
     const helper = startDetached({
-      command: process.execPath,
+      command: nodeBin(),
       args: [SCRIPT, "resume", run.dir, task.id, String(task.attempt), String(claim.generation)],
       cwd: run.dir,
       near: [run.repo, task.cd],

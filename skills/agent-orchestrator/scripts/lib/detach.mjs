@@ -48,7 +48,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { STATE_ROOT } from "./config.mjs";
+import { STATE_ROOT, nodeBin } from "./config.mjs";
 
 export const DETACH_HELPER = fileURLToPath(new URL("../detach-helper.mjs", import.meta.url));
 // The jobs' folder. Only this user may read it: a spec holds an environment.
@@ -238,7 +238,7 @@ function throughLaunchd(spec) {
     return { reason: `the job folder cannot be used: ${error.message}` };
   }
   const job = jobOf(`agent-orch.${randomBytes(6).toString("hex")}`);
-  const bad = [process.execPath, DETACH_HELPER, job.spec, job.log].find((p) => NOT_XML.test(p));
+  const bad = [nodeBin(), DETACH_HELPER, job.spec, job.log].find((p) => NOT_XML.test(p));
   if (bad) return { reason: `a path holds a character a property list cannot: ${JSON.stringify(bad)}` };
   const loaded = []; // the domains asked to load the job
   try {
@@ -483,7 +483,7 @@ const xml = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").
 // group may be left behind, and the job runs as an app does, without the throttling launchd applies
 // to a job by default, which what it starts would inherit.
 function jobFile(job) {
-  const args = [process.execPath, DETACH_HELPER, job.spec].map((arg) => `\t\t<string>${xml(arg)}</string>`).join("\n");
+  const args = [nodeBin(), DETACH_HELPER, job.spec].map((arg) => `\t\t<string>${xml(arg)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
