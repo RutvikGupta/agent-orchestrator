@@ -506,7 +506,9 @@ async function limits(){try{const u=await (await fetch("api/usage")).json();
 // At load this runs before the message box is set up, so only a later fragment repaints the box.
 const takeKey=()=>{const m=/(?:^|&)token=([0-9a-f]{48})(?:&|$)/.exec(location.hash.slice(1));if(!m)return false;
   try{localStorage.setItem("orchSendKey",m[1])}catch{}history.replaceState(null,"",location.pathname+location.search);return true};
-takeKey();addEventListener("hashchange",()=>{if(takeKey())compose()});
+takeKey();addEventListener("hashchange",()=>{if(takeKey()){compose();rekey()}});
+// A key that another tab of this dashboard took reaches this one through storage.
+addEventListener("storage",e=>{if(e.key==="orchSendKey"){compose();rekey()}});
 const sendKey=()=>{try{return localStorage.getItem("orchSendKey")}catch{return null}};
 const NO_KEY="This browser has no key for sending messages yet. Run `orch.mjs dashboard --open --new-tab` once; every tab of this dashboard can send after that.";
 const drafts=new Map();let composeKey=null,sending=false,files=[];
@@ -687,8 +689,14 @@ refresh().then(detail);setInterval(()=>soon(),2000);limits();setInterval(limits,
 // The server pushes "change" when an agent writes; refresh at once, one refresh at a time.
 let refreshing=false,queued=false;
 function soon(){if(refreshing){queued=true;return}refreshing=true;refresh().then(detail).finally(()=>{refreshing=false;if(queued){queued=false;soon()}})}
-const presence=new EventSource("api/presence");
+// The presence stream says whether this tab holds the send key (`keyed=1`, never the key itself),
+// so that `orch.mjs dashboard --open` opens a keyed tab when no open tab has the key.
+const presenceUrl=()=>"api/presence"+(sendKey()?"?keyed=1":"");
+let presence=new EventSource(presenceUrl());
 presence.addEventListener("change",soon);
+// Once a key arrives, reopen the stream as a keyed tab.
+function rekey(){if(typeof presence==="undefined"||!sendKey()||/keyed=1/.test(presence.url||""))return;presence.close();
+  const next=new EventSource(presenceUrl());next.addEventListener("change",soon);next.addEventListener("escalation",showEscalation);presence=next}
 function showEscalation(event){
   if(!("Notification" in window)||Notification.permission!=="granted")return;
   try{

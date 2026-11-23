@@ -29,6 +29,14 @@ async function serverUrl(host, port, pid) {
   return null;
 }
 
+// Whether a tab shows the dashboard, and whether every tab that shows it lacks the send key. A server
+// that predates keyed presence reports no keyedTabs, and its tabs are taken to hold the key.
+export function tabsOf(health) {
+  const tabOpen = health.tabs > 0 || (health.pageAgoMs != null && health.pageAgoMs < PAGE_OPEN_MS);
+  const keyless = Number.isInteger(health.keyedTabs) && health.tabs > 0 && health.keyedTabs === 0;
+  return { tabOpen, keyless };
+}
+
 // The dashboard answering at URL, or null when none does.
 async function dashboardHealth(url) {
   const get = (p) => fetch(new URL(p, url), { signal: AbortSignal.timeout(1500) });
@@ -80,11 +88,13 @@ export async function cmdDashboard(args) {
     // Something else on the port (another account's server, or an orch.mjs too old to say its pid)
     // is never reused: a new dashboard starts on the next free port instead.
     if (!health || !ownDashboard(health, url)) continue;
-    const tabOpen = health.tabs > 0 || (health.pageAgoMs != null && health.pageAgoMs < PAGE_OPEN_MS);
-    // --new-tab opens one even when a tab shows it, to hand this browser the send key.
-    const opening = args.open && (!tabOpen || args["new-tab"]);
+    const { tabOpen, keyless } = tabsOf(health);
+    // --new-tab opens one even when a tab shows it, to hand this browser the send key. So does a
+    // dashboard whose open tabs all lack the key: a tab the user opened by its address, or one opened
+    // before a server started some other way (a login item, another session), can never send.
+    const opening = args.open && (!tabOpen || args["new-tab"] || keyless);
     if (opening) openBrowser(keyedUrl(url));
-    const note = opening ? "opened in the browser" : tabOpen ? "a browser tab already shows it" : "not opened";
+    const note = opening ? (keyless && !args["new-tab"] ? "opened in the browser to hand it the send key: no open tab had it" : "opened in the browser") : tabOpen ? "a browser tab already shows it" : "not opened";
     return emit(args, { url, reused: true, ...health }, `dashboard: ${url}  (already running${health.pid ? `, pid ${health.pid}` : ""}; ${note})`);
   }
 

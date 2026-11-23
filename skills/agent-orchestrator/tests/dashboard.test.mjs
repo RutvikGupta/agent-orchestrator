@@ -119,6 +119,30 @@ test('dashboard HTTP API and native transcript states', async (t) => {
     await eventually(async () => (await board.json('/api/health')).tabs === 0, 'presence tab leaked');
   });
 
+  await t.test('a presence stream with keyed=1 counts as a tab that holds the send key', async () => {
+    const open = async (query) => {
+      const controller = new AbortController();
+      const response = await fetch(new URL(`/api/presence${query}`, board.url), { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
+      const reader = response.body.getReader();
+      await reader.read();
+      return async () => { controller.abort(); await reader.cancel().catch(() => {}); };
+    };
+    const plain = await open('');
+    try {
+      assert.deepEqual(await board.json('/api/health').then((h) => [h.tabs, h.keyedTabs]), [1, 0]);
+      const keyed = await open('?keyed=1');
+      try {
+        assert.deepEqual(await board.json('/api/health').then((h) => [h.tabs, h.keyedTabs]), [2, 1]);
+      } finally {
+        await keyed();
+      }
+      await eventually(async () => (await board.json('/api/health')).keyedTabs === 0, 'keyed tab leaked');
+    } finally {
+      await plain();
+    }
+    await eventually(async () => (await board.json('/api/health')).tabs === 0, 'presence tab leaked');
+  });
+
   await t.test('page scripts (inline or served) parse with node --check; logo and missing routes have correct types', async () => {
     const page = await board.get('/');
     assert.equal(page.status, 200);

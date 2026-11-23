@@ -11,6 +11,11 @@ act on. `SKILL.md` step 5 says when to open it.
   opened anyway; the tab shows the board once it is built. The address is used only when the
   server's own process listens on it, since the page gets the send key. When no such address is
   found yet, the command says the dashboard is starting and opens nothing.
+- **The send key.** A tab can message running tasks only with the send key, which reaches the
+  browser in the fragment of the address that `--open` opens and then serves every tab of that
+  browser. Each tab tells the server whether it holds the key (never the key itself), so `--open`
+  also opens a tab when tabs show the board but none holds the key: one opened by its address, or
+  one opened before a server that something else started. `--open --new-tab` opens one in any case.
 - It exits by itself once no task is running and no tab has shown it for 30 minutes.
   `$ORCH dashboard --stop` stops it sooner.
 - `$ORCH watch` shows the same tree in a terminal, for a user who asks for it.
