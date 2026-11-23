@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp/cursor-probe","session_id":"c78bd7fd-0026-4ae5-9ecd-4c97615042fc","model":"Gemini 3.8 Flash Low","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with the single word: pong"}]},"session_id":"c78bd7fd-0026-4ae5-9ecd-4c97615042fc"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]},"session_id":"c78bd7fd-0026-4ae5-9ecd-4c97615042fc"}
+{"type":"result","subtype":"success","duration_ms":2236,"duration_api_ms":2236,"is_error":false,"result":"pong","session_id":"c78bd7fd-0026-4ae5-9ecd-4c97615042fc","request_id":"d724140a-59d7-4681-a543-6cd32b5026e2","usage":{"inputTokens":10030,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}
