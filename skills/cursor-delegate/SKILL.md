@@ -15,8 +15,9 @@ Write a bounded brief, run the relay in a dedicated worktree, and inspect the re
 accepting it. Use the [brief guide](references/writing-the-brief.md) and the
 [dispatch and polling guide](references/dispatch-and-poll.md).
 
-Use `--read-only` for review. It uses Cursor Plan mode, file-write denies and a git status tripwire.
-Cursor can still run shell commands in this mode. Check the tripwire before accepting a review.
+Use `--read-only` for review. It uses Cursor Plan mode, file-write denies, and a tripwire that checks
+git status, dirty and ignored files, and index entries. Cursor can still run shell commands in
+this mode. A tripwire result of `null` means coverage was incomplete.
 On Cursor 2026.11.22, `Write(**/*)` blocked file creation and StrReplace. `Write(**)` by itself
 allowed Markdown edits. Use `Write(/abs/file)` to block edits to a specific file.
 

@@ -31,11 +31,28 @@ if (args[0] === "--version") {
     console.error("first diagnostic\\nHTTP 429: quota exhausted");
     process.exitCode = 7;
   } else {
-    if (mode === "edit") fs.writeFileSync("changed.txt", "changed");
+    if (mode === "edit") fs.writeFileSync(process.env.FAKE_EDIT_PATH || "changed.txt", "changed");
+    if (mode === "index-only") require("node:child_process").execFileSync("git", [
+      "update-index", "--cacheinfo", "100644," + process.env.FAKE_INDEX_BLOB + "," + process.env.FAKE_EDIT_PATH,
+    ]);
     const name = process.env.FAKE_FIXTURE || "simple-text";
     let raw = fs.readFileSync(path.join(process.env.FAKE_FIXTURES, name + ".jsonl"), "utf8");
     if (mode === "shell-error") raw = raw.replace('"exitCode":0', '"exitCode":3');
-    if (mode === "turn-error") raw = raw.replace('"is_error":false', '"is_error":true').replace('"result":"pong"', '"result":"Resource exhausted"');
+    if (mode === "turn-error") raw = raw.replace('"is_error":false', '"is_error":true')
+      .replace('"result":"pong"', () => '"result":' + JSON.stringify(process.env.FAKE_ERROR || "Resource exhausted"));
+    if (mode === "no-result") raw = raw.split("\\n").filter((line) => !line.includes('"type":"result"')).join("\\n");
+    if (mode === "custom-tools") {
+      const events = raw.trimEnd().split("\\n");
+      const result = events.pop();
+      for (const [callId, key, entry] of [
+        ["call-1", "lookup", { args: { term: "example" } }],
+        ["call-2", "function", { name: "list_items", arguments: '{"limit":3}' }],
+      ]) {
+        events.push(JSON.stringify({ type: "tool_call", subtype: "started", call_id: callId, tool_call: { [key]: entry } }));
+        events.push(JSON.stringify({ type: "tool_call", subtype: "completed", call_id: callId, tool_call: { [key]: { ...entry, result: { success: { content: "ok" } } } } }));
+      }
+      raw = [...events, result, ""].join("\\n");
+    }
     process.stdout.write(raw);
   }
 }
@@ -91,6 +108,18 @@ test("help lists the flags and an unknown flag never launches agent or writes a 
   assert.equal(fs.existsSync(f.invocation), false);
 });
 
+test("rejects unknown permission types and empty rules before launching Cursor", (t) => {
+  const f = fixture(t);
+  for (const [flag, rule] of [["--deny", "Bash(git push *)"], ["--allow", "Edit(file.txt)"], ["--deny", "Read( )"], ["--allow", "Shell"]]) {
+    const run = f.run([flag, rule]);
+    assert.equal(run.status, 2);
+    assert.match(run.stderr, /requires a Cursor rule/);
+  }
+  assert.equal(fs.existsSync(f.out), false);
+  const run = f.run(["--allow", "WebFetch(example.org)", "--deny", "Mcp(*:*)"]);
+  assert.equal(run.status, 0, run.stderr);
+});
+
 test("dispatches the selected model and writes the raw stream and success artifacts", (t) => {
   const f = fixture(t);
   const run = f.run(["--model", "gemini-4-hydrogen", "--effort", "low", "--sandbox", "disabled", "--brief", f.briefFile]);
@@ -100,14 +129,16 @@ test("dispatches the selected model and writes the raw stream and success artifa
   assert.equal(f.invocationData().brief, "file brief\n");
   const result = f.result();
   assert.equal(result.status, "completed");
-  assert.equal(result.model, "gemini-4-hydrogen-low");
+  assert.equal(result.model, "gemini-4-hydrogen");
+  assert.equal(result.cursorModel, "gemini-4-hydrogen-low");
+  assert.equal(result.effort, "low");
   assert.equal(result.exitCode, 0);
   assert.equal(result.signal, null);
   assert.equal(result.agentVersion, "2026.11.22-fake");
   assert.equal(result.finalMessage, "pong");
   assert.deepEqual(result.touchedFiles, []);
   assert.deepEqual(result.usage, { inputTokens: 10030, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 });
-  assert.deepEqual(f.events()[0], { type: "system", subtype: "init", session_id: result.sessionId, model: result.model });
+  assert.deepEqual(f.events()[0], { type: "system", subtype: "init", session_id: result.sessionId, model: result.cursorModel });
   assert.equal(f.events()[1].message.content[0].text, "pong");
   assert.equal(f.artifact("cursor-events.jsonl"), fs.readFileSync(path.join(fixtures, "simple-text.jsonl"), "utf8"));
   assert.equal(f.artifact("final.txt"), "pong");
@@ -179,6 +210,35 @@ test("continues via --resume and merges only permissions into a private config w
   assert.equal(fs.readlinkSync(path.join(invoked.config, "chats")), path.join(f.userConfig, "chats"));
 });
 
+test("keeps named and function-shaped tools in the normalized stream", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run([], { env: { FAKE_MODE: "custom-tools" } }).status, 0);
+  const blocks = f.events().flatMap((event) => event.message?.content ?? []);
+  assert.deepEqual(blocks.filter((block) => block.type === "tool_use"), [
+    { type: "tool_use", id: "call-1", name: "lookup", input: { term: "example" } },
+    { type: "tool_use", id: "call-2", name: "list_items", input: { limit: 3 } },
+  ]);
+  assert.deepEqual(blocks.filter((block) => block.type === "tool_result"), [
+    { type: "tool_result", tool_use_id: "call-1", content: "ok", is_error: false },
+    { type: "tool_result", tool_use_id: "call-2", content: "ok", is_error: false },
+  ]);
+});
+
+test("a reused output directory gets a fresh private config and current result", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run(["--deny", "Read(first.txt)"]).status, 0);
+  const first = f.invocationData().config;
+  const secondRun = f.run(["--deny", "Read(second.txt)"], { env: { FAKE_FIXTURE: "read-edit-shell" } });
+  assert.equal(secondRun.status, 0, secondRun.stderr);
+  const second = f.invocationData().config;
+  assert.notEqual(second, first);
+  assert.equal(fs.statSync(second).mode & 0o777, 0o700);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(second, "cli-config.json"), "utf8")).permissions.deny, ["Read(second.txt)"]);
+  assert.equal(fs.readlinkSync(path.join(second, "chats")), path.join(f.userConfig, "chats"));
+  assert.equal(f.result().status, "completed");
+  assert.match(f.artifact("final.txt"), /b\.txt/);
+});
+
 test("preserves both project and relay rules when Cursor is launched from a project subdirectory", (t) => {
   const f = fixture(t);
   const child = path.join(f.cwd, "outer", "inner");
@@ -231,12 +291,49 @@ test("read-only tripwire sees worktree changes without counting relay artifacts"
     const f = fixture(t);
     const nestedOut = path.join(f.cwd, "nested", "relay-out");
     const run = f.run(["--read-only", "--out-dir", nestedOut], { env: { FAKE_MODE: mode } });
-    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.status, mode === "edit" ? 1 : 0, run.stderr);
     const result = JSON.parse(fs.readFileSync(path.join(nestedOut, "result.json"), "utf8"));
     assert.equal(result.readOnlyViolation, mode === "edit");
     assert.equal(result.status, mode === "edit" ? "failed" : "completed");
     assert.deepEqual(result.touchedFiles, mode === "edit" ? ["?? changed.txt"] : []);
   }
+});
+
+test("the read-only tripwire detects dirty, ignored and index-only edits with unchanged porcelain", (t) => {
+  for (const kind of ["dirty", "ignored", "index"]) {
+    const f = fixture(t);
+    const name = kind === "ignored" ? "cache/file.txt" : "tracked.txt";
+    const target = path.join(f.cwd, name);
+    fs.writeFileSync(path.join(f.cwd, ".gitignore"), "cache/\n");
+    fs.writeFileSync(path.join(f.cwd, "tracked.txt"), "original");
+    const git = (...args) => execFileSync("git", ["-C", f.cwd, ...args], { encoding: "utf8" });
+    git("add", ".");
+    git("-c", "user.name=Relay Test", "-c", "user.email=test@example.org", "commit", "-qm", "Set up fixture");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, "dirty");
+    let FAKE_INDEX_BLOB = "";
+    if (kind === "index") {
+      git("add", name);
+      fs.writeFileSync(target, "second version");
+      FAKE_INDEX_BLOB = git("hash-object", "-w", name).trim();
+      fs.writeFileSync(target, "third version");
+    }
+    const originalStatus = git("status", "--porcelain", "--ignored=traditional", "-uall");
+    const mode = kind === "index" ? "index-only" : "edit";
+    const run = f.run(["--read-only"], { env: { FAKE_MODE: mode, FAKE_EDIT_PATH: name, FAKE_INDEX_BLOB } });
+    assert.equal(git("status", "--porcelain", "--ignored=traditional", "-uall"), originalStatus);
+    assert.equal(run.status, 1, kind);
+    assert.equal(f.result().readOnlyViolation, true, kind);
+    assert.equal(f.result().status, "failed");
+  }
+});
+
+test("the read-only tripwire reports unknown for an embedded untracked repository", (t) => {
+  const f = fixture(t);
+  fs.mkdirSync(path.join(f.cwd, "nested"));
+  execFileSync("git", ["-C", path.join(f.cwd, "nested"), "init", "-q"]);
+  assert.equal(f.run(["--read-only"]).status, 0);
+  assert.equal(f.result().readOnlyViolation, null);
 });
 
 test("preserves failure exit codes and records usage-limit errors in both result formats", (t) => {
@@ -254,10 +351,22 @@ test("preserves failure exit codes and records usage-limit errors in both result
 
 test("a Cursor error result marks the relay failed even when the CLI exits zero", (t) => {
   const f = fixture(t);
-  assert.equal(f.run([], { env: { FAKE_MODE: "turn-error" } }).status, 0);
+  for (const FAKE_ERROR of ["Resource exhausted", "rate limits exceeded", "rate limited", "quotas exhausted"]) {
+    assert.equal(f.run([], { env: { FAKE_MODE: "turn-error", FAKE_ERROR } }).status, 1);
+    assert.equal(f.result().status, "failed");
+    assert.equal(f.result().exitCode, 1);
+    assert.equal(f.result().finalMessage, FAKE_ERROR);
+    assert.match(f.result().error, /Cursor usage limit/);
+    assert.equal(f.events().at(-1).is_error, true);
+  }
+});
+
+test("a zero exit without a Cursor result fails with exit code 1", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run([], { env: { FAKE_MODE: "no-result" } }).status, 1);
   assert.equal(f.result().status, "failed");
-  assert.equal(f.result().finalMessage, "Resource exhausted");
-  assert.equal(f.events().at(-1).is_error, true);
+  assert.equal(f.result().exitCode, 1);
+  assert.match(f.result().error, /without a successful result/);
 });
 
 test("watchdog stops the agent and produces a timeout result", (t) => {

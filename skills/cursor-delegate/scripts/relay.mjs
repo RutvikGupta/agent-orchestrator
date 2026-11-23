@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { constants, homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { readOnlyVerdict, snapshotReadOnly } from "./tripwire.mjs";
 
 const HELP = `Usage: node relay.mjs [options]
 
@@ -53,6 +54,14 @@ function parseArgs(argv) {
   if (opts.model && !/^[\w][\w.:/@,=\[\]-]*$/.test(opts.model)) throw new Error("invalid --model");
   if (opts.effort && !/^[\w][\w-]*$/.test(opts.effort)) throw new Error("invalid --effort");
   if (opts.session && !/^[\w][\w.:-]*$/.test(opts.session)) throw new Error("invalid --session");
+  for (const [flag, rules] of [["--allow", opts.allow], ["--deny", opts.deny]]) {
+    for (const rule of rules) {
+      const match = /^(?:Shell|Read|Write|WebFetch|Mcp)\(([^\r\n\0]*)\)$/.exec(rule);
+      if (match?.[0] !== rule || !match[1].trim()) {
+        throw new Error(`${flag} requires a Cursor rule: Shell(...), Read(...), Write(...), WebFetch(...) or Mcp(...)`);
+      }
+    }
+  }
   if (opts.timeout) {
     const match = /^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+)ms)?$/.exec(opts.timeout);
     const [, hours, minutes, seconds, millis] = match || [];
@@ -134,7 +143,6 @@ function prepareConfig(dir, opts, root, mergedFiles) {
   const allow = [...new Set([...merged.allow, ...opts.allow])];
   // Cursor uses Write for both Write and StrReplace. Its glob matcher needs **/* for absolute paths.
   const deny = [...new Set([...merged.deny, ...opts.deny, ...(opts.readOnly ? ["Write(**)", "Write(**/*)"] : [])])];
-  fs.mkdirSync(dir, { mode: 0o700 });
   fs.writeFileSync(path.join(dir, "cli-config.json"), JSON.stringify({ version: 1, permissions: { allow, deny } }) + "\n", { mode: 0o600 });
   const chats = path.join(userDir, "chats");
   fs.mkdirSync(chats, { recursive: true, mode: 0o700 });
@@ -146,14 +154,18 @@ function gitOptions(cwd) {
   return { cwd, encoding: "utf8", timeout: 5000, windowsHide: true };
 }
 
-function gitStatus(cwd, root, artifacts) {
-  if (!root) return null;
+function gitExcludes(root, artifacts) {
+  if (!root) return [];
   // Git may canonicalize the checkout (for example, /var to /private/var on macOS).
   const realDir = fs.realpathSync(path.dirname(artifacts[0]));
-  const excludes = artifacts
+  return artifacts
     .map((file) => path.relative(root, path.join(realDir, path.basename(file))))
     .filter((file) => file && file !== ".." && !file.startsWith(".." + path.sep) && !path.isAbsolute(file))
     .map((file) => `:(top,exclude,literal)${file}`);
+}
+
+function gitStatus(cwd, root, excludes) {
+  if (!root) return null;
   const status = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ...excludes], gitOptions(cwd));
   return status.status === 0 ? status.stdout.split("\n").filter(Boolean) : null;
 }
@@ -165,13 +177,18 @@ const TOOL_NAMES = {
 };
 
 function toolEvent(event) {
-  const [key, tool] = Object.entries(event.tool_call || {}).find(([key]) => key.endsWith("ToolCall")) || [];
+  const tools = Object.entries(event.tool_call || {});
+  const [key, tool] = tools.find(([key]) => key.endsWith("ToolCall")) || tools[0] || [];
   if (!tool || !event.call_id) return null;
-  const name = TOOL_NAMES[key] || key;
+  const name = Object.hasOwn(TOOL_NAMES, key) ? TOOL_NAMES[key] : key === "function" ? tool.name || key : key;
   const timestamp = new Date(event.timestamp_ms);
   const metadata = { session_id: event.session_id, timestamp: Number.isFinite(+timestamp) ? timestamp.toISOString() : undefined };
   if (event.subtype === "started") {
-    const input = { ...tool.args };
+    let args = tool.args ?? tool.arguments;
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { args = { arguments: args }; }
+    }
+    const input = { ...args };
     if (["Read", "Edit", "Write"].includes(name)) input.file_path = input.path || input.file_path;
     if (name === "Bash" && input.isBackground) input.run_in_background = true;
     const content = [{ type: "tool_use", id: event.call_id, name, input }];
@@ -274,7 +291,7 @@ async function runAgent(args, { cwd, env, input, stdout, stderr, timeout, onTime
 }
 
 function failureText(message) {
-  if (/\b(?:quota|rate limit|resource_exhausted|too many requests|http\s+429|status(?: code)?[ :]+429)\b/i.test(message)) {
+  if (/quota|rate[ _-]?limit|resource[ _]exhausted|too many requests|\b429\b/i.test(message)) {
     return `Cursor usage limit: ${message}`;
   }
   return message;
@@ -291,16 +308,18 @@ async function relay(opts, brief) {
   };
   const resultPath = path.join(dir, "result.json");
   const tempResult = `${resultPath}.${process.pid}.tmp`;
-  const configDir = path.join(dir, "cursor-config");
+  const configDir = fs.mkdtempSync(path.join(dir, "cursor-config-"));
   const artifacts = [...Object.values(files), resultPath, tempResult, configDir];
+  fs.rmSync(resultPath, { force: true });
   for (const file of Object.values(files)) fs.writeFileSync(file, "", { mode: 0o600 });
 
   const startedAt = new Date().toISOString();
   const started = Date.now();
-  const model = opts.model && opts.effort ? `${opts.model}-${opts.effort}` : opts.model;
+  const cursorModel = opts.model && opts.effort ? `${opts.model}-${opts.effort}` : opts.model;
+  let eventModel = cursorModel ?? null;
   const result = {
     schema: "delegate-relay.result.v1",
-    tool: "cursor", workdir: opts.cd, startedAt, model: model ?? null, effort: opts.effort ?? null,
+    tool: "cursor", workdir: opts.cd, startedAt, model: opts.model ?? null, cursorModel: cursorModel ?? null, effort: opts.effort ?? null,
     session: opts.session ?? null, resumed: Boolean(opts.session), sessionId: opts.session ?? null,
     agentVersion: null, finalMessage: "", usage: null, projectConfigPaths: [], ...files,
   };
@@ -319,7 +338,9 @@ async function relay(opts, brief) {
   const setStop = (stop) => { stopChild = stop; };
 
   const root = gitRoot(opts.cd);
-  const before = opts.readOnly ? gitStatus(opts.cd, root, artifacts) : null;
+  const excludes = gitExcludes(root, artifacts);
+  const before = opts.readOnly ? gitStatus(opts.cd, root, excludes) : null;
+  const beforeSnapshot = opts.readOnly ? snapshotReadOnly(root, excludes) : null;
   let stderrTail = Buffer.alloc(0);
   const recordStderr = (chunk) => {
     fs.appendFileSync(files.stderrPath, chunk);
@@ -333,13 +354,14 @@ async function relay(opts, brief) {
     if (event.type === "system" && event.subtype === "init") {
       sawInit = true;
       result.sessionId = event.session_id || result.sessionId;
-      result.model = model || event.model || null;
-      appendEvent({ type: "system", subtype: "init", session_id: result.sessionId, model: result.model });
+      eventModel = cursorModel || event.model || null;
+      result.cursorModel ??= eventModel;
+      appendEvent({ type: "system", subtype: "init", session_id: result.sessionId, model: eventModel });
     } else if (event.type === "assistant" && Array.isArray(event.message?.content)) {
       const content = event.message.content.filter((block) => block.type === "text");
       if (content.length) {
         result.finalMessage = content.map((block) => block.text).join("\n");
-        appendEvent({ type: "assistant", session_id: result.sessionId, message: { role: "assistant", model: result.model, content } });
+        appendEvent({ type: "assistant", session_id: result.sessionId, message: { role: "assistant", model: eventModel, content } });
       }
     } else if (event.type === "tool_call") {
       const mapped = toolEvent(event);
@@ -358,7 +380,7 @@ async function relay(opts, brief) {
     // The native project loader replaces permission arrays. Use the merged profile instead.
     const useMergedConfig = "--disable-project-configs";
     const args = ["-p", "--output-format", "stream-json", "--trust", "--workspace", opts.cd];
-    if (model) args.push("--model", model);
+    if (cursorModel) args.push("--model", cursorModel);
     if (opts.session) args.push("--resume", opts.session);
     if (opts.sandbox) args.push("--sandbox", opts.sandbox);
     args.push(...(opts.readOnly ? ["--mode", "plan"] : ["--force"]));
@@ -423,14 +445,15 @@ async function relay(opts, brief) {
     if (signal) exitCode = 128 + constants.signals[signal];
     else if (exitCode === 0 || !result.agentVersion) exitCode = 124;
   }
-  const after = gitStatus(opts.cd, root, artifacts);
+  const after = gitStatus(opts.cd, root, excludes);
   if (opts.readOnly) {
-    result.readOnlyViolation = before && after ? JSON.stringify(before) !== JSON.stringify(after) : null;
+    result.readOnlyViolation = readOnlyVerdict(beforeSnapshot, snapshotReadOnly(root, excludes), before, after);
     if (result.readOnlyViolation && status === "completed") {
       status = "failed";
-      error = "read-only violation: git status changed during the Cursor run";
+      error = "read-only violation: the worktree or index changed during the Cursor run";
     }
   }
+  if (status !== "completed" && exitCode === 0) exitCode = 1;
   Object.assign(result, {
     status, exitCode, signal, touchedFiles: after, finishedAt: new Date().toISOString(),
   });
@@ -438,7 +461,7 @@ async function relay(opts, brief) {
     result.error = failureText(String(error || "agent failed"));
     result.stderrTail = stderrTail.toString().trimEnd().split(/\r?\n/).filter(Boolean).slice(-20);
   }
-  if (!sawInit && result.sessionId) appendEvent({ type: "system", subtype: "init", session_id: result.sessionId, model: result.model });
+  if (!sawInit && result.sessionId) appendEvent({ type: "system", subtype: "init", session_id: result.sessionId, model: eventModel });
   const usage = result.usage;
   appendEvent({
     type: "result", subtype: status === "completed" ? "success" : "error_during_execution",
