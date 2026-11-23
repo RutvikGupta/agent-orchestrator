@@ -94,13 +94,33 @@ test('a new dashboard server reloads the browser and SSE change calls the refres
   assert.equal(reloaded, 1);
   assert.equal(kept, 1, 'the tab keeps its chosen row and drafts across the reload');
   const soon = () => {};
-  vm.runInNewContext(snippet('const presence=new EventSource(', 'function showEscalation('), {
-    soon, EventSource: class {
+  vm.runInNewContext(snippet('const presenceUrl=', 'function showEscalation('), {
+    soon, sendKey: () => null, EventSource: class {
       constructor(url) { assert.equal(url, 'api/presence'); }
       addEventListener(name, fn) { listeners[name] = fn; }
     },
   });
   assert.equal(listeners.change, soon);
+});
+
+test('a tab reopens its presence stream as keyed once it gets the send key, and only then', () => {
+  const opened = [], closed = [];
+  let key = null;
+  class EventSource {
+    constructor(url) { this.url = url; opened.push(url); }
+    addEventListener() {}
+    close() { closed.push(this.url); }
+  }
+  const context = vm.createContext({ soon() {}, showEscalation() {}, sendKey: () => key, EventSource });
+  vm.runInContext(snippet('const presenceUrl=', 'function showEscalation('), context);
+  assert.deepEqual(opened, ['api/presence']);
+  context.rekey();
+  assert.deepEqual(opened, ['api/presence'], 'no key yet: the stream stays as it is');
+  key = 'a'.repeat(48);
+  context.rekey();
+  assert.deepEqual([opened, closed], [['api/presence', 'api/presence?keyed=1'], ['api/presence']]);
+  context.rekey();
+  assert.equal(opened.length, 2, 'a keyed stream is not reopened');
 });
 
 test('clicking a parent caret closes and reopens its native children without selecting a row', () => {

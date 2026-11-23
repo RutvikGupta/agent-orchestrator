@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A dashboard tab without the send key gets one. The key reaches a browser only in the address that
+  `dashboard --open` opens, and `--open` opened nothing while any tab showed the board, so a tab opened
+  by its address, or before a server that a login item started, could never send. Each tab now tells
+  the server whether it holds the key, and `--open` opens a keyed tab when no open tab has one.
+
 - Watchers keep running Node after a Node upgrade. Every process the CLI starts named Node by its
   resolved binary, which for Homebrew is a versioned path that an upgrade or a switch of versions
   deletes. Finish notices then stopped, so an agent slept through its sub-agents finishing and left
