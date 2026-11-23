@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Demo relay for docs/demo/seed.mjs. The seed copies this file to claude-delegate/scripts/relay.mjs
-// and codex-delegate/scripts/relay.mjs in its temporary skills folder, where `orch.mjs start` finds
-// it through AGENT_ORCH_SKILLS_DIR. It never runs a model: it plays back a scripted session
+// Demo relay for docs/demo/seed.mjs. The seed copies this file to claude-delegate/scripts/relay.mjs,
+// codex-delegate/scripts/relay.mjs and cursor-delegate/scripts/relay.mjs in its temporary skills
+// folder, where `orch.mjs start` finds it through AGENT_ORCH_SKILLS_DIR. Its folder names the agent it
+// plays: Claude, Codex, or Gemini (the cursor-delegate relay, which writes Claude's stream-json shape
+// with no cost and no usage limits). It never runs a model: it plays back a scripted session
 // (`-- --demo-script FILE`) as the real relays' files, events.jsonl in the agent's own stream format,
 // then final.txt and result.json. A "running" session stays alive until it is stopped (SIGTERM) or
 // the seed that started it is gone, keeping its event stream fresh so it never looks silent.
@@ -24,7 +26,9 @@ const cwd = flag("--cd") || process.cwd();
 const model = flag("--model");
 const effort = flag("--effort");
 const script = JSON.parse(fs.readFileSync(flag("--demo-script"), "utf8"));
-const claude = process.argv[1].includes("claude-delegate");
+const playing = process.argv[1].includes("claude-delegate") ? "claude" : process.argv[1].includes("cursor-delegate") ? "gemini" : "codex";
+const gemini = playing === "gemini";
+const claude = playing !== "codex"; // Claude's stream-json shape, which the gemini relay writes too
 const runId = process.env.AGENT_ORCH_RUN || "";
 const taskId = process.env.AGENT_ORCH_TASK || "";
 const cli = process.env.DEMO_ORCH_CLI;
@@ -163,7 +167,7 @@ function codexRollout(final) {
 const step = claude ? claudeStep : codexStep;
 if (claude) {
   emit({ type: "system", subtype: "init", cwd, session_id: script.session, model, permissionMode: "default", tools: ["Bash", "Edit", "Glob", "Grep", "Read", "TodoWrite", "Write"] });
-  if (script.rateLimits) {
+  if (script.rateLimits && !gemini) {
     const l = script.rateLimits;
     emit({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: {
       five_hour: { utilization: l.fiveHour / 100, resetsAt: Math.round(Date.parse(l.fiveHourResets) / 1000) },
@@ -195,6 +199,9 @@ function writeResult(result) {
   process.exit(result.exitCode);
 }
 
+// The gemini relay's own result fields: the id Cursor ran, which carries the effort, and the usage.
+const cursorFields = (usage) => (gemini ? { cursorModel: effort ? `${model}-${effort}` : model, ...(usage ? { usage } : {}) } : {});
+
 function finish(status) {
   const end = script.end;
   const finalMessage = fill(end.finalMessage || "");
@@ -204,7 +211,8 @@ function finish(status) {
     emit({ type: "result", subtype: status === "completed" ? "success" : "error_during_execution", is_error: status !== "completed", num_turns: totals.calls, result: end.error || finalMessage,
       session_id: script.session, duration_ms: Date.parse(end.finishedAt) - Date.parse(script.startedAt),
       usage: { input_tokens: totals.input, cache_creation_input_tokens: totals.cacheWrite, cache_read_input_tokens: totals.cacheRead, output_tokens: totals.output },
-      total_cost_usd: Number(((totals.input + totals.cacheWrite) * 6e-6 + totals.cacheRead * 6e-7 + totals.output * 3e-5).toFixed(2)) });
+      // Cursor reports no cost: the orchestrator prices a gemini attempt from prices.json.
+      ...(gemini ? {} : { total_cost_usd: Number(((totals.input + totals.cacheWrite) * 6e-6 + totals.cacheRead * 6e-7 + totals.output * 3e-5).toFixed(2)) }) });
   } else {
     if (finalMessage) emit({ type: "item.completed", item: { id: `item_${item++}`, type: "agent_message", text: finalMessage } });
     const u = codexUsage();
@@ -218,6 +226,7 @@ function finish(status) {
     ...(claude ? { sessionId: script.session } : { threadId: script.session }),
     model, effort, touchedFiles: end.touchedFiles || [], startedAt: script.startedAt,
     finishedAt: end.finishedAt, readOnlyViolation: false, error: end.error || null,
+    ...cursorFields({ inputTokens: totals.input, outputTokens: totals.output, cacheReadTokens: totals.cacheRead, cacheWriteTokens: totals.cacheWrite }),
   });
 }
 
@@ -234,6 +243,7 @@ process.on("SIGTERM", () => writeResult({
   schema: "delegate-relay.result.v1", status: "stopped", exitCode: 1, signal: "SIGTERM", finalMessage: "",
   ...(claude ? { sessionId: script.session } : { threadId: script.session }),
   model, effort, touchedFiles: [], startedAt: script.startedAt, finishedAt: new Date().toISOString(), readOnlyViolation: false, error: null,
+  ...cursorFields(null),
 }));
 fs.writeFileSync(path.join(out, "ready"), "");
 
