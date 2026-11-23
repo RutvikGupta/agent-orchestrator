@@ -32,9 +32,10 @@ export function nodeBin(env = process.env) {
   return onPath.find(exists) || own;
 }
 
-// Shell code that replaces the Node binary in "$1" with the first `node` on PATH when "$1" is no
-// longer an executable file: a watcher started before an upgrade still runs Node after it.
-export const NODE_FALLBACK = '[ -x "$1" ] || { _n=$(command -v node 2>/dev/null) && [ -n "$_n" ] && shift && set -- "$_n" "$@"; };';
+// Shell code that replaces the Node binary in "$1" with the first `node` on PATH when "$1" is an
+// absolute path that is no longer an executable file: a watcher started before an upgrade still runs
+// Node after it. A command named without a path (as tests do with `echo`) is left alone.
+export const NODE_FALLBACK = 'case "$1" in /*) [ -x "$1" ] || { _n=$(command -v node 2>/dev/null) && [ -n "$_n" ] && shift && set -- "$_n" "$@"; };; esac;';
 // The CLI that briefs, hints, and `dashboard --detach` name: scripts/orch.mjs, next to lib/.
 export const CLI_PATH = fileURLToPath(new URL("../orch.mjs", import.meta.url));
 export const SKILL_DIR = path.dirname(path.dirname(CLI_PATH));
