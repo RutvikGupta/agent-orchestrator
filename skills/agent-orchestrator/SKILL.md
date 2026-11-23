@@ -102,31 +102,31 @@ prefer an agent because it is the CLI you run in, and none is the default.
 
 - **The user's choice wins:** use the agent the user named for a task, and treat a split they
   proposed as a starting point (say where you change it). The model policy still applies.
-- **Between agents, compare records.** Compare eligible Claude, Codex and Gemini tasks at the tier in
-  `$ORCH stats`: best first-try acceptance for that task kind wins; within about 10 points, lowest
-  cost per accepted task wins. While any candidate has under 5 finished tasks of that kind,
-  alternate, starting the next task on the candidate with the fewest. Implementation is ordinary work
-  for Codex.
+- **Between agents, compare records.** When the task's abilities (`references/agents.md`, "What each
+  agent can do") and the user's choice leave more than one agent, compare them at the task's tier in
+  `$ORCH stats` ("By agent, tier and task type"): the best first-try acceptance on this kind of task
+  wins; within about 10 points, the lowest cost per accepted task. While any candidate has under 5
+  finished tasks of that kind, alternate, starting the next on the one with the fewest.
 - **Gemini Neon for coding.** For implementation, debugging and code review at `strong` or `complex`
   (Claude `complex`), Gemini 4 Neon is a candidate beside Opus and astra: it leads public agentic
   coding indexes at a lower price per token. While Gemini has under 5 finished tasks of that coding
-  kind, its turn comes first: start the next on Gemini. After that, records decide. Hydrogen at
-  `light` and `standard` competes on records like other light tiers (`references/tiers.md`).
-- **Not Gemini:** babysitting (Claude only), live web research (Codex only, `--web-search live`),
-  `frontier` work (Claude Fable), and tasks needing `--offline`.
-- **Weigh cost against complexity.** The table sets the lowest tier allowed; at or above it use the
-  lowest cost per accepted task (`$ORCH cost`; `$ORCH stats`), never a bigger model for comfort.
-- `start` requires `--tier` and `--why`: name the deciding numbers between agents, including Gemini's,
-  or "Gemini's first coding tasks of this kind". For `complex` or `frontier` name the table's criterion.
-  A command task takes `--why` but no tier.
+  kind, its turn comes first. Then the records decide. Never Gemini for a babysitter (Claude only),
+  live web research (Codex only), `frontier` work, or `--offline` (`references/tiers.md`).
+- **Weigh cost against complexity.** The table sets the lowest tier the task's complexity allows
+  (costly or subtle mistakes need `complex`). At or above it, take the tier and agent with the lowest
+  cost per accepted task (`$ORCH cost`; `$ORCH stats`), never a bigger model for comfort. In November
+  2026, per accepted task, Opus cost 5 times Sonnet; Codex `standard`, 1/14.
+- `start` requires `--tier` and `--why`: one line on the deciding factor, such as `"light: runs the
+  tests; nothing to judge"`; for `complex` or `frontier` the table's criterion; between agents the
+  numbers that decided it, or "Gemini's first coding tasks of this kind". A command task takes no tier.
 - `policy.json` fixes each tier's model, effort and default budget (never pass `--model`); only
   `frontier` takes `--effort` (`medium` or `high`). Prices, costs and records: `references/tiers.md`.
 
 | The task | Tier |
 | --- | --- |
-| Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` (Gemini Hydrogen) |
-| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard` (Gemini Hydrogen); Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area); Gemini `strong` (Neon) for coding |
-| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` (Gemini Neon) |
+| Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` (Gemini: Hydrogen) |
+| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard` (Gemini: Hydrogen); Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area); Gemini `strong` (Neon) for coding |
+| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` (Gemini: Neon) |
 | Design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed `complex` attempt. Never routine or mechanical work, small reviews or waiting. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for less hard work) |
 | A review, verification or second opinion of another agent's work | An agent other than the author: `standard` for a small diff, `complex` for a large or risky one, `frontier` when the review itself is difficult |
 

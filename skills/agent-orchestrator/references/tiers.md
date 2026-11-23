@@ -245,7 +245,7 @@ Source facts:
   - Neon's weak points: it is verbose at `xhigh`, and its first token is slow (about 40 seconds at
     `high`).
 - **SmartScope's comparison**
-  (`https://smartscope.blog/blog/gemini-4-carbon-claude-fable-5-2-gpt-2026/`, 2026-11-19).
+  (`https://smartscope.blog/en/blog/gemini-4-carbon-claude-fable-5-2-gpt-2026/`, 2026-11-19).
   Artificial Analysis Intelligence Index: Neon 61, Opus 5.5 59, GPT-6.2 Sol 57.
 
 Inferences:
