@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { SKILL_ROOTS } from "./config.mjs";
+import { AGENTS, SKILL_ROOTS, relayFolder } from "./config.mjs";
 
 export function die(message, code = 1) {
   process.stderr.write(`orch: ${message}\n`);
@@ -40,10 +40,21 @@ export function git(cwd, args, { allowFail = false } = {}) {
 
 export function findRelay(key) {
   for (const root of SKILL_ROOTS) {
-    const relay = path.join(root, `${key}-delegate`, "scripts", "relay.mjs");
+    const relay = path.join(root, relayFolder(key), "scripts", "relay.mjs");
     if (fs.existsSync(relay)) return fs.realpathSync(relay);
   }
   return null;
+}
+
+// Where a task stopped by a usage limit of `limited` (one agent key or several) can go on: "resume it
+// on another agent that is ready: codex or gemini". An agent counts as ready here when its CLI and
+// its relay are installed; `agents` also checks its login.
+export function handOverText(limited) {
+  const skip = new Set([limited].flat());
+  const others = Object.keys(AGENTS).filter((key) => !skip.has(key));
+  const ready = others.filter((key) => which(AGENTS[key].bin) && findRelay(key));
+  if (ready.length) return `resume it on another agent that is ready: ${ready.join(" or ")}`;
+  return others.length ? `resume it on another agent once one is ready (${others.join(", ")}: none is installed)` : "resume it once its usage window resets";
 }
 
 export function parseDuration(text) {

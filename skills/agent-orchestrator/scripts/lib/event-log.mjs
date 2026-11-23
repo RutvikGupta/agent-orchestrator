@@ -4,13 +4,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { claudeTool } from "./claude.mjs";
+import { eventShape } from "./events.mjs";
 import { REPLY_PREFIX, readInbox, readReplies } from "./inbox.mjs";
 import { compact, formatElapsed, relPath, shortText, unwrapShell } from "./format.mjs";
 import { attemptAgent, taskDir } from "./runs.mjs";
 import { tailText } from "./util.mjs";
 
+// Codex's events have their own shape; Claude's, Gemini's (the cursor-delegate relay writes Claude's
+// shape) and a command task's take the stream-json branch below (eventShape).
 function eventText(agent, e, cwd) {
-  if (agent === "codex") {
+  if (eventShape(agent) === "codex") {
     if (e.type === "thread.started") return ["session", `started thread ${e.thread_id}`];
     if (e.type === "turn.completed") {
       const u = e.usage || {};

@@ -17,13 +17,19 @@ import { fileURLToPath } from "node:url";
 import { CLI_PATH, SKILL_ROOTS } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { claudeTurnEnded, subagentEvent } from "./claude.mjs";
-import { commandRuns, openToolNow, summarizeEvents } from "./events.mjs";
+import { commandRuns, eventShape, openToolNow, summarizeEvents } from "./events.mjs";
 import { watchForFinish } from "./finish-notice.mjs";
 import { markRead, markSteered, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { parkEnv } from "./park.mjs";
 import { COMMAND_AGENT } from "./policy.mjs";
 import { describe, exists, loadTask, processStarted, relayAlive, resumeClaim, resumeFile, resumeHandoffFile, saveTask, shownName, taskDir, waitForExit } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
+
+// The agents whose relay resumes a session with --session, so an interrupt can stop the relay and
+// resume with the message: Claude, Codex, and Gemini (the cursor-delegate relay).
+const RESUMABLE = new Set(["claude", "codex", "gemini"]);
+// The agents whose events have Claude's shape, with its tool calls and background commands.
+const CLAUDE_SHAPED = new Set(["claude", "gemini"]);
 
 // Commands that publish or rewrite history are never stopped part-way: the message waits.
 const PROTECTED = /\b(git\s+(commit|push|rebase|merge|cherry-pick|am|tag|reset|checkout|switch|stash)|gt\s+(submit|sync|restack|modify|create|move|fold|split|squash)|gh\s+(pr\s+(create|merge|edit|ready|close|comment|review)|api\s+(-X|--method))|npm\s+publish|terraform\s+apply|alembic\s+upgrade)\b/;
@@ -249,16 +255,16 @@ export function commandTree(relayPid, command, rows = processTable()) {
 // the same commands, so what tells the user when a message is read can say so beforehand.
 export function heldBy(task) {
   const events = path.join(task.outDir || "", "events.jsonl");
-  const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
+  const all = eventShape(task.agent) === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
   const kept = all.find((p) => PROTECTED.test(p.command));
   if (kept) return kept.command;
-  const background = task.agent === "claude" ? commandRuns("claude", events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
+  const background = CLAUDE_SHAPED.has(task.agent) ? commandRuns(task.agent, events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
   return background ? background.cmd : null;
 }
 
 export function planSteer(task, row = null) {
   const events = path.join(task.outDir || "", "events.jsonl");
-  const all = task.agent === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
+  const all = eventShape(task.agent) === "codex" ? pendingCodexCommands(events) : pendingCommands(events);
   const kept = all.find((p) => PROTECTED.test(p.command));
   if (kept) return { wait: `the agent is running \`${shorten(kept.command)}\`, which is not stopped part-way` };
   const pending = all.filter((p) => !p.ended);
@@ -276,7 +282,7 @@ export function planResume(task, row = null) {
   const refused = (why) => ({ wait: `${why}, so it is not interrupted; it reads the message after its current step`, refused: true });
   if (task.agent === COMMAND_AGENT) return { wait: "a command task has no session to resume and no agent to read the message", refused: true };
   if (task.babysit || task.plan?.type === "babysit") return refused("a babysitter's park watcher delivers its messages");
-  if (!["claude", "codex"].includes(task.agent)) return refused(`a ${task.agent} task cannot be resumed`);
+  if (!RESUMABLE.has(task.agent)) return refused(`a ${task.agent} task cannot be resumed`);
   // The Codex relay refuses --network-access on a resumed run unless the sandbox is named, and a
   // sandboxed Codex task with the network on starts without naming it: its session would be stopped
   // and could not resume.
@@ -287,10 +293,10 @@ export function planResume(task, row = null) {
   const session = row?.session || summary.sessionId || null;
   if (!session) return refused("its session id is not known yet");
   // Stopping the session also stops what it runs in the background: never a publishing command.
-  const kept = task.agent === "claude" ? commandRuns("claude", events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
+  const kept = CLAUDE_SHAPED.has(task.agent) ? commandRuns(task.agent, events).find((r) => r.background && r.exitCode === null && PROTECTED.test(r.cmd)) : null;
   if (kept) return { wait: `the agent's background command \`${shorten(kept.cmd)}\` is not stopped part-way, so it is not interrupted; it reads the message after its current step`, refused: true };
   if (row?.idle) return { resume: { was: "idle", doing: `ended its turn and waited on its own background ${row.idle.background ? `command \`${shorten(row.idle.background)}\`` : "work"}`, session, background: row.idle.background || null } };
-  const tool = task.agent === "claude" ? openToolNow(summary)?.name : null;
+  const tool = CLAUDE_SHAPED.has(task.agent) ? openToolNow(summary)?.name : null;
   return { resume: { was: "mid-turn", doing: tool ? `was in a ${tool} tool call, not in a shell command` : "was not in a shell command (in a model call, or between steps)", session, background: null } };
 }
 

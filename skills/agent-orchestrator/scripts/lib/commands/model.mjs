@@ -6,6 +6,7 @@ export function cmdModel(args) {
   try {
     const choice = boundedModel(args.agent, args.tier);
     const effort = choice.effort
+      // Codex takes a config override; the Claude and Gemini relays take --effort.
       ? args.agent === "codex" ? ` -c model_reasoning_effort="${choice.effort}"` : ` --effort ${choice.effort}`
       : "";
     console.log(`--model ${choice.model}${effort}`);

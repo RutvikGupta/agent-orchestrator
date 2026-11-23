@@ -3,12 +3,12 @@
 import { admissionSettingsError, machineStatus } from "../admission.mjs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { AGENTS, HOME, POLICY_PATH, SKILL_ROOTS, STATE_ROOT, USAGE_CACHE } from "../config.mjs";
+import { AGENTS, HOME, POLICY_PATH, SKILL_ROOTS, STATE_ROOT, USAGE_CACHE, relayFolder } from "../config.mjs";
 import { outsideTerminal } from "../detach.mjs";
 import { table } from "../format.mjs";
 import { codexLimits, limitsText, probeClaudeLimits } from "../limits.mjs";
 import { relayHasNetworkPatch } from "../permissions.mjs";
-import { loadPolicy } from "../policy.mjs";
+import { POLICY_AGENTS, loadPolicy } from "../policy.mjs";
 import { evidenceNote, tierEvidence } from "../stats.mjs";
 import { die, emit, findRelay, readJson, which } from "../util.mjs";
 
@@ -31,7 +31,7 @@ export function cmdAgents(args) {
         auth = r.status === 0 && !/"loggedIn"\s*:\s*false|not logged in/i.test(text) ? "ok" : "logged-out";
       }
     }
-    const missing = [!binPath && `install ${meta.bin}`, !relay && `install ${key}-delegate`, auth === "logged-out" && "log in"]
+    const missing = [!binPath && `install ${meta.bin}`, !relay && `install ${relayFolder(key)}`, auth === "logged-out" && "log in"]
       .filter(Boolean)
       .join(", ");
     rows.push({
@@ -51,23 +51,25 @@ export function cmdAgents(args) {
   // How each tier has done on this machine in the last 30 days, beside the tier it describes. The
   // numbers are left out when they cannot be read.
   const evidence = tierEvidence(policy);
-  const lines = [
-    ...Object.entries(policy.claude.tiers).map(([t, v]) => `claude --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, "claude", t)}: ${v.use || ""}`),
-    ...Object.entries(policy.codex.tiers).map(([t, v]) => `codex --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, "codex", t)}: ${v.use || ""}${flag(v.model)}`),
-  ];
+  // Only Codex keeps a list of the models this account may use.
+  const lines = POLICY_AGENTS.flatMap((agent) => Object.entries(policy[agent].tiers).map(([t, v]) =>
+    `${agent} --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, agent, t)}: ${v.use || ""}${agent === "codex" ? flag(v.model) : ""}`));
 
   const installed = new Set(rows.filter((r) => r.bin !== "-").map((r) => r.key));
   let refreshNote = "";
   if (args.refresh && installed.has("claude") && !probeClaudeLimits(which("claude"))) {
     refreshNote = " (refresh failed: Claude reported no limits)";
   }
+  // Gemini has no source of usage readings, so it always reads unknown.
   const usage = {
     claude: installed.has("claude") ? readJson(USAGE_CACHE)?.claude || null : null,
     codex: installed.has("codex") ? codexLimits() : null,
+    gemini: null,
   };
+  const hints = { claude: "run: agents --refresh", codex: "no recent Codex session logs", gemini: "Cursor reports no usage limits" };
   const usageLines = [...installed].map((key) => {
-    const text = limitsText(usage[key]);
-    const hint = key === "claude" ? "run: agents --refresh" : "no recent Codex session logs";
+    const text = limitsText(usage[key] ?? null);
+    const hint = hints[key] || "no usage source";
     return `${key.padEnd(6)} ${text || `unknown (${hint})`}${key === "claude" ? refreshNote : ""}`;
   });
   const claudeRelay = findRelay("claude");

@@ -89,7 +89,7 @@ test('invalid ceiling names and a ceiling on a modeled task are refused', async 
 
 test('model arguments select a tier and lower both model and effort to the ceiling', async (t) => {
   const f = await fixture(t);
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     const plain = await f.command(['model', '--agent', agent]);
     const choice = policy[agent].tiers.standard;
     const effortArg = level => agent === 'codex' ? `-c model_reasoning_effort="${level}"` : `--effort ${level}`;
@@ -102,7 +102,7 @@ test('model arguments select a tier and lower both model and effort to the ceili
     assert.match(omitted.stdout, new RegExp(policy[agent].tiers.light.model));
   }
   const invalid = await f.command(['model', '--agent', 'command'], { code: 2 });
-  assert.match(invalid.stderr, /--agent must be claude or codex/);
+  assert.match(invalid.stderr, /--agent must be claude, codex or gemini/);
   const badTier = await f.command(['model', '--agent', 'claude', '--tier', 'invalid'], { code: 2 });
   assert.match(badTier.stderr, /unknown --tier/);
 });
@@ -159,7 +159,7 @@ test('modeled tasks from a command environment cannot exceed its inherited ceili
   const env = { AGENT_ORCH_DEPTH: '1', AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'command',
     AGENT_ORCH_MAX_TIER: 'standard' };
   const child = await f.newRun('child', env);
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     const result = await f.command(['start', child.id, 'too-strong', '--agent', agent, '--tier', 'complex',
       '--why', 'Check inherited ceiling', '--brief', f.brief('refused')], { env, code: 2 });
     assert.match(result.stderr, /refusing: this command runs in task .*claude standard.*is stronger/);

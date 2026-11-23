@@ -6,6 +6,9 @@
 // band; a Codex attempt from its token totals. Codex counts cached input inside its input; Claude
 // counts cache reads and writes beside ordinary input, and the estimate from Claude totals prices all
 // input that is not a cache read as cache writes, which is what a `claude -p` session's new input is.
+// A Gemini attempt (the cursor-delegate relay, whose events have Claude's shape) is estimated from its
+// token totals too: Gemini caches implicitly and charges no cache writes, so its new input is ordinary
+// input. An agent this file does not know gets no estimate.
 //
 // `describe` prices every task, so nothing here reads policy.json unless a caller passes the policy.
 import fs from "node:fs";
@@ -75,11 +78,16 @@ export function claudeCallCost(usage, price) {
   return (ordinary * rate.input + written * rate.cacheWrite + read * rate.cacheRead + output * rate.output) / PER_MILLION;
 }
 
+// The price of input that is not a cache read, per agent: a Claude session writes it to the cache;
+// Codex and Gemini charge it as ordinary input.
+const FRESH_RATE = { claude: "cacheWrite", codex: "input", gemini: "input" };
+
 // What one attempt cost, from its event summary: { usd, exact }, or null when no price is known
 // for its model. `model` is the attempt's model when its events do not name one, or name one the
 // table no longer prices.
 export function attemptCost(agent, summary, model = null, table = prices()) {
   if (typeof summary?.costUsd === "number") return { usd: summary.costUsd, exact: true };
+  if (!Object.hasOwn(FRESH_RATE, agent)) return null;
   if (agent === "claude" && summary?.messages?.size) {
     let usd = 0;
     for (const usage of summary.messages.values()) {
@@ -93,7 +101,7 @@ export function attemptCost(agent, summary, model = null, table = prices()) {
   const t = summary?.tokens;
   if (!price || !t) return null;
   const fresh = Math.max(0, (t.input || 0) - (t.cached || 0));
-  const freshRate = agent === "claude" ? price.cacheWrite : price.input;
+  const freshRate = price[FRESH_RATE[agent]];
   return { usd: (fresh * freshRate + (t.cached || 0) * price.cacheRead + (t.output || 0) * price.output) / PER_MILLION, exact: false };
 }
 

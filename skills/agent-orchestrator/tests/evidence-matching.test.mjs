@@ -21,13 +21,14 @@ test('normalizing preserves argument boundaries, quoted spaces and unrelated she
   for (const [a, b] of [["test 'a  b' = x", "test 'a b' = x"], ['echo "one two"', 'echo one two'], ["echo '$FOO'", 'echo "$FOO"'], ['npm test; false', 'npm test'], ['npm test | custom-filter', 'npm test']]) assert.notEqual(normalizeCommand(a), normalizeCommand(b));
 });
 
-for (const agent of ['claude', 'codex']) test(`${agent} evidence matches wrappers, prose and failures, and classifies descriptions`, async (t) => {
+// Gemini's relay writes Claude's events.
+for (const agent of ['claude', 'codex', 'gemini']) test(`${agent} evidence matches wrappers, prose and failures, and classifies descriptions`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
   const commands = variants.map(([, cmd], i) => cmd.replaceAll('check.mjs', `check-${i}.mjs`));
   commands.push('npm run lint');
   const checks = commands.map((_, i) => ({ cmd: i === commands.length - 1 ? 'npm run lint' : `Verified with \`node --test tests/check-${i}.mjs\` — passed`, result: 'pass' }));
   checks.push({ cmd: 'synthetic end-to-end inspection of the fixture', result: 'pass' }, { cmd: 'npm run missing', result: 'pass' });
-  const extraEvents = commands.flatMap((command, i) => agent === 'claude' ? [
+  const extraEvents = commands.flatMap((command, i) => agent !== 'codex' ? [
     { type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${i}`, name: 'Bash', input: { command } }] } },
     { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `c${i}`, content: i === commands.length - 1 ? 'Exit code 2' : 'ok', is_error: i === commands.length - 1 }] } },
   ] : [{ type: 'item.completed', item: { type: 'command_execution', id: `c${i}`, command: `/bin/zsh -lc '${command.replaceAll("'", "'\\''")}'`, exit_code: i === commands.length - 1 ? 2 : 0, status: 'completed' } }]);
@@ -175,7 +176,7 @@ test('escaped newlines join command words outside single quotes', async () => {
   assert.notEqual(normalizeCommand("echo 'a\\\nb'"), normalizeCommand("echo 'ab'"));
 });
 
-for (const agent of ['claude', 'codex']) test(`${agent} missing event logs have no evidence and leave saved legacy evidence unchanged`, async (t) => {
+for (const agent of ['claude', 'codex', 'gemini']) test(`${agent} missing event logs have no evidence and leave saved legacy evidence unchanged`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
   await f.start(run, 'no-log', { agent, config: { finalMessage: report([{ cmd: 'npm test', result: 'pass' }]) } });
   const row = await f.finished(run, 'no-log');

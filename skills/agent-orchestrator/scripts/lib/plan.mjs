@@ -5,8 +5,8 @@
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { AGENTS, TASK_ID } from "./config.mjs";
-import { BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, loadPolicy } from "./policy.mjs";
+import { AGENTS, TASK_ID, agentName } from "./config.mjs";
+import { BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, POLICY_AGENTS, loadPolicy } from "./policy.mjs";
 import { readJson } from "./util.mjs";
 
 export const TASK_TYPES = ["implement", "review", "research", "debug", "babysit"];
@@ -60,8 +60,8 @@ const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} 
 // its tier names another one up to `complex`, the tier of its fix attempts, so its tier may be left
 // out. `dispatch` uses this too, for a plan recorded before tiers were required.
 export function tierProblem(task, policy = loadPolicy()) {
-  if (task?.agent !== "claude" && task?.agent !== "codex") return null; // the agent is reported on its own
-  const label = task.agent === "claude" ? "Claude" : "Codex";
+  if (!POLICY_AGENTS.includes(task?.agent)) return null; // the agent is reported on its own
+  const label = agentName(task.agent);
   const names = Object.keys(policy[task.agent].tiers);
   if (task.agent === "claude" && task.type === "babysit") {
     if (task.tier == null || task.tier === "") return null;
@@ -106,7 +106,7 @@ export function validatePlan(plan, held = new Map()) {
     ids.add(task.id);
     if (!filled(task.goal)) bad("goal is empty");
     if (task.type !== undefined && !TASK_TYPES.includes(task.type)) bad(`type must be one of ${TASK_TYPES.join(", ")}`);
-    if (!AGENTS[task.agent]) bad(`agent must be ${Object.keys(AGENTS).join(" or ")}`);
+    if (!Object.hasOwn(AGENTS, task.agent)) bad(`agent must be ${orList(Object.keys(AGENTS))}`);
     else {
       const problem = tierProblem(task, policy);
       if (problem) bad(problem);

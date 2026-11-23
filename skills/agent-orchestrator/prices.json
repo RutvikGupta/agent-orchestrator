@@ -1,5 +1,5 @@
 {
-  "note": "API list prices in US dollars per million tokens, used to compare what models cost per task. They are API-equivalent figures, not the subscription bill. input is ordinary input; cacheWrite a cache write (Claude: the 1-hour write, which `claude -p` sessions use; Codex: none charged, so ordinary input); cacheRead a cache read; output output. longContext applies to a call whose prompt is over `over` tokens. Claude: Anthropic's rate card effective 2026-11-09. Codex: OpenAI's API prices; gpt-6.2 from its 2026-11-17 release as reported by secondary sources, short-context rates (prompts up to 272k tokens).",
+  "note": "API list prices in US dollars per million tokens, used to compare what models cost per task. They are API-equivalent figures, not the subscription bill. input is ordinary input; cacheWrite a cache write (Claude: the 1-hour write, which `claude -p` sessions use; Codex: none charged, so ordinary input); cacheRead a cache read; output output. longContext applies to a call whose prompt is over `over` tokens. Claude: Anthropic's rate card effective 2026-11-09. Codex: OpenAI's API prices; gpt-6.2 from its 2026-11-17 release as reported by secondary sources, short-context rates (prompts up to 272k tokens). Gemini: Google's Gemini API standard paid-tier prices, checked 2026-11-23 (implicit caching only, so no cache-write charge: ordinary input).",
   "claude-haiku-5-5": {
     "input": 0.1,
     "cacheWrite": 0.2,
@@ -66,5 +66,17 @@
     "cacheWrite": 2,
     "cacheRead": 0.1,
     "output": 10
+  },
+  "gemini-4-hydrogen": {
+    "input": 1.5,
+    "cacheWrite": 1.5,
+    "cacheRead": 0.075,
+    "output": 7.5
+  },
+  "gemini-4-neon": {
+    "input": 3,
+    "cacheWrite": 3,
+    "cacheRead": 0.15,
+    "output": 15
   }
 }

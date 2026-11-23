@@ -609,7 +609,8 @@ export async function serveDashboard({ host, port, args }) {
             full: limitsText(l),
           };
         };
-        const usage = { claude: view(readJson(USAGE_CACHE)?.claude), codex: view(codexLimits()) };
+        // Gemini (through Cursor) has no source of usage readings: always null, shown as unknown.
+        const usage = { claude: view(readJson(USAGE_CACHE)?.claude), codex: view(codexLimits()), gemini: null };
         return send(200, "application/json", JSON.stringify(usage));
       }
       if (url.pathname === "/api/events") {

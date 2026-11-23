@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { STATE_ROOT } from "./config.mjs";
+import { AGENTS, STATE_ROOT } from "./config.mjs";
 import { availableMemory, memoryPressure, memoryThreshold, processInfo, processStart, sameStart, lockStart } from "./heavy.mjs";
 import { listRuns, listTaskRecords, relayAlive, resumeClaim, parkClaim, interruptHeld } from "./runs.mjs";
 
@@ -14,6 +14,8 @@ export function totalLimit(value = process.env.AGENT_ORCH_MAX_TOTAL, bytes = os.
 }
 
 const MIN_FREE_DEFAULT = "1.5GB";
+// An agent relay (Claude, Codex, Gemini) counts against the machine limit; a command task does not.
+const isAgentTask = (agent) => typeof agent === "string" && Object.hasOwn(AGENTS, agent);
 const minFree = (value) => memoryThreshold(value, "AGENT_ORCH_MIN_FREE_AGENT");
 
 // What is wrong with the admission settings, as one line, or null. `start`, `dispatch` and `agents`
@@ -55,13 +57,13 @@ export function machineStatus() {
       if (task.outDir) candidates.push(resumeClaim(task.outDir).record?.task, parkClaim(task.outDir).record?.task);
       let live = false;
       for (const candidate of candidates) {
-        if (candidate && ["claude", "codex"].includes(candidate.agent) && relayAlive(candidate.pid, candidate.startedAt, candidate.outDir)) {
+        if (candidate && isAgentTask(candidate.agent) && relayAlive(candidate.pid, candidate.startedAt, candidate.outDir)) {
           pids.add(candidate.pid);
           live = true;
         }
       }
       // An interrupt keeps its existing place between its old and replacement relays.
-      if (!live && ["claude", "codex"].includes(task.agent) && interruptHeld(task)?.state === "live") interrupted++;
+      if (!live && isAgentTask(task.agent) && interruptHeld(task)?.state === "live") interrupted++;
     }
   }
   const limit = limitSetting();

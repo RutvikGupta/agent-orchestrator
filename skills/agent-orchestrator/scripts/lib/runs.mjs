@@ -382,7 +382,10 @@ function stopperText(actor) {
 // Whether a task can be parked now: a Claude or Codex task's started attempt, neither closed nor
 // stopped (a command task has no session to resume). `close` and `stop` mark the task itself
 // (closedAt, stoppedAt), whatever its attempt, and only a `start` by hand clears them.
-const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && (isBabysitter(task) || ["claude", "codex"].includes(attemptAgent(task, task.attempt))));
+// Every agent task may park (Claude, Codex, Gemini: their relays resume a session with --session);
+// a command task never does.
+const PARKING_AGENTS = new Set(["claude", "codex", "gemini"]);
+const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && (isBabysitter(task) || PARKING_AGENTS.has(attemptAgent(task, task.attempt))));
 
 // `ps` prints start times in the local time zone and language: read them in UTC and the C locale, so
 // that processes with other settings record and compare the same text.

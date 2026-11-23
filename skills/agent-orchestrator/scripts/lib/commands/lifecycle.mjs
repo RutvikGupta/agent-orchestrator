@@ -468,7 +468,7 @@ export function cmdAccept(args) {
       running: "it is still running",
       "needs-decision": "it handed back a decision: answer it and resume the task",
     }[row.state];
-    die(`task ${id} is ${row.state}, not completed${why ? `: ${why}` : ": resume it, or give it to the other agent"}; only a completed task can be accepted`);
+    die(`task ${id} is ${row.state}, not completed${why ? `: ${why}` : ": resume it, or give it to another agent"}; only a completed task can be accepted`);
   }
   const checks = row.report?.checks || [];
   const passing = checks.filter((check) => check?.result === "pass");
@@ -843,7 +843,7 @@ function recoverRun(run, rows, own, dirty) {
       label: "failed",
       items: phase("failed").filter((r) => !closed(r)),
       show: (r) => `${label(r)} (${r.limitHit ? "usage limit" : r.state})`,
-      next: (items) => `${CLI} result ${run.id} ${id1(items)}; then resume it, give it to the other agent, or close it`,
+      next: (items) => `${CLI} result ${run.id} ${id1(items)}; then resume it, give it to another agent, or close it`,
     },
     {
       // Ended by a stop: nothing failed, and nothing resumes it until its orchestrator does.

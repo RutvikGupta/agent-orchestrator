@@ -318,7 +318,7 @@ test('regression: the read-only resume hint preserves read-only mode when execut
   assert.ok(readJson(path.join(after.outDir, 'invocation.json')).argv.includes('--read-only'));
 });
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`automatic retry preserves ${agent} read-only mode in the relay invocation`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

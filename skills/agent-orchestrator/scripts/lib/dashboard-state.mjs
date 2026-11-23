@@ -695,12 +695,14 @@ export function buildDashboardState() {
   for (const x of externals) known.add(x.sessionId);
   // A section for a session that launched no run, headed by the session's own row. Without its
   // transcript there is no such row: then null, unless `always`.
+  // Only Claude Code and Codex sessions launch runs (runs.mjs, detectOrchestrator).
+  const HOST_NAMES = { claude: "Claude Code", codex: "Codex" };
   const sessionSection = (agent, sessionId, firstMs, always = false) => {
     const run = { id: `${agent}-${sessionId}`, createdAt: new Date(firstMs).toISOString(), orchestrator: { agent, sessionId }, sessionOnly: true };
     const main = mainRow(run);
     if (!main && !always) return null;
     const info = agent === "claude" && main ? claudeSessionInfo(main.outDir) : {};
-    Object.assign(run, { goal: info.title || `${agent === "claude" ? "Claude Code" : "Codex"} session ${sessionId.slice(0, 8)}`, repo: info.cwd || null });
+    Object.assign(run, { goal: info.title || `${HOST_NAMES[agent] || agent} session ${sessionId.slice(0, 8)}`, repo: info.cwd || null });
     const section = sectionOf(run);
     section.runs.push(run);
     section.main = main;

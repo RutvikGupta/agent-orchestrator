@@ -22,6 +22,21 @@ const GH_WRITE_COMMANDS = [
   "workflow run", "workflow enable", "workflow disable", "run rerun", "run cancel", "run delete",
 ];
 const GH_API_WRITE_FLAGS = ["-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"];
+// Commits and pushes, which a task that may not publish never runs. Claude's relay denies these
+// itself unless it is given --allow-publish; the gemini relay gets them as rules. The wildcard forms
+// cover `git -C <dir> push` too.
+const GIT_PUBLISH_DENY = ["git commit*", "git * commit*", "git push*", "git * push*"];
+// The credential files that agent file tools may never read or write: the list the claude-delegate
+// relay denies itself (its CREDENTIAL_PATHS; tests/gemini.test.mjs keeps the two equal),
+// and the configured Claude, Codex and dashboard paths that credentialFiles adds. A path that ends
+// in /** is a folder.
+export const CREDENTIAL_PATHS = [
+  "~/.ssh/**", "~/.aws/**", "~/.config/gcloud/**", "~/.docker/config.json",
+  "~/.netrc", "~/.git-credentials", "~/.claude/.credentials*", "~/.codex/auth.json",
+  "~/.local/state/agent-orchestrator/dashboard-token",
+  "~/.config/gh/**", "~/.config/graphite/**", "~/.config/github-copilot/**",
+  "~/.boto", "~/.kube/**", "~/.fly/**", "~/.gnupg/**", "~/.npmrc", "~/.claude.json",
+];
 
 export function relayHasNetworkPatch(relay) {
   return Boolean(relay && fs.readFileSync(relay, "utf8").includes('"--allow-domain"'));
@@ -136,28 +151,80 @@ function relaySafetyProfile({ key, relay, cd, readOnly, offline, sandbox, confin
   };
 }
 
-// Claude's absolute file-rule form has two leading slashes. One slash is project-relative.
-function credentialRelayArgs() {
-  const paths = [
+// The configured paths of the credentials the orchestrator knows: the dashboard token, and Claude's
+// and Codex's own, wherever CLAUDE_CONFIG_DIR and CODEX_HOME put them.
+function configuredCredentials() {
+  return [
     DASHBOARD_TOKEN_FILE,
     path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials*"),
     path.join(process.env.CODEX_HOME || path.join(HOME, ".codex"), "auth.json"),
   ];
-  return paths.flatMap((p) => ["Read", "Edit", "Write"].flatMap((tool) =>
+}
+
+// Claude's absolute file-rule form has two leading slashes. One slash is project-relative.
+function credentialRelayArgs() {
+  return configuredCredentials().flatMap((p) => ["Read", "Edit", "Write"].flatMap((tool) =>
     ["--deny", `${tool}(//${path.resolve(p).replaceAll("\\", "/").replace(/^\/+/, "")})`]));
 }
 
-export function relaySafetyArgs(options) {
-  const profile = relaySafetyProfile(options);
-  if (options.key !== "claude") return profile;
-  const publishing = profile.args.includes("--allow-publish");
+// Every credential path, absolute, for the gemini relay's Cursor rules: Read(/abs/path/**) for a
+// folder, Read(/abs/file) for a file. Cursor's Write rules cover edits too.
+export function credentialFiles() {
+  const home = (p) => (p.startsWith("~/") ? path.join(HOME, p.slice(2)) : p);
+  const all = [...CREDENTIAL_PATHS.map(home), ...configuredCredentials()].map((p) => path.resolve(p).replaceAll("\\", "/"));
+  return [...new Set(all)];
+}
+
+// The shell commands a task may not run, as Claude's Bash(...) rules: with `publishing`, the
+// dangerous ones (force pushes, admin merges, secrets, creating or deleting repositories, token
+// reads); without it, every gh write command as well. Claude and gemini share this list.
+function shellDenyRules(publishing) {
   const commands = publishing ? BABYSIT_GH_DENY : GH_WRITE_COMMANDS;
-  const rules = [
+  return [
     ...commands.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]),
     ...(!publishing ? GH_API_WRITE_FLAGS.map((f) => `Bash(gh api *${f} *)`) : []),
     ...FORCE_PUSH_DENY.map((r) => `Bash(${r})`),
     ...GH_TOKEN_DENY,
   ];
+}
+
+// What start refuses for an agent before it builds the relay's arguments, or null.
+export function unsupportedMode({ key, offline, confine }) {
+  if (key !== "gemini") return null;
+  if (offline) return "--offline is not supported for gemini: Cursor's sandbox has not been shown to block the network. Use --agent claude or codex for an offline task";
+  if (confine) return "--confine applies to Claude tasks only; a gemini task takes --sandbox or --read-only";
+  return null;
+}
+
+// A gemini task (the cursor-delegate relay, which runs Cursor's `agent` CLI). Its file tools never
+// read or write the credential files, and its shell never runs the commands shellDenyRules lists;
+// without publishing it never commits or pushes either. These are Cursor permission rules, so
+// Claude's Bash(x) becomes Shell(x). Write mode runs outside Cursor's sandbox, like the other agents;
+// --sandbox runs inside it and, as a sandboxed Claude task does, does not publish. --read-only
+// reaches the relay from start itself. --offline and --confine are refused (unsupportedMode).
+function geminiSafety({ readOnly, sandbox, babysit, publish = true }) {
+  const publishing = !readOnly && !sandbox && (babysit || publish);
+  const shell = [
+    ...shellDenyRules(publishing).map((rule) => rule.replace(/^Bash\(/, "Shell(")),
+    ...(publishing ? [] : GIT_PUBLISH_DENY.map((c) => `Shell(${c})`)),
+  ];
+  const files = credentialFiles().flatMap((p) => [`Read(${p})`, `Write(${p})`]);
+  const mode = readOnly ? [] : ["--sandbox", sandbox ? "enabled" : "disabled"];
+  return {
+    network: "on",
+    args: [...mode, ...[...files, ...shell].flatMap((rule) => ["--deny", rule])],
+    note: null,
+    sandboxed: Boolean(sandbox && !readOnly),
+    httpsGit: false,
+  };
+}
+
+export function relaySafetyArgs(options) {
+  if (options.key === "gemini") return geminiSafety(options);
+  const profile = relaySafetyProfile(options);
+  if (options.key !== "claude") return profile;
+  const publishing = profile.args.includes("--allow-publish");
+  const rules = shellDenyRules(publishing);
   const existingRules = new Set(profile.args.filter((_, i) => profile.args[i - 1] === "--deny"));
   const extraRules = rules.filter((rule) => !existingRules.has(rule));
   return { ...profile, args: [...profile.args, ...credentialRelayArgs(), ...extraRules.flatMap((r) => ["--deny", r])] };

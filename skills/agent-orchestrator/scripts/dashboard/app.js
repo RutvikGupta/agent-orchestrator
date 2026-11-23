@@ -496,8 +496,9 @@ function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t)
 // it (worktrees are then refused); the tooltip names the commands that free space.
 async function diskSpace(){try{const d=(await (await fetch("api/health")).json()).disk,el=document.getElementById("disk");if(!d||!el)return;
   el.className="disk"+(d.critical?" critical":d.low?" low":"");el.textContent=d.summary+(d.critical?" · below minimum":d.low?" · low":"");}catch{}}
+// One chip per agent that api/usage lists (claude, codex, gemini); Gemini has no reading, so it shows unknown.
 async function limits(){try{const u=await (await fetch("api/usage")).json();
-  document.getElementById("limits").replaceChildren(...["claude","codex"].map(k=>$("span",{class:"limit"+(u[k]&&u[k].max>=80?" hot":""),title:u[k]?u[k].full:"no reading yet"},
+  document.getElementById("limits").replaceChildren(...Object.keys(u).map(k=>$("span",{class:"limit"+(u[k]&&u[k].max>=80?" hot":""),title:u[k]?u[k].full:"no reading yet"},
     $("b",{},k[0].toUpperCase()+k.slice(1))," "+(u[k]?u[k].short:"unknown"))))}catch{}}
 // The message box for the chosen agent. It sits outside the details panel, which is rebuilt as
 // events arrive, so typing survives redraws; each task keeps its own draft until it is sent.

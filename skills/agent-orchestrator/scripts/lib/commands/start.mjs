@@ -4,7 +4,7 @@ import { admissionReason, admissionEnabled, admissionSettingsError, AdmissionRev
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt } from "../config.mjs";
+import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt, relayFolder } from "../config.mjs";
 import { HANDOFF_RULES, costNote, decisionNote, handoffNote, nestingNote, publishHoldNote, waitingChildrenNote, watchTierNote } from "../briefs.mjs";
 import { priceOf } from "../cost.mjs";
 import { startDetached } from "../detach.mjs";
@@ -18,7 +18,7 @@ import { escalationFor, failureHint } from "../escalation.mjs";
 import { readPlan, runningConflicts } from "../plan.mjs";
 import { ghJson } from "../github.mjs";
 import { guard, recordChange } from "../ownership.mjs";
-import { gitHttpsEnv, relaySafetyArgs } from "../permissions.mjs";
+import { gitHttpsEnv, relaySafetyArgs, unsupportedMode } from "../permissions.mjs";
 import { BABYSIT_FIX_TIER, BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, readPolicy, strongerThan, tierOrder, tierText } from "../policy.mjs";
 import { CHILDREN_FILE, attemptAgent, childrenWaitingOn, commandText, describe, listTasks, loadRun, loadTask, recordChild, relayAlive, saveTask, taskDir, validTask } from "../runs.mjs";
 import { die, emit, findRelay, parseDuration, readJson } from "../util.mjs";
@@ -258,7 +258,7 @@ function prepareStart(args, extra = {}) {
   extra = { ...extra, ...planChecks(run, id, args, previous, { note: true }) };
   const key = args.agent || refuse("--agent is required (see: node orch.mjs agents)", 2);
   if (key === COMMAND_AGENT) return () => startCommand(run, id, args, extra);
-  if (!AGENTS[key]) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
+  if (!Object.hasOwn(AGENTS, key)) refuse(`unsupported agent "${key}" (choose: ${Object.keys(AGENTS).join(", ")}, or ${COMMAND_AGENT} to run a command with no model)`, 2);
   if (args["max-tier"] !== undefined) refuse("--max-tier applies to --agent command only", 2);
   if (args.done !== undefined) refuse("--done applies to --agent command only", 2);
   if (!args.brief) refuse("--brief FILE is required", 2);
@@ -274,7 +274,7 @@ function prepareStart(args, extra = {}) {
     const line = unquoted.split(/\r?\n/).find((line) => line.match(MARKER));
     refuse(`brief contains ${markers.length} unfilled marker${markers.length === 1 ? "" : "s"}: ${line.trim()}`, 2);
   }
-  const relay = findRelay(key) || refuse(`no ${key}-delegate relay found in: ${SKILL_ROOTS.join(", ")}`);
+  const relay = findRelay(key) || refuse(`no ${relayFolder(key)} relay found in: ${SKILL_ROOTS.join(", ")}`);
 
   const prev = loadTask(run, id) || { id, createdAt: new Date().toISOString() };
   const previousRow = prev.attempt ? describe(run, prev) : null;
@@ -329,7 +329,7 @@ function prepareStart(args, extra = {}) {
   const keepsChoice = sameAgent && (prevTier === tier || babysit);
   // --offline carries over to follow-up attempts by the same agent.
   const offline = Boolean(args.offline || (sameAgent && prev.offline));
-  if (babysit && key !== "claude") refuse("pull-request babysitting runs on Claude: a babysitter (--babysit) parks and resumes the same Claude session, watching at the standard tier and fixing at complex (SKILL.md step 8). A Codex implementer hands its pull request to a Claude babysitter through its handoff note (references/babysit.md)", 2);
+  if (babysit && key !== "claude") refuse("pull-request babysitting runs on Claude: a babysitter (--babysit) parks and resumes the same Claude session, watching at the standard tier and fixing at complex (SKILL.md step 8). A Codex or Gemini implementer hands its pull request to a Claude babysitter through its handoff note (references/babysit.md)", 2);
   if (babysit && (args["read-only"] || offline)) refuse("a babysitter needs write mode and the network", 2);
   // Babysitting starts only once the pull request is ready for review: open, and not a draft.
   let pr = babysit ? prev.pr || null : null;
@@ -348,6 +348,8 @@ function prepareStart(args, extra = {}) {
   // A write task publishes (commits, pushes, writes to GitHub) unless the user said to review its
   // work first: --no-publish, which carries over to follow-up attempts.
   const noPublish = Boolean(args["no-publish"] || (prev.attempt && prev.noPublish));
+  const unsupported = unsupportedMode({ key, offline, confine });
+  if (unsupported) refuse(unsupported, 2);
   const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish });
   const why =
     String(args.why ?? "").replace(/\s+/g, " ").trim() ||

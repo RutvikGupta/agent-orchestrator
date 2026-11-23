@@ -142,7 +142,7 @@ test('start refuses what a command task cannot use', async (t) => {
   await refused(['--agent', 'command', '--', 'true'], /--why is required/);
   await refused(['--agent', 'command', '--why', WHY, '--timeout', 'soon', '--', 'true'], /bad --timeout "soon"/);
   await refused(['--agent', 'claude', '--tier', 'light', '--why', WHY, '--done', 'X', '--brief', f.brief('x')], /--done applies to --agent command only/);
-  await refused(['--agent', 'robot', '--why', WHY, '--', 'true'], /unsupported agent "robot" \(choose: claude, codex, or command/);
+  await refused(['--agent', 'robot', '--why', WHY, '--', 'true'], /unsupported agent "robot" \(choose: claude, codex, gemini, or command/);
   assert.equal(fs.existsSync(f.taskFile(run, 'x')), false);
 });
 

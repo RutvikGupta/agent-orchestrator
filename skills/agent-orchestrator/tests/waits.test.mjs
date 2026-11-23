@@ -37,7 +37,7 @@ test('inside a task, naps add up per attempt and nap refuses past the budget; ou
 });
 
 test('every brief says to park instead of waiting in the session, and the decisions note gives the nap budget', () => {
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     const note = inboxNote({ id: 'run' }, 'task', agent);
     assert.match(note, /Never wait in your session for more than a few minutes: no sleep, nap or polling loops/);
     assert.match(note, /park-until --every 2m -- <command that exits 0 once it is done>/);

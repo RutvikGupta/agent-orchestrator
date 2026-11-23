@@ -17,7 +17,7 @@ import { CLI_PATH, RUNS_DIR, WAIT_POLL_MS } from "../config.mjs";
 import { addresseeOf } from "../dashboard-state.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
 import { describe, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, shownName } from "../runs.mjs";
-import { die, emit, parseDuration, readJson, writeJson } from "../util.mjs";
+import { die, emit, handOverText, parseDuration, readJson, writeJson } from "../util.mjs";
 import { renderTree, statusText } from "../views.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
@@ -361,7 +361,7 @@ export async function cmdWait(args, resumed = null) {
         needing.filter((item) => item.kind !== "changed-by-other").map((item) => `\n${itemLabel(item)}: ${item.label} — ${item.reason}`).join("") +
         (questions.length ? `\n${questions.join(", ")} asked ${main ? "the user" : "a question"} and ${questions.length > 1 ? "keep" : "keeps"} working: ${main ? "it waits on the dashboard for the user's answer" : `answer what your brief covers with \`node ${CLI_PATH} send ${run.id} <task> "<answer>"\``} (SKILL.md, "Decisions agents hand back"). Read ${questions.length > 1 ? "them" : "it"} in full with \`node ${CLI_PATH} questions ${run.id}\`` : "") +
         (asking.length ? `\n${asking.join(", ")} handed back a decision: read \`result\`, decide, and resume (SKILL.md, "Decisions agents hand back")` : "") +
-        (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and resume on the other agent if it is ready (SKILL.md, "Usage limits")` : "") +
+        (limited.length ? `\n${limited.join(", ")} stopped on a usage limit: ping the user, and ${handOverText(tasks.filter((t) => t.limitHit).map((t) => t.agent))} (SKILL.md, "Usage limits")` : "") +
         [...lifecycleHints(run, tasks), ...reportHints(run, tasks)].map((line) => `\n${line}`).join("") +
         due.map((t) => `\n${remindText(run, t)}`).join("");
       const unreadText = finishedNow.length ? `\n(${finishedNow.map(shownName).join(", ")} finished and nobody has read ${finishedNow.length > 1 ? "their results" : "its result"}: review ${finishedNow.length > 1 ? "them" : "it"} now with \`result\`, or \`close\` what you handled another way${running.length ? `, then wait again for ${running.map(shownName).join(", ")}` : ""})` : "";

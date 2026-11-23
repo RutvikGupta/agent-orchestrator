@@ -49,10 +49,11 @@ const USAGE = `agent-orchestrator · orch.mjs
 
 Usage: node orch.mjs <command> [args] [--json]
 
-  model --agent claude|codex [--tier TIER]
+  model --agent claude|codex|gemini [--tier TIER]
                                   Print --model and --effort arguments, lowered to the inherited
                                   ceiling. Without --tier use the ceiling, otherwise standard.
-                                  Codex effort uses -c model_reasoning_effort="LEVEL".
+                                  Codex effort uses -c model_reasoning_effort="LEVEL"; Claude
+                                  and Gemini take --effort LEVEL.
   agents [--refresh]              Installed agent CLIs, their relays, login state, model policy
                                   with each tier's results over the last 30 days (finished tasks,
                                   share accepted first try, median first attempt, input tokens per
@@ -79,7 +80,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   unless the plan says otherwise. Writes the plan's brief path
                                   (default <run-dir>/briefs/TASK.md) or --out, and refuses to
                                   overwrite it without --force
-  start RUN TASK --agent claude|codex --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
+  start RUN TASK --agent claude|codex|gemini --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
         [--max-parallel N] [--force] [--unplanned] [--babysit --pr N] [--wait [DUR]] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
@@ -92,7 +93,8 @@ Usage: node orch.mjs <command> [args] [--json]
                                   without force, and write to GitHub. --no-publish (when the user
                                   wants to review first) denies commits, pushes and gh writes.
                                   --sandbox confines a task; --offline confines it and blocks the
-                                  network. --babysit --pr N (Claude only) makes the task the
+                                  network (not for gemini, whose Cursor sandbox is not shown to
+                                  block it; --confine is Claude only). --babysit --pr N (Claude only) makes the task the
                                   babysitter of pull request N, which must be open and ready for
                                   review (not a draft): it may commit, push without force, and
                                   reply on GitHub; its timeout defaults to 24h. It watches at
@@ -112,7 +114,10 @@ Usage: node orch.mjs <command> [args] [--json]
                                   agent and tier, or start escalates it automatically.
                                   --tier picks the model from policy.json and is
                                   required for a new task: Claude light|standard|complex|frontier, Codex
-                                  light|standard|strong|complex. Only frontier takes --effort (medium or high).
+                                  light|standard|strong|complex, Gemini light|standard|strong|complex
+                                  (Gemini 4 Hydrogen and Neon, run through Cursor's agent CLI).
+                                  Codex and Gemini name it on every attempt.
+                                  Only frontier takes --effort (medium or high).
                                   Follow-ups keep their tier until two counted failures: start moves
                                   one tier up in the same session, then refuses after two more failures
                                   or at the top tier. --tier, a changed --agent, or --no-escalate overrides.
@@ -215,10 +220,11 @@ Usage: node orch.mjs <command> [args] [--json]
                                   reviews.jsonl, with the verifications since the last round.
                                   changes: the next attempt is a rework; reject: close the task
                                   as rejected
-  review RUN TASK [--tier TIER] [--focus TEXT]
-                                  Start the other model (Codex on Claude's work, Claude on
-                                  Codex's) as a read-only reviewer of a finished task, named
-                                  review-TASK (review-TASK-2 and on for later rounds), with a brief
+  review RUN TASK [--agent AGENT] [--tier TIER] [--focus TEXT]
+                                  Start another model (Codex on Claude's or Gemini's work, Claude
+                                  on Codex's; --agent names another) as a read-only reviewer of a
+                                  finished task, named review-TASK (review-TASK-2 and on for later
+                                  rounds), with a brief
                                   built from the task's brief, its diff since its work started
                                   (uncommitted changes and new files included) and its final report.
                                   A Codex reviewer also gets the git diff command to run. The diff
@@ -277,7 +283,7 @@ Usage: node orch.mjs <command> [args] [--json]
   reclaim [--dry-run] [--json]     Stop orphan build daemons and report their resident memory
   nap DUR                         Sleep like \`sleep\`, but return at once (exit 6) when a message
                                   arrives for the agent running it; agents wait a few minutes with
-                                  this. Inside a Claude or Codex task, an attempt's naps may add up
+                                  this. Inside an agent task, an attempt's naps may add up
                                   to AGENT_ORCH_NAP_BUDGET (default 10m): past it nap refuses (exit
                                   2) and says to park with park-until
   park-until [--every DUR] [--for DUR] [--why TEXT] -- COMMAND [ARG...]
@@ -287,7 +293,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   least 30s) in this folder with the task's environment, and
                                   resumes the same session when it exits 0, cannot run, --for has
                                   passed (default 6h, at most 24h), a message arrives, or a task
-                                  it started finishes. Any Claude or Codex task parks this way, or
+                                  it started finishes. Any agent task parks this way, or
                                   with no condition while a task it started still runs; a PARKED:
                                   with neither ends it completed. Refused outside a task and in a
                                   command task
@@ -453,7 +459,7 @@ const specs = {
   accept: { value: ["commit", "note", "unverified"], bool: ["adopt"] },
   verify: { value: ["timeout"], bool: ["adopt"] },
   verdict: { value: ["note", "reviewer"], bool: ["adopt"] },
-  review: { value: ["tier", "focus"], bool: ["adopt"] },
+  review: { value: ["agent", "tier", "focus"], bool: ["adopt"] },
   rework: { value: ["from", "note", "tier", "why"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
   integrate: { value: ["into"], bool: ["dry-run", "already-merged", "adopt"] },

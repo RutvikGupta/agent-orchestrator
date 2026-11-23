@@ -220,7 +220,7 @@ test('every brief tells its agent how to read its messages', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
   const { inboxNote } = await import('../scripts/lib/inbox.mjs');
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     const started = await f.start(run, agent, { agent, flags: ['--read-only'] });
     const brief = fs.readFileSync(path.join(started.outDir, 'orch-brief.md'), 'utf8');
     const note = inboxNote(run, agent, agent);
