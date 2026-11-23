@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decisionsIn, fixBrief } from "./briefs.mjs";
-import { CLI_PATH, RUNS_DIR } from "./config.mjs";
+import { CLI_PATH, NODE_FALLBACK, RUNS_DIR, nodeBin } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { firstLine } from "./format.mjs";
 import { coldResume, handoffBrief, handoffCheck, handoffOf, handoffRecord, spawnParkWatcher, tierModel, withCeiling } from "./park.mjs";
@@ -88,14 +88,14 @@ export function startedByCaller(run, id) {
 // its PID; the rest is the command to run, which gets the start time as its last argument. A PID
 // that has gone, or that now belongs to a process started at another time (checked at once and
 // every 10 seconds), means the relay ended. An unreadable start time proves nothing either way.
-export const WAIT_SCRIPT = 'id=$2; [ -n "$id" ] || id=$(ps -o lstart= -p "$1" 2>/dev/null); n=0; while kill -0 "$1" 2>/dev/null; do if [ $((n % 10)) -eq 0 ]; then now=$(ps -o lstart= -p "$1" 2>/dev/null); [ -n "$id" ] || id=$now; if [ -n "$now" ] && [ "$now" != "$id" ]; then break; fi; fi; sleep 1; n=$((n+1)); done; shift 2; exec "$@" "$id"';
+export const WAIT_SCRIPT = `id=$2; [ -n "$id" ] || id=$(ps -o lstart= -p "$1" 2>/dev/null); n=0; while kill -0 "$1" 2>/dev/null; do if [ $((n % 10)) -eq 0 ]; then now=$(ps -o lstart= -p "$1" 2>/dev/null); [ -n "$id" ] || id=$now; if [ -n "$now" ] && [ "$now" != "$id" ]; then break; fi; fi; sleep 1; n=$((n+1)); done; shift 2; ${NODE_FALLBACK} exec "$@" "$id"`;
 
 // Start the watcher for a task's new attempt, detached (on macOS through launchd, outside the
 // terminal application; detach.mjs); called by `start` once the task record is saved. The relay
 // already runs, so a watcher that cannot start never fails the start: it returns null.
 export function watchForFinish(run, task) {
   try {
-    const send = [process.execPath, SCRIPT, run.dir, task.id, String(task.attempt), String(task.pid)];
+    const send = [nodeBin(), SCRIPT, run.dir, task.id, String(task.attempt), String(task.pid)];
     const pid = startDetached({
       command: "/bin/sh",
       args: ["-c", WAIT_SCRIPT, "finish-notice", String(task.pid), "", ...send],

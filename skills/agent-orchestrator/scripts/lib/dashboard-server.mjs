@@ -2,7 +2,7 @@
 // pushes a "change" event to open tabs as soon as an agent writes.
 
 import { awakeClock } from "./awake-clock.mjs";
-import { CLI_PATH } from "./config.mjs";
+import { CLI_PATH, nodeBin } from "./config.mjs";
 import { fork, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -727,7 +727,7 @@ export async function serveDashboard({ host, port, args }) {
   const pump = () => {
     if (housekeeper || !queue.length) return;
     const chore = queue.shift();
-    const child = spawn(process.execPath, [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
+    const child = spawn(nodeBin(), [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
     housekeeper = { chore, child };
     let done = false;
     const finish = () => {

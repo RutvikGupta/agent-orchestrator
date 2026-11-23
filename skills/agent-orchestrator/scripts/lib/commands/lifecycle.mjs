@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { computeEvidence, evidenceWarning } from "../report.mjs";
 import fs from "node:fs";
 import path from "node:path";
-import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, parallelAt } from "../config.mjs";
+import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, nodeBin, parallelAt } from "../config.mjs";
 import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
 import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
@@ -164,7 +164,7 @@ function prepare(run, entry, dryRun) {
       }
       const from = startPoint(run, entry);
       if (dryRun) return { cd: null, where: `in a new worktree from ${from.label}` };
-      const r = spawnSync(process.execPath, [CLI_PATH, "worktree", run.dir, entry.id, "--from", from.sha], { encoding: "utf8" });
+      const r = spawnSync(nodeBin(), [CLI_PATH, "worktree", run.dir, entry.id, "--from", from.sha], { encoding: "utf8" });
       if (r.status !== 0) throw new StartRefused(`worktree: ${(r.stderr || r.stdout).replace(/^orch: /, "").trim()}`);
       const wt = loadTask(run, entry.id).worktree;
       how = { cd: wt.path, where: `in worktree ${wt.path} (branch ${wt.branch}, from ${from.label})`, worktree: wt };

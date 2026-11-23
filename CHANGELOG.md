@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Watchers keep running Node after a Node upgrade. Every process the CLI starts named Node by its
+  resolved binary, which for Homebrew is a versioned path that an upgrade or a switch of versions
+  deletes. Finish notices then stopped, so an agent slept through its sub-agents finishing and left
+  them awaiting review; `wait` failed to resume; and a parked task never woke. They now start Node
+  through a link on `PATH` that follows upgrades (such as `/opt/homebrew/bin/node`), and the
+  long-lived watchers fall back to `node` on `PATH` when the binary they recorded is gone.
 - Two patterns, each only where it costs less than the alternative (`references/patterns.md`): best
   of N (2 or 3 attempts on a cheap tier, a test picks the winner, the rest stopped at once) in place
   of one attempt a tier up, and a team of 2 or 3 single-focus reviewers for a large or risky diff.
