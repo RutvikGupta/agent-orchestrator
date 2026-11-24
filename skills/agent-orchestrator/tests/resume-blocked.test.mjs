@@ -15,8 +15,7 @@ import { resumeBlockedMs } from '../scripts/lib/runs.mjs';
 // dashboard and escalation say about it (park.mjs, claimParked and checkPark).
 
 const PARKED = [
-  'PARKED: PR #42 waits for a human review',
-  'Every check passed; nothing is unpushed.',
+  'PARKED: waits for the deploy',
   '```orch-result',
   '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}',
   '```',
@@ -24,35 +23,7 @@ const PARKED = [
 const SLOW = 20_000; // a watcher's check is a fresh Node process, slow on a loaded machine
 const REASON = 'task writer is already writing in /work/checkout; give this task its own worktree, or pass --force';
 
-// A fake gh on PATH serving pull request #42, which `set` changes (the protocol of park.test.mjs).
-// Watchers check every second.
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') {
-  const pr = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-  const query = args.join(' ');
-  const list = (items) => ({ totalCount: items.length, nodes: items });
-  const bodies = query.includes('totalCount') ? { comments: list(pr.comments.map((c) => ({ body: c.body }))),
-    reviews: list(pr.reviews.map((r, i) => ({ id: 'R' + i, body: r.body || '', comments: list(r.comments || []) }))) } : {};
-  console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}, ...bodies}}}}));
-} else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  const pr = { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] };
-  const set = (changes = {}) => writeJson(data, { ...pr, ...changes });
-  set();
-  return set;
-}
+const condition = (flag) => [process.execPath, '-e', `process.exit(require("node:fs").existsSync(${JSON.stringify(flag)}) ? 0 : 1)`];
 
 const rowOf = async (f, run, id) => (await f.json(['status', run.id])).tasks.find((t) => t.id === id);
 const attemptDir = (run, id, n = 1) => path.join(run.dir, 'tasks', id, `attempt-${n}`);
@@ -62,18 +33,17 @@ const started = (pid) => spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
 const liveOwner = () => ({ pid: process.pid, started: started(process.pid) });
 const heldByWatcher = () => ({ by: 'watcher', claimedAt: new Date().toISOString(), owner: liveOwner() });
 
-// A babysitter's finished attempt made to look parked, with no watcher: as after a reboot.
+// A finished attempt made to look parked, with no watcher: as after a reboot.
 async function seeded(f, run, id = 'sit') {
   const task = await f.start(run, id);
   await f.finished(run, id);
   const result = path.join(task.outDir, 'result.json');
   writeJson(result, { ...readJson(result), finalMessage: PARKED });
-  writeJson(f.taskFile(run, id), { ...readJson(f.taskFile(run, id)), babysit: true, pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } });
+  writeJson(path.join(task.outDir, 'park-until.json'), { attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 3600000, why: 'the deploy', at: new Date().toISOString(), until: new Date(Date.now() + 3600000).toISOString() });
 }
 
 test('start waits out the watcher\'s claim and resumes once the watcher gives it back', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const r = await f.newRun();
   await seeded(f, r);
   writeJson(claimFile(r, 'sit', 1), heldByWatcher());
@@ -92,7 +62,6 @@ test('start waits out the watcher\'s claim and resumes once the watcher gives it
 
 test('start refuses with "resumed it" when the watcher it waited for saved a new attempt', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const r = await f.newRun();
   await seeded(f, r);
   const held = heldByWatcher();
@@ -109,7 +78,6 @@ test('start refuses with "resumed it" when the watcher it waited for saved a new
 
 test('a start that is still refused after the wait says what the watcher is doing', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const r = await f.newRun();
   await seeded(f, r);
   const held = heldByWatcher();
@@ -146,7 +114,6 @@ test('the claim wait and the blocked-resume threshold read their settings, with 
 
 test('send says a parked task\'s resume is blocked, and does not promise one in seconds', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const r = await f.newRun();
   await seeded(f, r);
   // The park's latest check: no refusal, so the watcher resumes it within seconds.
@@ -215,11 +182,18 @@ test('attentionOf raises "resume blocked" once the first refusal is old enough, 
 
 test('a refused resume is recorded with its first time, shows everywhere, and clears when the resume succeeds', async (t) => {
   const f = await fixture(t);
-  const set = await github(f);
   f.env.AGENT_ORCH_RESUME_BLOCKED_AFTER = '1ms'; // any refusal counts as old, so the test needs no long wait
   const r = await f.newRun();
+  const ready = path.join(f.root, 'deploy-ready');
   // Another writer holds the checkout, so the same-checkout rule refuses each of the watcher's tries.
-  await f.json(['start', r.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief', f.brief('sit', { finalMessage: PARKED })]);
+  const sit = await f.start(r, 'sit', { config: { hold: true, finalMessage: PARKED } });
+  await f.ready(sit);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', ...condition(ready)], {
+    env: { AGENT_ORCH_RUN: r.id, AGENT_ORCH_TASK: 'sit' },
+  });
+  const condFile = path.join(sit.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
+  f.release(sit);
   const parked = () => eventually(async () => {
     const row = await rowOf(f, r, 'sit');
     return row?.phase === 'parked' && row.parked.watcher === 'alive' ? row : null;
@@ -231,7 +205,7 @@ test('a refused resume is recorded with its first time, shows everywhere, and cl
 
   // wait starts before the first refusal, so the item is new to it and ends it with exit 5.
   const waiting = f.command(['wait', r.id, 'sit', '--timeout', '14s'], { code: 5 });
-  set({ comments: [{ body: 'Please rename this.' }] });
+  fs.writeFileSync(ready, '');
   const waited = await waiting;
   assert.match(waited.stdout, /sit: resume blocked — its watcher cannot resume it, and has tried for \S+: task writer is already writing in /);
   assert.match(waited.stdout, /To clear it: give the task its own worktree, pass --force to `start`, or wait for the other writer\. The watcher keeps trying/);
@@ -268,5 +242,5 @@ test('a refused resume is recorded with its first time, shows everywhere, and cl
   assert.equal(resumed.resumed, 2);
   assert.equal(resumed.waiting, undefined);
   assert.equal(resumed.waitingSince, undefined);
-  await eventually(async () => !(await board.json('/api/state')).some((s) => s.attention.some((a) => a.id === 'sit')), 'the item stayed on the dashboard', SLOW);
+  await eventually(async () => !(await board.json('/api/state')).some((s) => s.attention.some((a) => a.id === 'sit' && a.kind === 'resume-blocked')), 'the item stayed on the dashboard', SLOW);
 });

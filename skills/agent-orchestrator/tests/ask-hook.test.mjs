@@ -123,37 +123,19 @@ test('names at most three tasks in each part, then how many more', async (t) => 
   assert.ok(m.slice(1).every((label) => /^\S+\/t[1-5]$/.test(label)), text);
 });
 
-// A fake gh on PATH, so that a parked babysitter never reaches a real service: one open pull request,
-// #42, with nothing to act on (the protocol of park.test.mjs).
-async function fakeGh(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
-test('refuses while a babysitter is parked', async (t) => {
+test('refuses while a task is parked', async (t) => {
   const f = await fixture(t);
-  await fakeGh(f);
   const run = await f.newRun();
   f.launchingSession(run, SESSION);
-  const parked = ['PARKED: PR #42 waits for a human review', '```orch-result',
+  const parked = ['PARKED: waits for the deploy', '```orch-result',
     '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}', '```'].join('\n');
-  const task = await f.json(['start', run.id, 'watch', '--agent', 'claude', '--babysit', '--pr', '42',
-    '--why', 'Babysits the fixture PR', '--brief', f.brief('watch', { finalMessage: parked })]);
-  await eventually(() => fs.existsSync(path.join(task.outDir, 'result.json')) && commandOf(task.pid) === '', 'the babysitter did not park', 20_000);
+  const task = await f.start(run, 'watch', { config: { hold: true, finalMessage: parked }, flags: ['--read-only'] });
+  await f.ready(task);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'watch' },
+  });
+  f.release(task);
+  await eventually(() => fs.existsSync(path.join(task.outDir, 'result.json')) && commandOf(task.pid) === '', 'the task did not park', 20_000);
   assert.equal(inFlight(await refused(f)), `1 of your tasks is parked (${run.id}/watch)`);
   await f.command(['close', run.id, 'watch'], { env: OWNER });
   assert.equal(await refused(f), null);

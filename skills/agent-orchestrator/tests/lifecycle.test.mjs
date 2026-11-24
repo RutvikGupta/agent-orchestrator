@@ -55,9 +55,6 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
       entry(run, 'claude-absent', { tier: undefined }),
       entry(run, 'claude-light', { tier: 'light' }),
       entry(run, 'codex-absent', { agent: 'codex', tier: undefined }),
-      entry(run, 'babysit-light', { type: 'babysit', owns: [], tier: 'light' }),
-      entry(run, 'babysit-frontier', { type: 'babysit', owns: [], tier: 'frontier' }),
-      entry(run, 'babysit-implied', { type: 'babysit', owns: [], tier: null }),
       entry(run, 'robot', { agent: 'robot' }),
       entry(run, 'no-why', { why: '  ' }),
       entry(run, 'no-brief', { brief: '' }),
@@ -73,14 +70,11 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
     /task codex-task: a Codex task needs a tier \(light, standard, strong or complex\)/, /task claude-tier: tier "imaginary" is not a Claude tier \(light, standard, complex or frontier\)/,
     /task claude-null: a Claude task needs a tier \(light, standard, complex or frontier\): the lightest that does the task as well as the top one/,
     /task claude-absent: a Claude task needs a tier \(light, standard, complex or frontier\)/, /task codex-absent: a Codex task needs a tier \(light, standard, strong or complex\)/,
-    /task babysit-frontier: a babysit task watches at light, standard or complex \(default standard\), and its fix attempts run complex/,
     /task robot: agent must be claude, codex or gemini/, /task no-why: why is empty/,
     /task no-brief: brief is empty: the path of its brief file/, /task no-goal: goal is empty/,
     /task reader: is read-only, so it owns nothing/,
   ]) assert.match(out.stderr, pattern);
-  // A babysitter watches at standard unless its plan entry names another watch tier up to complex,
-  // so its plan entry may leave the tier out.
-  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:|task babysit-implied:|task babysit-light:/);
+  assert.doesNotMatch(out.stderr, /task ok:|task brief-later:|task claude-light:/);
   assert.equal(fs.existsSync(path.join(run.dir, 'plan.json')), false);
 
   const cycle = { goal: 'Cycle', tasks: [entry(run, 'a', { dependsOn: ['c'] }), entry(run, 'b', { dependsOn: ['a'] }), entry(run, 'c', { dependsOn: ['b'] })] };
@@ -136,7 +130,6 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
       entry(run, 'scan', { type: 'research', readOnly: true, owns: [], agent: 'codex', tier: 'standard' }),
       entry(run, 'ui', { dependsOn: ['api'] }),
       entry(run, 'notes', { owns: ['docs/'], dependsOn: ['scan'] }),
-      entry(run, 'sitter', { type: 'babysit', owns: [] }),
     ],
   };
   await f.command(['plan', run.id, planFile(f, 'plan', plan)]);
@@ -146,7 +139,6 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
   assert.match(dry.stdout, new RegExp(`would start scan → codex \\(standard tier\\), read-only, in ${f.repo}`));
   assert.match(dry.stdout, /blocked ui: waits on api \(not started\)/);
   assert.match(dry.stdout, /blocked notes: waits on scan \(not started\)/);
-  assert.match(dry.stdout, /start by hand: sitter babysits a pull request/);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 
   const first = await f.json(['dispatch', run.id, '--max', '1']);
@@ -234,7 +226,6 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
   // Dependents start from the base branch's head, which now holds their prerequisites.
   const third = await f.json(['dispatch', run.id]);
   assert.deepEqual(third.started.map((s) => s.id).sort(), ['notes', 'ui']);
-  assert.deepEqual(third.manual, ['sitter']);
   const ui = readJson(f.taskFile(run, 'ui'));
   assert.equal(ui.worktree.from, mergeHead);
   assert.equal(fs.readFileSync(path.join(ui.cd, 'src', 'api', 'index.js'), 'utf8'), 'export const api = 1;\n');
@@ -242,8 +233,7 @@ test('dispatch starts ready tasks in worktrees; accept and integrate unblock the
   await f.finished(run, 'ui');
   await f.finished(run, 'notes');
   const done = await f.command(['dispatch', run.id]);
-  assert.match(done.stdout, /start by hand: sitter/);
-  assert.doesNotMatch(done.stdout, /started|would start/);
+  assert.match(done.stdout, /^nothing to dispatch: all 4 planned tasks have started/);
 });
 
 test('accept and integrate refuse unfinished work, report conflicts without changing anything, and record repo tasks', async (t) => {

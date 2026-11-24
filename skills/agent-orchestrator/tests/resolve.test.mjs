@@ -80,22 +80,3 @@ test('a resolution belongs only to its attempt; resuming can complete or hand ba
   assert.equal(third.state, 'completed');
   assert.equal(third.phase, 'awaiting-review');
 });
-
-test('completed babysitters are integrated and absent from wait and recover review hints', async (t) => {
-  const f = await fixture(t);
-  const run = await f.newRun();
-  await f.start(run, 'sitter');
-  await f.finished(run, 'sitter');
-  // Seed the babysitter metadata rather than invoking gh against an actual pull request.
-  const file = f.taskFile(run, 'sitter');
-  writeJson(file, { ...readJson(file), babysit: true });
-  const sitter = await row(f, run, 'sitter');
-  assert.equal(sitter.mode, 'babysit');
-  assert.equal(sitter.state, 'completed');
-  assert.equal(sitter.phase, 'integrated');
-  assert.equal(sitter.awaitingReviewMs, null);
-  assert.doesNotMatch((await f.command(['wait', run.id, '--timeout', '1s'])).stdout, /awaiting review:/);
-  const recovered = await f.json(['recover', run.id]);
-  assert.deepEqual(recovered.runs[0].groups['awaiting-review'], []);
-  assert.deepEqual(recovered.runs[0].groups.integrated, ['sitter']);
-});

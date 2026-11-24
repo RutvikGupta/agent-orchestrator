@@ -32,12 +32,12 @@ for (const bad of ['abc', '1.5']) {
     await f.command(['dispatch', run.id]);
     // A planned task that failed transiently: the next --follow pass would resume it.
     assert.equal((await f.finished(run, 'retry')).health, 'transient-error');
-    // A babysitter whose attempt ended parked, with no watcher: the next --follow pass would restart one.
+    // A parked task with no watcher: the next --follow pass would restart one.
     const sit = await f.start(run, 'sit', { flags: ['--unplanned'] });
     await f.finished(run, 'sit');
     const result = path.join(sit.outDir, 'result.json');
     writeJson(result, { ...readJson(result), finalMessage: PARKED });
-    writeJson(f.taskFile(run, 'sit'), { ...readJson(f.taskFile(run, 'sit')), babysit: true, pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } });
+    writeJson(path.join(sit.outDir, 'park-until.json'), { attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 3600000, why: 'the deploy', at: new Date().toISOString(), until: new Date(Date.now() + 3600000).toISOString() });
 
     const tasks = path.join(run.dir, 'tasks');
     const before = { files: files(tasks), retry: readJson(f.taskFile(run, 'retry')), sit: readJson(f.taskFile(run, 'sit')) };

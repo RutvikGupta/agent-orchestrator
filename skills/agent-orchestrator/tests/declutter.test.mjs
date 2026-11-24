@@ -86,18 +86,17 @@ test('rows quiet for half an hour are flagged older, whole subtrees at a time; r
   // The session and two of its native sub-agents went quiet hours ago.
   const old = new Date(Date.now() - 3 * HOUR);
   for (const file of [transcripts.main, transcripts.children.completed, transcripts.children.stopped]) fs.utimesSync(file, old, old);
-  // A babysitter waiting in pr-watch: running, with its last event hours old, yet not silent.
+  // A parked task: running, with its last event hours old, yet not silent.
   const watcher = await f.start(a, 'watcher', {
-    config: {
-      delayMs: 30_000,
-      extraEvents: [{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'watch-1', name: 'Bash', input: { command: 'node orch.mjs pr-watch 42' } }] } }],
-    },
+    flags: ['--read-only'],
+    config: { finalMessage: 'PARKED: waits for the deploy\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```' },
   });
-  await f.ready(watcher);
-  const events = path.join(watcher.outDir, 'events.jsonl');
-  await eventually(() => fs.existsSync(events) && fs.readFileSync(events, 'utf8').includes('pr-watch'), 'watcher did not write its pr-watch call');
-  writeJson(f.taskFile(a, 'watcher'), { ...readJson(f.taskFile(a, 'watcher')), babysit: true });
-  fs.utimesSync(events, old, old);
+  await f.finished(a, 'watcher');
+  writeJson(path.join(watcher.outDir, 'park-until.json'), {
+    attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 24 * 3600000,
+    why: 'the deploy', at: old.toISOString(), until: new Date(Date.now() + 24 * 3600000).toISOString(),
+  });
+  backdate(a, 'watcher', 3 * HOUR);
 
   const board = await f.dashboard();
   const state = await board.json('/api/state');
@@ -134,7 +133,7 @@ test('rows quiet for half an hour are flagged older, whole subtrees at a time; r
   await t.test('running, attention, and main rows are never older, however quiet', () => {
     const watching = row('watcher');
     assert.equal(watching.state, 'running');
-    assert.equal(watching.attention, null, 'a babysitter in pr-watch is not silent');
+    assert.equal(watching.attention, null, 'a parked task is not silent');
     assert.ok(Date.now() - watching.lastActiveMs >= 2 * HOUR);
     assert.equal(watching.older, false);
     const review = row('old-review');
@@ -176,15 +175,13 @@ test('rows quiet for half an hour are flagged older, whole subtrees at a time; r
   });
 });
 
-test('the lane leaves out babysitters and stale reviews; recover still lists them', async (t) => {
+test('the lane leaves out stale reviews; recover still lists them', async (t) => {
   const f = await fixture(t);
   f.env.AGENT_ORCH_NOTIFY = 'off';
   const run = await f.newRun('reviews');
-  for (const id of ['review-now', 'review-hour', 'review-stale', 'sitter']) await finish(f, run, id, { config: { finalMessage: `${id} done.` } });
+  for (const id of ['review-now', 'review-hour', 'review-stale']) await finish(f, run, id, { config: { finalMessage: `${id} done.` } });
   backdate(run, 'review-hour', 90 * MIN);
   backdate(run, 'review-stale', 25 * HOUR);
-  // A babysitter's record, as `start --babysit` writes it (that needs a real pull request).
-  writeJson(f.taskFile(run, 'sitter'), { ...readJson(f.taskFile(run, 'sitter')), babysit: true });
   const reviewing = async (board) => {
     const section = sectionOf(await board.json('/api/state'), run);
     assert.ok(section);
@@ -194,10 +191,6 @@ test('the lane leaves out babysitters and stale reviews; recover still lists the
   const board = await f.dashboard();
   const { section, ids } = await reviewing(board);
   assert.deepEqual(ids, ['review-hour', 'review-now'], 'the section header counts this same list');
-  const sitter = section.tasks.find((r) => r.id === 'sitter');
-  assert.equal(sitter.mode, 'babysit');
-  assert.equal(sitter.state, 'completed');
-  assert.equal(sitter.attention, null, 'a babysitter is never awaiting review');
   const stale = section.tasks.find((r) => r.id === 'review-stale');
   assert.equal(stale.phase, 'awaiting-review');
   assert.equal(stale.attention, null, 'a review waiting over 24 hours is stale');

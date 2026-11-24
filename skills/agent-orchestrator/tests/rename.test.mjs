@@ -26,23 +26,23 @@ test('a renamed task shows its name in status, wait, result, recover and the das
   await f.finished(run, 'impl');
   await f.finished(run, 'broke');
 
-  const renamed = await f.command(['rename', run.id, 'impl', '--to', 'babysit-42']);
-  assert.match(renamed.stdout, /renamed impl → babysit-42 \(task impl of run /);
+  const renamed = await f.command(['rename', run.id, 'impl', '--to', 'deploy-42']);
+  assert.match(renamed.stdout, /renamed impl → deploy-42 \(task impl of run /);
   await f.command(['rename', run.id, 'broke', '--to', 'oops']);
 
   // status: the name in place of the id, in the rows and in the lines under them; --json keeps both.
   const status = await f.command(['status', run.id]);
-  assert.ok(lineOf(status.stdout, 'babysit-42'), status.stdout);
+  assert.ok(lineOf(status.stdout, 'deploy-42'), status.stdout);
   assert.ok(lineOf(status.stdout, 'oops'), status.stdout);
   assert.doesNotMatch(status.stdout, /^(impl|broke) /m);
-  assert.match(status.stdout, /^ {2}babysit-42: 0 counted failures/m);
+  assert.match(status.stdout, /^ {2}deploy-42: 0 counted failures/m);
   const row = await rowOf(f, run, 'impl');
-  assert.equal(row.name, 'babysit-42');
+  assert.equal(row.name, 'deploy-42');
   assert.equal(row.outDir, path.join(run.dir, 'tasks', 'impl', 'attempt-1'), 'the id stays the key of its folder');
 
   // wait, by the name, names it by the name.
-  const waited = await f.command(['wait', run.id, 'babysit-42', '--timeout', '0'], { code: 0 });
-  assert.match(waited.stdout, /\(babysit-42 finished and nobody has read its result/);
+  const waited = await f.command(['wait', run.id, 'deploy-42', '--timeout', '0'], { code: 0 });
+  assert.match(waited.stdout, /\(deploy-42 finished and nobody has read its result/);
   assert.doesNotMatch(waited.stdout, /\(impl finished/);
 
   // recover lists it by its name, and its next command takes the name.
@@ -57,15 +57,15 @@ test('a renamed task shows its name in status, wait, result, recover and the das
     return rows.some((r) => r.id === 'broke' && r.name === 'oops') ? sections : null;
   }, 'the dashboard does not show the names');
   const rows = state.flatMap((s) => s.tasks);
-  assert.equal(rows.find((r) => r.id === 'impl').name, 'babysit-42');
+  assert.equal(rows.find((r) => r.id === 'impl').name, 'deploy-42');
   const lane = state.flatMap((s) => s.attention).find((a) => a.id === 'broke');
   assert.equal(lane?.name, 'oops', JSON.stringify(state.flatMap((s) => s.attention)));
 
   // result, by the name, shows the name, then the id.
-  const result = await f.command(['result', run.id, 'babysit-42']);
+  const result = await f.command(['result', run.id, 'deploy-42']);
   const [first, second] = result.stdout.split('\n');
-  assert.match(first, /^task babysit-42 → claude \(read-only\), attempt 1: completed/);
-  assert.equal(second, 'id: impl · name: babysit-42');
+  assert.match(first, /^task deploy-42 → claude \(read-only\), attempt 1: completed/);
+  assert.equal(second, 'id: impl · name: deploy-42');
 });
 
 test('a named task is addressed by its name in send, result, stop and close, and an id wins over a name', async (t) => {
@@ -189,88 +189,60 @@ test('only the run\'s owner renames a task, and a task\'s own agent may rename i
   assert.equal(fs.readFileSync(path.join(run.dir, 'owner-notices.jsonl'), 'utf8').trim().split('\n').length, 1);
 });
 
-// The implementer of a pull request keeps it: its next attempt, in its own session, is the
-// babysitter, and the rename shows it. The same task, row, attempts and tokens throughout.
+// A renamed task that parks keeps its name across watcher resumes, on the same task.
 const PARKED = [
-  'PARKED: PR #42 waits for a human review',
-  'Every check passed; nothing is unpushed.',
+  'PARKED: waits for the deploy',
   '```orch-result',
   '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}',
   '```',
 ].join('\n');
 const SLOW = 20_000; // a watcher's check is a fresh Node process, slow on a loaded machine
 
-// A fake gh on PATH serving open pull request #42, as in park.test.mjs. Watchers check every second.
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') {
-  const pr = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-  const list = (items) => ({ totalCount: items.length, nodes: items });
-  const bodies = args.join(' ').includes('totalCount') ? { comments: list([]), reviews: list([]) } : {};
-  console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}, ...bodies}}}}));
-} else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
-test('a finished implementer becomes its pull request\'s babysitter in its own session, on the same task', async (t) => {
+test('a renamed parked task wakes on a message sent to its name and keeps its session and tokens', async (t) => {
   const f = await fixture(t);
-  await github(f);
-  // The briefs a watcher writes have no fake-relay comment: those attempts park again at once.
-  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ finalMessage: PARKED });
   const run = await f.newRun();
   await f.start(run, 'impl');
   const implemented = await f.finished(run, 'impl');
   assert.equal(implemented.mode, 'write');
 
-  // --json goes before `--`: what follows is the relay's.
-  const brief = f.brief('babysit-impl', { finalMessage: PARKED });
-  const started = JSON.parse((await f.command(['start', run.id, 'impl', '--agent', 'claude', '--babysit', '--pr', '42',
-    '--why', 'Keeps the pull request it implemented', '--brief', brief, '--json',
+  // Resume on the same task, record a wake condition, and park.
+  const brief = f.brief('deploy-impl', { hold: true, finalMessage: PARKED });
+  const started = JSON.parse((await f.command(['start', run.id, 'impl', '--agent', 'claude', '--tier', 'standard',
+    '--why', 'Watches the deploy', '--brief', brief, '--json',
     '--', '--session', implemented.session])).stdout);
-  // A kept implementer watches at the standard tier; its small session continues.
-  assert.deepEqual([started.id, started.attempt, started.babysit, started.tier, started.pr.number], ['impl', 2, true, 'standard', 42]);
+  await f.ready(started);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'impl' },
+  });
+  const condFile = path.join(started.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
+  // The briefs a watcher writes have no fake-relay comment: those attempts finish normally.
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ finalMessage: PARKED });
+  f.release(started);
   const argsOf = (attempt) => eventually(() => {
     const file = path.join(attempt.outDir, 'invocation.json');
     return fs.existsSync(file) && readJson(file).argv;
   }, 'the relay did not record its arguments');
   const argv = await argsOf(started);
   assert.equal(argv[argv.indexOf('--session') + 1], implemented.session);
-  assert.equal(argv[argv.indexOf('--timeout') + 1], '24h');
-  // The babysitter brief is kept as the one a fresh session starts from after a handoff, though
-  // this attempt continues the implementer's session.
-  const kept = path.join(run.dir, 'tasks', 'impl', 'babysit-brief.md');
-  assert.equal(fs.readFileSync(kept, 'utf8'), fs.readFileSync(brief, 'utf8'));
-  await f.command(['rename', run.id, 'impl', '--to', 'babysit-42']);
+  await f.command(['rename', run.id, 'impl', '--to', 'deploy-42']);
 
   const parked = await eventually(async () => {
     const row = await rowOf(f, run, 'impl');
     return row?.phase === 'parked' && row.parked.watcher === 'alive' ? row : null;
-  }, 'the babysitter did not park with a live watcher', SLOW);
-  assert.deepEqual([parked.name, parked.mode, parked.attempt], ['babysit-42', 'babysit', 2]);
+  }, 'the task did not park with a live watcher', SLOW);
+  assert.deepEqual([parked.name, parked.mode, parked.attempt], ['deploy-42', 'write', 2]);
   assert.deepEqual(parked.attempts.map((a) => [a.n, a.session]), [[2, implemented.session], [1, implemented.session]]);
   assert.equal(parked.tokensIn, 2 * implemented.tokensIn, 'the tokens of both attempts add up on the one task');
-  assert.match(lineOf((await f.command(['status', run.id])).stdout, 'babysit-42'), /\bparked\b.*parked · PR #42 waits for a human review/);
+  assert.match(lineOf((await f.command(['status', run.id])).stdout, 'deploy-42'), /\bparked\b.*parked · waits for the deploy/);
 
   // A message by its name wakes the parked watcher, which resumes the same session on the same task.
-  await f.command(['send', run.id, 'babysit-42', 'A reviewer asked for a test.']);
+  await f.command(['send', run.id, 'deploy-42', 'Deploy rolled back; check logs.']);
   const resumed = await eventually(() => (record(f, run, 'impl').attempt === 3 ? record(f, run, 'impl') : null), 'the watcher did not resume it', SLOW);
   const resumedArgv = await argsOf(resumed);
   assert.equal(resumedArgv[resumedArgv.indexOf('--session') + 1], implemented.session);
-  assert.deepEqual([resumed.name, resumed.babysit, resumed.tier], ['babysit-42', true, 'standard']);
-  assert.equal(fs.readFileSync(kept, 'utf8'), fs.readFileSync(brief, 'utf8'), 'a resume of the babysitter keeps its brief');
-  await f.command(['close', run.id, 'babysit-42']);
+  assert.deepEqual([resumed.name, resumed.tier], ['deploy-42', 'standard']);
+  await f.command(['close', run.id, 'deploy-42']);
   assert.ok(record(f, run, 'impl').closedAt);
 });
 
@@ -311,12 +283,12 @@ test('the dashboard page shows a name in place of the id, and its id and earlier
     $: (tag, attrs, ...children) => ({ tag, attrs, children }), fmt: String, cls: String, startedIn: () => null, reportView: () => [], closeDetail() {},
   });
   vm.runInContext(snippet('const atBottom=', 'async function limits()'), context);
-  const names = [{ name: 'first' }, { name: null }, { name: 'babysit-42' }, { name: 'first' }];
+  const names = [{ name: 'first' }, { name: null }, { name: 'deploy-42' }, { name: 'first' }];
   context.sel = 'section/task';
-  context.state = [{ id: 'section', tasks: [{ key: 'task', id: 'impl', name: 'babysit-42', names, agent: 'claude', state: 'running', run: 'a-run' }] }];
+  context.state = [{ id: 'section', tasks: [{ key: 'task', id: 'impl', name: 'deploy-42', names, agent: 'claude', state: 'running', run: 'a-run' }] }];
   await context.detail();
   const text = JSON.stringify(panel.children);
-  assert.ok(text.includes('"babysit-42 · claude · "'), 'the heading shows the name');
+  assert.ok(text.includes('"deploy-42 · claude · "'), 'the heading shows the name');
   assert.ok(text.includes('"children":["id"]},{"tag":"dd","attrs":{},"children":["impl"]'), 'the id is listed');
   assert.ok(text.includes('"children":["earlier names"]},{"tag":"dd","attrs":{},"children":["first"]'), 'the earlier names are listed, once each');
   // An unnamed task shows its id, and no id or earlier-names line.

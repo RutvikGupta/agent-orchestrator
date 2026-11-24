@@ -118,44 +118,22 @@ test('result records the checkout from git; a timed-out status leaves it dirty-u
   assert.deepEqual(probe.calls('status --porcelain'), [], 'status is not run once HEAD cannot be read');
 });
 
-// --- ps: a parked babysitter's watcher and claim --------------------------------------------------
+// --- ps: a parked task's watcher and claim --------------------------------------------------------
 
 const PARKED = [
-  'PARKED: PR #42 waits for a human review',
-  'Every check passed; nothing is unpushed.',
+  'PARKED: waits for the deploy',
   '```orch-result',
   '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}',
   '```',
 ].join('\n');
 
-// A fake gh on PATH serving pull request #42, as in park.test.mjs. Watchers check every second.
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
-// A babysitter's finished attempt, made to look parked without a watcher: as after a reboot.
+// A finished attempt made to look parked without a watcher: as after a reboot.
 async function seeded(f, run, id = 'sit') {
   const task = await f.start(run, id);
   await f.finished(run, id);
   const result = path.join(task.outDir, 'result.json');
   writeJson(result, { ...readJson(result), finalMessage: PARKED });
-  const record = { ...readJson(f.taskFile(run, id)), babysit: true, pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } };
-  writeJson(f.taskFile(run, id), record);
+  writeJson(path.join(task.outDir, 'park-until.json'), { attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 3600000, why: 'the deploy', at: new Date().toISOString(), until: new Date(Date.now() + 3600000).toISOString() });
 }
 
 const attemptDir = (run, id) => path.join(run.dir, 'tasks', id, 'attempt-1');
@@ -164,7 +142,6 @@ const parkedRow = async (f, run, id, opts) => (await f.json(['status', run.id], 
 
 test('status reads the process table with a timeout: a timed-out read starts no watcher for a parked task, a healthy one does', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
   const probe = preload(f);
   await seeded(f, run);
@@ -193,7 +170,6 @@ const liveOwner = () => ({
 
 test('status confirms a claim owner by its start time; a timed-out read leaves the owner unconfirmed, and partial output is no start time', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
   const probe = preload(f);
   await seeded(f, run);

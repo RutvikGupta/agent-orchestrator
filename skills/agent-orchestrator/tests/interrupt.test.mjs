@@ -244,23 +244,16 @@ test('an interrupt is refused, with the reason and no change, for a command task
   await f.command(['stop', run.id, 'cmd']);
 });
 
-// A fake gh on PATH that serves an open pull request #42: enough for `start --babysit` and for a
-// parked babysitter's watcher, which reads the pull request and its review threads.
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  fs.mkdirSync(bin, { recursive: true });
-  const pr = { number: 42, url: 'https://github.com/example-org/example-repo/pull/42', title: 'Fixture PR', state: 'OPEN', isDraft: false,
-    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] };
-  const threads = { data: { repository: { pullRequest: { reviewThreads: { nodes: [] }, comments: { totalCount: 0, nodes: [] }, reviews: { totalCount: 0, nodes: [] } } } } };
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nconst a = process.argv.slice(2);\nif (a[0] === 'pr' && a[1] === 'view') console.log(${JSON.stringify(JSON.stringify(pr))});\nelse if (a[0] === 'api' && a[1] === 'graphql') console.log(${JSON.stringify(JSON.stringify(threads))});\nelse process.exit(91);\n`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-}
-const PARKED = 'PARKED: PR #42 waits for a human review\n\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```';
-// Start babysitter `id` of PR #42, whose fake relay ends its first attempt parked, and wait for the park.
-async function parkedSitter(f, run, id) {
-  const task = await f.json(['start', run.id, id, '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief', f.brief(id, { finalMessage: PARKED })]);
-  await eventually(async () => (await rowOf(f, run, id))?.phase === 'parked', 'the babysitter did not park', 20_000);
+const PARKED = 'PARKED: waits for the deploy\n\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```';
+// Start task `id` with a wake condition, whose fake relay ends its first attempt parked, and wait for the park.
+async function parkedTask(f, run, id) {
+  const task = await f.start(run, id, { config: { hold: true, finalMessage: PARKED } });
+  await f.ready(task);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: id },
+  });
+  f.release(task);
+  await eventually(async () => (await rowOf(f, run, id))?.phase === 'parked', 'the task did not park', 20_000);
   return task;
 }
 // The environment that holds one process at one write (fixtures/pause-at-write.cjs), and its marker.
@@ -278,19 +271,10 @@ function pauseEach(f, rules) {
 const paused = (marker) => eventually(() => fs.existsSync(marker) && fs.readFileSync(marker, 'utf8'), 'the process did not reach the write', 20_000);
 const go = (marker) => fs.writeFileSync(`${marker}.release`, '');
 
-test('an interrupt is refused for a babysitter, running or parked: its park watcher delivers messages', async (t) => {
+test('an interrupt is refused for a parked task: its park watcher delivers messages', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
-  const sitter = await f.json(['start', run.id, 'sitter', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR', '--brief', f.brief('sitter', { hold: true })]);
-  await f.ready(sitter);
-  const running = await f.json(['send', run.id, 'sitter', 'Rebase first.', '--steer']);
-  assert.deepEqual([running.steer.refused, running.steer.waiting], [true, "a babysitter's park watcher delivers its messages, so it is not interrupted; it reads the message after its current step"]);
-  assert.ok(alive(sitter.pid));
-  assert.equal(fs.existsSync(path.join(sitter.outDir, 'resume-1.json')), false);
-  f.release(sitter);
-
-  const parks = await parkedSitter(f, run, 'parks');
+  const parks = await parkedTask(f, run, 'parks');
   const parked = await f.json(['send', run.id, 'parks', 'Rebase first.', '--steer']);
   assert.equal(parked.steer.refused, true);
   assert.match(parked.steer.waiting, /^the task is parked: its watcher resumes it with this message within a few seconds/);
@@ -671,14 +655,14 @@ test('the helper owns the interrupt\'s claim once it takes over, and a dead owne
 
 test('a stop that comes after a parked task\'s watcher claimed its resume wins: the watcher starts nothing', async (t) => {
   const f = await fixture(t);
-  await github(f);
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
   // Hold the watcher's check after it claimed the park and before it starts the next attempt. Every
   // command of this test carries the hold, whichever of them starts the watcher.
   const hold = pauseAt(f, 'park-marker', { script: 'park\\.mjs$', sub: 'check', file: 'park-resume\\.md$' });
   Object.assign(f.env, hold.env);
   const run = await f.newRun();
-  const task = await parkedSitter(f, run, 'sitter');
+  const task = await parkedTask(f, run, 'sitter');
+  const condFile = path.join(task.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
   await f.command(['send', run.id, 'sitter', 'Rebase first.']);
   let stopping;
   try {
@@ -737,9 +721,8 @@ test('a relay left by a start that died before saving the task is adopted by the
 
 test('a command start of a parked task takes the park\'s claim, as every start does', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
-  const task = await parkedSitter(f, run, 'sitter');
+  const task = await parkedTask(f, run, 'sitter');
   // The watcher holds the park: it is resuming the task.
   const claim = path.join(task.outDir, 'park-claim-1.json');
   writeJson(claim, { by: 'watcher', claimedAt: new Date().toISOString(), owner: { pid: process.pid } });
@@ -753,10 +736,11 @@ test('a command start of a parked task takes the park\'s claim, as every start d
 
 test('a parked task\'s watcher delivers a message that reads like a template marker, as written', async (t) => {
   const f = await fixture(t);
-  await github(f);
-  Object.assign(f.env, { AGENT_ORCH_PARK_INTERVAL: '1s', ...HOLD });
+  Object.assign(f.env, HOLD);
   const run = await f.newRun();
-  await parkedSitter(f, run, 'sitter');
+  const task = await parkedTask(f, run, 'sitter');
+  const condFile = path.join(task.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
   const text = 'Replace <fill in: description> in the template.';
   await f.command(['send', run.id, 'sitter', text]);
   await eventually(() => readJson(f.taskFile(run, 'sitter')).attempt === 2, 'the watcher did not resume the task', 20_000);

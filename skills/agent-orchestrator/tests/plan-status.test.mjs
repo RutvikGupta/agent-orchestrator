@@ -39,7 +39,6 @@ test('status shows the plan from waiting to integrated, with the receipt and han
     entry(f, 'qa', { dependsOn: ['live', 'docs'] }),
     entry(f, 'notes'),
     entry(f, 'release', { dependsOn: ['base'], brief: 'briefs/release.md' }), // its brief is not written yet
-    entry(f, 'watch-pr', { type: 'babysit', owns: [], tier: null }),
   ];
   const file = path.join(f.root, 'plan-input.json');
   writeJson(file, { goal: 'Ship the planned waves', tasks: plan });
@@ -72,14 +71,13 @@ test('status shows the plan from waiting to integrated, with the receipt and han
   const rows = Object.fromEntries(status.plannedTasks.map((p) => [p.id, p]));
   assert.deepEqual(status.plannedTasks.map((p) => [p.id, p.status]), [
     ['base', 'integrated'], ['api', 'awaiting-review'], ['ui', 'accepted'], ['live', 'running'], ['docs', 'waiting'],
-    ['qa', 'waiting'], ['notes', 'ready'], ['release', 'ready'], ['watch-pr', 'ready'],
+    ['qa', 'waiting'], ['notes', 'ready'], ['release', 'ready'],
   ], 'every planned task, in plan order, whether or not it started');
   assert.deepEqual([rows.base.integratedCommit, rows.base.integratedInto], [head, 'main']);
   assert.deepEqual(rows.docs.waitsOn, [{ id: 'api', phase: 'awaiting-review' }, { id: 'ui', phase: 'accepted' }]);
   assert.deepEqual(rows.qa.waitsOn, [{ id: 'live', phase: 'running' }, { id: 'docs', phase: 'not started' }]);
   assert.match(rows.release.briefProblem, /not written yet/);
-  assert.equal(rows['watch-pr'].manual, true);
-  assert.deepEqual([rows.docs.dependsOn, rows.docs.agent, rows.docs.tier, rows['watch-pr'].tier], [['api', 'ui'], 'claude', 'complex', null]);
+  assert.deepEqual([rows.docs.dependsOn, rows.docs.agent, rows.docs.tier], [['api', 'ui'], 'claude', 'complex']);
   assert.deepEqual(status.unplannedTasks, ['extra']);
   // `tasks` is as before: only recorded tasks. The planned rows are extra.
   assert.deepEqual(status.tasks.map((x) => x.id).sort(), ['api', 'base', 'extra', 'live', 'ui']);
@@ -91,7 +89,7 @@ test('status shows the plan from waiting to integrated, with the receipt and han
   );
 
   const text = (await f.command(['status', run.id])).stdout.replace(/node \S+orch\.mjs/g, 'orch');
-  assert.match(text, /^plan: Ship the planned waves \(9 tasks: 2 waiting, 3 ready, 1 running, 1 awaiting-review, 1 accepted, 1 integrated\)$/m);
+  assert.match(text, /^plan: Ship the planned waves \(8 tasks: 2 waiting, 2 ready, 1 running, 1 awaiting-review, 1 accepted, 1 integrated\)$/m);
   assert.match(text, new RegExp(`^base\\s+integrated\\s+at ${head.slice(0, 12)} in main$`, 'm'));
   assert.match(text, /^api\s+awaiting-review$/m);
   assert.match(text, /^ui\s+accepted$/m);
@@ -100,7 +98,6 @@ test('status shows the plan from waiting to integrated, with the receipt and han
   assert.match(text, /^qa\s+waiting\s+waits on live \(running\), docs \(not started\)$/m);
   assert.match(text, /^notes\s+ready$/m);
   assert.match(text, /^release\s+ready\s+brief not written yet$/m);
-  assert.match(text, /^watch-pr\s+ready\s+start by hand: it babysits a pull request$/m);
   assert.match(text, /^recorded outside the plan: extra$/m);
   const warning = (id, phase, fix) => `warning: ${id}'s branch ${branch(id)} (${tips[id].slice(0, 12)}) is already in main, but ${id} is not recorded as integrated (${phase}).\n  ${fix}`;
   const recordIt = (id) => `record it: orch integrate ${run.id} ${id} --already-merged`;
@@ -128,7 +125,7 @@ test('help explains the plan options, and each option is accepted only by its ow
     'integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged]',
     '--already-merged records an',
     'accepted task whose branch was merged earlier',
-    '[--max-parallel N] [--force] [--unplanned] [--babysit --pr N]',
+    '[--max-parallel N] [--force] [--unplanned]',
     '[--max-parallel N] [--force] [--unplanned] -- COMMAND [ARG...]',
     '--force bypasses those checks. A task the plan',
     'does not name needs --unplanned, which --force does not imply',
