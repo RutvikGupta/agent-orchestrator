@@ -157,7 +157,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   const kinds = images.map(imageKind);
   if (kinds.some((kind) => !kind)) throw new SendError("attachments must be PNG, JPEG, GIF or WebP images", 400);
   // A message reaches only a running agent; a finished one gets it in the brief that resumes it. A
-  // parked babysitter counts as running: its watcher resumes it with the message (park.mjs). So does
+  // parked task counts as running: its watcher resumes it with the message (park.mjs). So does
   // a task whose session an interrupt is resuming: the resume, or the hook after it, delivers it.
   const alive = relayAlive(task.pid, task.startedAt, task.outDir);
   const parked = !alive && isParked(run, task);

@@ -85,7 +85,7 @@ export function cmdPlan(args) {
   const listed = plan.tasks.map((t) => ({
     id: t.id,
     agent: `${t.agent}${t.tier ? ` ${t.tier}` : ""}`,
-    mode: t.readOnly ? "read-only" : t.type === "babysit" ? "babysit" : "write",
+    mode: t.readOnly ? "read-only" : "write",
     after: (t.dependsOn || []).join(", ") || "-",
   }));
   const readOnly = plan.tasks.filter((t) => t.readOnly).length;
@@ -203,7 +203,7 @@ function dispatchWave(args, until = null) {
   const plan = readPlan(run.dir) || die(`run ${run.id} has no plan; record one with: ${CLI} plan ${run.id} FILE`);
   const rows = listTasks(run);
   const progress = planProgress(plan, phaseMap(run, rows, plan));
-  const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked babysitter holds no agent
+  const running = rows.filter((r) => r.state === "running" && r.phase !== "parked").length; // a parked task holds no agent
   const limit = parallelAt(DEPTH);
   const planned = new Set(plan.tasks.map((task) => task.id));
   const plannedRunning = rows.filter((r) => r.state === "running" && r.phase !== "parked" && planned.has(r.id)).length;
@@ -229,7 +229,7 @@ function dispatchWave(args, until = null) {
     const task = loadTask(run, r.id);
     const current = plan.tasks.find((t) => t.id === r.id);
     const original = task?.plan || current || { id: r.id, owns: task?.readOnly ? [] : ["."] };
-    return { ...original, agent: task?.agent || original.agent, readOnly: Boolean(task?.readOnly || task?.agent === "command"), babysit: Boolean(task?.babysit),
+    return { ...original, agent: task?.agent || original.agent, readOnly: Boolean(task?.readOnly || task?.agent === "command"),
       owns: [...new Set([...(original.owns || []), ...(current?.owns || [])])],
       resources: [...new Set([...(original.resources || []), ...(current?.resources || [])])] };
   });
@@ -308,9 +308,6 @@ function dispatchWave(args, until = null) {
     lines.push(`ready, waiting for a free slot (${cap}): ${waiting.join(", ")}`);
   }
   for (const b of progress.blocked) lines.push(`blocked ${b.task.id}: waits on ${waitsOnText(b.waitsOn)}`);
-  for (const t of progress.manual) {
-    lines.push(`start by hand: ${t.id} babysits a pull request, which needs its number: ${CLI} start ${run.id} ${t.id} --agent claude --babysit --pr <n> --why "..." --brief ${briefPath(run.dir, t.brief)}`);
-  }
   if (!lines.length) lines.push(`nothing to dispatch: all ${plural(plan.tasks.length, "planned task")} have started`);
   if (started.length && !dryRun) lines.push(`next: ${CLI} wait ${run.id}`);
   return {
@@ -320,7 +317,6 @@ function dispatchWave(args, until = null) {
       [dryRun ? "wouldStart" : "started"]: started,
       failed, waitingForSlot: waiting, waitingForConflict: conflicts, waitingForMachine: machineWaiting,
       blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
-      manual: progress.manual.map((t) => t.id),
     },
     text: lines.join("\n"),
   };
@@ -805,7 +801,7 @@ export async function cmdRecover(args) {
 function recoverRun(run, rows, own, dirty) {
   const plan = readPlan(run.dir);
   const records = new Map(rows.map((r) => [r.id, loadTask(run, r.id)]));
-  const progress = plan ? planProgress(plan, phaseMap(run, rows, plan), run.dir) : { ready: [], unbriefed: [], blocked: [], manual: [] };
+  const progress = plan ? planProgress(plan, phaseMap(run, rows, plan), run.dir) : { ready: [], unbriefed: [], blocked: [] };
   const planned = new Set((plan?.tasks || []).map((t) => t.id));
   const phase = (p) => rows.filter((r) => r.phase === p);
   const closed = (r) => Boolean(records.get(r.id)?.closedAt);
@@ -825,7 +821,7 @@ function recoverRun(run, rows, own, dirty) {
     },
     {
       key: "parked",
-      label: "parked tasks (a watcher resumes each on its next event: a pull-request change, its wake condition, a task it started finishing, or a message)",
+      label: "parked tasks (a watcher resumes each on its next event: its wake condition, a task it started finishing, or a message)",
       items: phase("parked"),
       show: (r) => `${label(r)} (${r.parked?.waitsFor || "waits for its wake"}${["alive", "starting"].includes(r.parked?.watcher) ? "" : "; watcher not running"})`,
       next: (items) => (items.some((r) => !["alive", "starting"].includes(r.parked?.watcher)) ? `${CLI} status ${run.id} (starts a watcher that is not running)` : null),
@@ -856,7 +852,7 @@ function recoverRun(run, rows, own, dirty) {
     {
       key: "awaiting-review",
       label: "awaiting review",
-      items: phase("awaiting-review").filter((r) => r.mode?.split("+")[0] !== "babysit"),
+      items: phase("awaiting-review"),
       show: (r) => `${label(r)} (waited ${agoText(r.awaitingReviewMs || 0)})`,
       next: (items) => `${CLI} result ${run.id} ${id1(items)}; review and commit its work; then ${CLI} accept ${run.id} ${id1(items)}`,
     },
@@ -874,13 +870,6 @@ function recoverRun(run, rows, own, dirty) {
       items: progress.unbriefed,
       show: (u) => `${nameOf(u.task.id)} (${u.problem})`,
       next: (items) => `${CLI} brief ${run.id} ${id1(items)}; fill it in; then ${CLI} dispatch ${run.id}`,
-    },
-    {
-      key: "manual",
-      label: "babysitters to start by hand",
-      items: progress.manual,
-      show: label,
-      next: (items) => `${CLI} start ${run.id} ${id1(items)} --agent claude --babysit --pr <n> --why "..." --brief <brief>`,
     },
     { key: "blocked", label: "blocked", items: progress.blocked, show: (b) => `${nameOf(b.task.id)} waits on ${waitsOn(b)}`, next: () => null },
     {

@@ -9,7 +9,7 @@ import { formatElapsed } from "./format.mjs";
 import { attemptReasonOf } from "./lifecycle.mjs";
 import { asksDecision } from "./briefs.mjs";
 import { commandText } from "./runs.mjs";
-import { readJson, tailText, writeJson } from "./util.mjs";
+import { readJson, writeJson } from "./util.mjs";
 
 const QUIET_MS = 15 * 60 * 1000;
 // A 5xx status counts only as a status: alone on its line, after HTTP/status/error/code, or before
@@ -19,7 +19,6 @@ const TRANSIENT_RE = /overloaded_error|\b(?:provider|server|service|api)\b[^\n]{
 // channel justify restarting the agent; ordinary mentions of HTTP/network errors do not.
 const PROVIDER_MESSAGE_RE = /^\s*(?:API Error:\s*(?:5\d\d|5xx)\b|(?:Error:\s*)?(?:overloaded_error|api_error)\b)|"type"\s*:\s*"(?:overloaded_error|api_error)"/im;
 const STOP_RE = /\b(?:SIGTERM|SIGINT|SIGKILL|SIGHUP|cancelled|canceled|interrupted)\b|\bstop (?:request|requested)\b|\b(?:killed|terminated) by\b/i;
-const PR_WATCH_RE = /(?:^|[\s/"'])orch\.mjs["']?\s+pr-watch(?:\s|$)/;
 
 function parseReport(message) {
   // A block ends at the first line that starts with a fence, even when text follows it on that line:
@@ -36,7 +35,7 @@ function parseReport(message) {
     // Only a question holds the task open; a choice the agent already made is kept apart.
     const choices = lists.decisions.filter((entry) => !asksDecision(entry));
     return {
-      // `parked`: a babysitter that ended its turn to wait for its pull request (park.mjs).
+      // `parked`: a task that ended its turn to wait on a wake condition or child task (park.mjs).
       outcome: ["done", "partial", "blocked", "parked"].includes(value.outcome) ? value.outcome : null,
       ...lists,
       decisions: lists.decisions.filter(asksDecision),
@@ -544,35 +543,9 @@ export function evidenceWarning(check) {
     : `check "${cmd}" is reported pass, but its last run exited ${evidence.exitCode}`;
 }
 
-function expectedQuiet(task, row) {
-  if (!task.babysit && task.plan?.type !== "babysit") return false;
-  // Activity labels truncate long paths before "pr-watch". Read the most recent activity from
-  // a bounded event tail in that case, and do not mistake an already returned call for a wait.
-  const events = task.outDir ? tailText(path.join(task.outDir, "events.jsonl")) : null;
-  for (const line of (events || "").split("\n").reverse()) {
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (!event || typeof event !== "object") continue;
-    if (event.type === "api-request" || event.type === "result" || event.type === "turn.completed") return false;
-    if (event.type === "user" && event.message?.content?.some?.((block) => block.type === "tool_result")) return false;
-    if (event.type === "assistant" && Array.isArray(event.message?.content)) {
-      for (const block of [...event.message.content].reverse()) {
-        if (block.type === "tool_use") return block.name === "Bash" && PR_WATCH_RE.test(block.input?.command || "");
-        if (block.type === "thinking" || (block.type === "text" && block.text?.trim())) return false;
-      }
-    }
-    if (event.type?.startsWith("item.") && event.item) {
-      if (event.item.type === "command_execution") return event.type !== "item.completed" && PR_WATCH_RE.test(event.item.command || "");
-      if (["file_change", "agent_message", "reasoning", "web_search", "mcp_tool_call", "todo_list"].includes(event.item.type)) return false;
-    }
-  }
-  const activity = String(row.now || "").replace(/^quiet .*? · /, "");
-  return activity.startsWith("$ ") && PR_WATCH_RE.test(activity.slice(2));
-}
-
 function health(task, row) {
   if (task.pid && row.state !== "running" && !row.result && !(task.outDir && fs.existsSync(path.join(task.outDir, "result.json")))) return "dead";
-  if (row.state === "running") return row.quietMs > QUIET_MS && !expectedQuiet(task, row) ? "silent" : "ok";
+  if (row.state === "running") return row.quietMs > QUIET_MS ? "silent" : "ok";
   if (!row.limitHit && !["prepared", "completed", "needs-decision", "stopped", "timeout"].includes(row.state)) {
     const eventError = task.outDir ? summarizeEvents(task.agent, path.join(task.outDir, "events.jsonl"), task.cd).error : null;
     const errors = [row.result?.error, row.result?.stderrTail, eventError]

@@ -33,11 +33,10 @@ These are hard limits of the relays on this machine:
 | Session id (for `-- --session`; a follow-up's tier: `references/review.md`, "Escalate a tier") | `sessionId` | `threadId` | `sessionId`; `-- --session ID` resumes the Cursor session |
 | Messages from the orchestrator | Context after its next tool call, through the user's `PostToolUse` hook | `$ORCH inbox <run> <task> --ack` at each gate | `$ORCH inbox <run> <task> --ack` at each gate |
 | Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost | Totals at the end of each attempt only; no cost from the CLI, so the orchestrator estimates it (`references/tiers.md`, "Prices") |
-| Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` | `--deny RULE` and `--allow RULE` (Cursor permission rules, such as `Shell(git push *)` or `Read(/abs/path/**)`); no budget or turn limit flag is documented |
+| Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` | `--deny RULE` and `--allow RULE` (Cursor permission rules, such as `Shell(git push *)` or `Read(/abs/path/**)`); no budget or turn limit flag is documented |
 | `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged | Not documented |
 | Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged | Cursor permission rules deny Read and Write of the same credential files as Claude's file tools. A shell command can still read them |
 | `--sandbox` | Write-task file tools stay in the working directory. Shell sandbox: writes only in the working directory and tool caches; network to every host; GitHub over HTTPS | `workspace-write` sandbox with network access | Turns Cursor's sandbox on |
-| `--babysit` | May publish to its pull request; runs `standard` unless `--tier light` or `complex` (`references/babysit.md`, "Start it") | Not supported: a babysitter is a Claude task, and a Codex implementer's pull request goes to one | Not supported: a babysitter is a Claude task, and a Gemini implementer's pull request goes to one |
 | Unavailable in the child | MCP servers, skill invocation (it reads a skill's `SKILL.md` instead, as briefs ask for testing skills), slash commands, subagents, web tools | MCP servers it is not configured with; with `--sandbox` or `--read-only`, the network | Not documented |
 | Login | `claude auth status` / `claude auth login` | `codex login status` / `codex login` | `agent status` / `agent login` |
 
@@ -45,7 +44,7 @@ These are hard limits of the relays on this machine:
 
 - **Implementation is ordinary work for Codex.** Its write mode has the network and the user's tools
   (`danger-full-access`), so it builds, tests and pushes as a Claude task does. Like every implementer, it
-  reports the pull request it opens, and nobody babysits it (`SKILL.md`, step 8). Which agent implements a task is chosen by the agents' records
+  reports the pull request it opens and is done (`SKILL.md`, step 8). Which agent implements a task is chosen by the agents' records
   (`SKILL.md`, "Choose the agent and model").
 - **Gemini is a third implementer.** It is Gemini 4 through Cursor's `agent` CLI, started with
   `--agent gemini` and run by the `cursor-delegate` relay. Its `light` and `standard` tiers run
@@ -57,7 +56,7 @@ These are hard limits of the relays on this machine:
   `events.jsonl` and raw `cursor-events.jsonl`. Its flags include `--brief`, `--cd`, `--out-dir`,
   `--model`, `--effort`, `--read-only`, `--sandbox`, `--deny`, `--allow`, `--session` and `--timeout`.
   The relay combines model and effort as Cursor's `ID-LEVEL`. Like every implementer, it
-  reports the pull request it opens, and nobody babysits it (`SKILL.md`, step 8). When to choose
+  reports the pull request it opens and is done (`SKILL.md`, step 8). When to choose
   it: `references/tiers.md`, "Choosing between the agents".
 - **Who reviews.** `review` starts another agent as the read-only reviewer: Codex for Claude's work,
   Claude for Codex's, and Codex for Gemini's. `review --agent <agent>` picks a different one. A
@@ -75,7 +74,6 @@ These are hard limits of the relays on this machine:
   `$ORCH agents` and `start` report when it is missing.
 - **Tool directories (`--sandbox` only):** a sandboxed Claude write task may also write `~/.cache`,
   `~/Library/Caches`, and `~/.local/share/uv`, so that uv, pre-commit, and similar gates can run.
-  A sandboxed babysitter also gets Graphite's state directories.
 - **Same-CLI delegation** is fine when you want parallel hands rather than a different
   perspective, for example Claude orchestrating three Claude implementers.
 
@@ -93,7 +91,7 @@ These are hard limits of the relays on this machine:
   may be missed by that read. So `stop` reads the runs below again, up to five more times, until a
   read finds nothing running, and stops what it finds.
 - **How each is stopped.** Each task is stopped as `stop` stops the named one: it is marked stopped
-  (`stoppedAt`, `stoppedBy`), its relay's process group gets SIGTERM, a parked babysitter's park
+  (`stoppedAt`, `stoppedBy`), its relay's process group gets SIGTERM, a parked task's park
   ends, and what a command task left running in its process group is ended. A relay that exits just
   as it is signalled counts as stopped. When a resume saves a new attempt while the task is being
   stopped, the stop is recorded on that attempt, and its relay is stopped too.
@@ -108,8 +106,8 @@ These are hard limits of the relays on this machine:
 - **`close`.** Closing a task that still runs stops it, then stops the tasks below it the same way.
   It closes only the tasks you named; the ones below are stopped, not closed. Closing a task that
   has already finished stops nothing below it.
-- **What does not reach below.** An interrupt's resume (`send --steer`, `steer`), a park, a retry
-  and a handoff stop only the task's own relay. Its sub-agents keep running.
+- **What does not reach below.** An interrupt's resume (`send --steer`, `steer`), a park and a retry
+  stop only the task's own relay. Its sub-agents keep running.
 - **How a stopped task reads.** A task whose current attempt a stop ended reads `stopped`, not
   `aborted` (the state the relay records on SIGTERM), in `status`, `result`, `wait` and the
   dashboard. It did not fail: it raises no attention item, counts as no failure, and is not a
@@ -244,8 +242,7 @@ brief. Work that only runs a command and waits belongs here, not in an agent's s
   its `--done` and `--timeout`, unless a new command follows `--`.
 - **Read-only for review.** Its work is never committed, so `accept` takes it as a read-only task,
   and it does not hold its folder as a writer. It is not sandboxed, though. It refuses `--brief`,
-  `--tier`, `--model`, `--effort`, `--sandbox`, `--confine`, `--offline`, `--no-publish` and
-  `--babysit`.
+  `--tier`, `--model`, `--effort`, `--sandbox`, `--confine`, `--offline` and `--no-publish`.
 - **Never silent.** A script often prints nothing while the agent it started works, so a command
   task is never flagged silent. Give one that may hang a `--timeout`.
 - **Model ceiling.** `--max-tier <tier>` caps the agents the command starts ("Model ceilings").
@@ -366,9 +363,9 @@ so that one stays listed after it exits. Two things record them:
 - **Waiting needs no model.** A task that waits for something outside it parks (`SKILL.md`, "Delegate
   well"): `$ORCH park-until [--every 2m] [--for 6h] [--why TEXT] -- <command>`. A watcher with no
   model checks the command, and resumes the same session when it exits 0, when `--for` passes, when a
-  message arrives, or when one of the task's child tasks finishes (`references/messages.md`; a
-  babysitter's park: `references/babysit.md`). A task never sleeps, naps or polls in its session for
-  more than a few minutes: `nap` refuses once its naps in one attempt pass 10 minutes.
+  message arrives, or when one of the task's child tasks finishes (`references/messages.md`). A task
+  never sleeps, naps or polls in its session for more than a few minutes: `nap` refuses once its
+  naps in one attempt pass 10 minutes.
 - Claude's `--max-budget-usd` and `--max-turns` cap a runaway session. Codex has no budget flag, and
   none is documented for Gemini; use `--timeout`, and the tier that the task's complexity calls for.
   A Gemini task's cost is an estimate from the token totals that its attempt reports at the end

@@ -124,7 +124,6 @@ function authorProblem(task) {
   if (task.reviews) return `${task.id} is itself a review; review the task it reviewed (${task.reviews.task})`;
   if (task.agent === COMMAND_AGENT) return `${task.id} is a command task: it has no brief or session to review`;
   if (!POLICY_AGENTS.includes(task.agent)) return `${task.id} has not started, so there is nothing to review`;
-  if (task.babysit) return `${task.id} babysits a pull request; review the pull request instead`;
   if (task.readOnly) return `${task.id} is read-only, so it changed nothing to review`;
   return null;
 }

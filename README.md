@@ -30,11 +30,10 @@ The attention lane: decisions, failures, results awaiting review and silent task
 - **Plan as data**: a JSON plan of tasks, owned paths and dependencies; `brief` drafts each brief from a template.
 - **Dispatch**: `dispatch` starts every ready task up to a parallel limit, each writer in its own worktree.
 - **Per-task models**: the orchestrator chooses by task complexity and measured results: Claude `light`/`standard`/`complex`/`frontier`, Codex and Gemini `light`/`standard`/`strong`/`complex`.
-- **Monitoring**: `wait` returns when a task finishes or needs you, `status` lists tasks, `pr-watch` watches pull requests.
+- **Monitoring**: `wait` returns when a task finishes or needs you, `status` lists tasks.
 - **Review receipts**: `result` matches reported checks to the agent's log, `verify` reruns them, `verdict` records rounds, `accept --note` says why.
 - **Messaging**: `send`, `steer` and `reply` talk to a running agent, which waits with `nap` so messages reach it at once.
 - **Nested delegation**: agents can start their own agents through the same CLI, with fewer slots at each level.
-- **Pull-request babysitting**: a Claude agent watches a pull request's checks and reviews, fixes what is in scope and replies.
 - **Dashboard**: task tree, attention lane with notifications, stuck-loop detection, and a message box.
 - **Outside agents**: headless `codex exec` and `claude -p` agents started by skill scripts appear on the board too.
 - **Safety**: permission rules deny force pushes and risky `gh` commands, a kill guard blocks pattern kills, and steering never stops a commit or push.
@@ -76,7 +75,6 @@ usage. `RUN` is a run id, a run directory, or `latest`.
 | `inbox` | A task's unread messages |
 | `reply` | An agent's answer to the user's message |
 | `nap` | Sleep that returns when a message arrives |
-| `pr-watch` | Watch pull requests until one needs you; no model tokens |
 
 ## Install
 

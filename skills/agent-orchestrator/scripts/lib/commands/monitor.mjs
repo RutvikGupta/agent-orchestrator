@@ -25,22 +25,20 @@ const short = (sha) => String(sha || "").slice(0, 12);
 // Every task of the run's plan, in plan order, started or not, for `status`. `status` is `waiting`
 // (not started, and a prerequisite is not integrated yet: `waitsOn` names each one and its phase),
 // `ready` (not started, every prerequisite integrated; `briefProblem` says when its brief is not
-// ready, `manual` when it is a babysitter that `dispatch` leaves to be started by hand), or the
-// phase of a started task: running, needs-decision, awaiting-review, accepted, integrated, failed.
+// ready), or the phase of a started task: running, needs-decision, awaiting-review, accepted,
+// integrated, failed.
 // An integrated task also carries `integratedCommit` and `integratedInto` (null when none was recorded).
 function plannedTasksOf(run, plan, rows) {
   const phases = phaseMap(run, rows, plan);
   const progress = planProgress(plan, phases, run.dir);
   const waiting = new Map(progress.blocked.map((b) => [b.task.id, b.waitsOn]));
   const unbriefed = new Map(progress.unbriefed.map((u) => [u.task.id, u.problem]));
-  const manual = new Set(progress.manual.map((t) => t.id));
   // A planned task that has a record shows its name (`rename`).
   const names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name]));
   return plan.tasks.map((t) => {
     const base = { id: t.id, name: names.get(t.id) || null, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
     if (waiting.has(t.id)) return { ...base, status: "waiting", waitsOn: waiting.get(t.id) };
     if (unbriefed.has(t.id)) return { ...base, status: "ready", briefProblem: unbriefed.get(t.id) };
-    if (manual.has(t.id)) return { ...base, status: "ready", manual: true };
     const phase = phases.get(t.id);
     if (phase !== "integrated") return { ...base, status: phase && phase !== "prepared" ? phase : "ready" };
     // The receipt `integrate` recorded; a read-only task is integrated by collecting its result, and has none.
@@ -59,9 +57,8 @@ function planLines(plan, planned, unplanned, shown = new Map()) {
   const note = (t) => (t.waitsOn
     ? `waits on ${waitsOnText(t.waitsOn.map((w) => ({ ...w, id: shown.get(w.id) || w.id })))}`
     : t.briefProblem ? `brief ${t.briefProblem}`
-      : t.manual ? "start by hand: it babysits a pull request"
-        : t.integratedCommit ? `at ${short(t.integratedCommit)}${t.integratedInto ? ` in ${t.integratedInto}` : ""}`
-          : "");
+      : t.integratedCommit ? `at ${short(t.integratedCommit)}${t.integratedInto ? ` in ${t.integratedInto}` : ""}`
+        : "");
   return [
     `plan: ${shortText(plan.goal, 100)} (${planned.length} task${planned.length === 1 ? "" : "s"}: ${order.map((s) => `${counts.get(s)} ${s}`).join(", ")})`,
     table(planned.map((t) => ({ id: t.name || t.id, status: t.status, note: note(t) })), ["id", "status", "note"]),
@@ -191,8 +188,8 @@ exec "$@" "$file" "$dir"`;
 }
 
 // The review reminder: a finished task that has waited longer than AGENT_ORCH_REVIEW_REMIND (10m;
-// 0 turns it off) without being accepted, closed or given a verdict on its current attempt. A
-// babysitter never awaits review. `wait` exits 5 for it once per interval per task, recorded in
+// 0 turns it off) without being accepted, closed or given a verdict on its current attempt.
+// `wait` exits 5 for it once per interval per task, recorded in
 // the run's review-reminders.json ({task: {attempt, at}}), and prints the commands that clear it.
 const REMINDERS_FILE = "review-reminders.json";
 function reviewsDue(run, tasks, now = Date.now()) {
@@ -200,7 +197,7 @@ function reviewsDue(run, tasks, now = Date.now()) {
   if (!(every > 0)) return [];
   const sent = readJson(path.join(run.dir, REMINDERS_FILE)) || {};
   return tasks.filter((t) => {
-    if (t.phase !== "awaiting-review" || String(t.mode || "").startsWith("babysit") || !((t.awaitingReviewMs ?? 0) >= every)) return false;
+    if (t.phase !== "awaiting-review" || !((t.awaitingReviewMs ?? 0) >= every)) return false;
     if (loadTask(run, t.id)?.closedAt || t.reviewRounds?.some((r) => r.attempt === t.attempt)) return false;
     const last = sent[t.id];
     return !last || last.attempt !== t.attempt || !(now - Date.parse(last.at) < every);
@@ -283,7 +280,7 @@ export async function cmdWait(args, resumed = null) {
   if (mine && !resumed) touchOwner(run);
   const snapshot = () => {
     let rows = listTasks(run);
-    // A parked babysitter whose watcher died (after a reboot, say) gets a new one; an adopted
+    // A parked task whose watcher died (after a reboot, say) gets a new one; an adopted
     // relay changes the rows, so read them again.
     if (mine && reviveParked(run, rows).length) rows = listTasks(run);
     // The relay can write its result and exit between describe()'s result read and process
@@ -405,7 +402,7 @@ export async function cmdWait(args, resumed = null) {
       }
       files.push(noticesFile(run));
       for (const task of tasks) {
-        // Parked babysitters remain running without a relay. A dead PID only asks Node
+        // Parked tasks remain running without a relay. A dead PID only asks Node
         // for another snapshot; it never decides whether any task has finished.
         if (task.state === "running" && task.phase !== "parked") pids.push(loadTask(run, task.id)?.pid);
       }

@@ -67,7 +67,6 @@ export function phaseOf(task, state) {
   // A task that a stop ended did not fail: its orchestrator stopped it and may resume it.
   if (["prepared", "running", "needs-decision", "closed", "stopped"].includes(state)) return state;
   if (state !== "completed" || rejectedNow(task)) return "failed";
-  if (task.babysit || task.plan?.type === "babysit") return "integrated";
   if (acceptedNow(task) && task.integratedAt) return "integrated";
   // A read-only task produces no code: collecting its result (or closing it) is its integration.
   if (task.readOnly && task.closedAt) return "integrated";
@@ -160,7 +159,7 @@ export function lifecycleHints(run, tasks) {
   // Outside the plan, a task whose result was already collected has been seen; only the plan's
   // tasks wait on acceptance.
   const reviewing = tasks.filter(
-    (t) => t.mode?.split("+")[0] !== "babysit" && t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
+    (t) => t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
   );
   if (reviewing.length) {
     lines.push(`awaiting review: ${reviewing.map((t) => `${t.name || t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);

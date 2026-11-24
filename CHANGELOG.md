@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Removed the pull-request babysitter feature end to end (`start --babysit`/`--pr`, `pr-watch`,
+  `brief --type babysit`, plan type `babysit`, `pick --needs babysit`, watch/fix tiers and
+  `NEEDS FIX:` fix attempts, babysitter handoff notes, and babysitter docs and tests). General
+  parking (`park-until`, `PARKED:`, child waits and inbox wakes), write-task publish permissions,
+  and reading older task records on disk remain intact.
+
 - Pull requests are no longer babysat by default. An orchestrator that opens a pull request reports its
   link and is done: it starts no babysitter, does not watch checks or reviews, and sends the pull
   request to no code-review agent. Babysitter tasks are retired (`references/babysit.md` now says so),

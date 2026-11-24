@@ -3,8 +3,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { DASHBOARD_TOKEN_FILE, HOME, PR_DIR, SKILL_DIR } from "./config.mjs";
-import { die, git } from "./util.mjs";
+import { DASHBOARD_TOKEN_FILE, HOME, SKILL_DIR } from "./config.mjs";
 
 // Network access for one task. Delegated agents get the network by default, as sub-agents inside
 // an unsandboxed session do; `--offline` turns it off. Claude's shell sandbox then allows every
@@ -48,10 +47,9 @@ export function relayHasNetworkPatch(relay) {
   return Boolean(relay && fs.readFileSync(relay, "utf8").includes('"--allow-domain"'));
 }
 
-// A babysitter is a Claude task that owns one pull request until it lands, so it may commit and
-// push (never force) and reply on GitHub. It also writes the worktree's shared git directory and
-// the pr-watch state, both outside its working directory.
-const BABYSIT_GH_DENY = [
+// A write task that may publish can commit, push (never force), and write to GitHub; dangerous
+// commands stay denied.
+const PUBLISH_GH_DENY = [
   ...GH_AUTH_DENY,
   "gist", "secret", "variable", "release", "repo create", "repo delete", "repo edit", "repo fork",
   "repo rename", "pr close", "issue delete", "workflow enable", "workflow disable", "run delete",
@@ -64,10 +62,8 @@ const FORCE_PUSH_DENY = [
 
 // Developer tools keep caches and state under the home directory, outside the task's working
 // directory, so the shell sandbox would block them (uv, pre-commit, and other commit hooks and
-// gates). Every Claude write task may write these; a babysitter also gets Graphite's state, which
-// publishing needs.
+// gates). Every Claude write task may write these.
 const TOOL_WRITE_DIRS = [".cache", "Library/Caches", ".local/share/uv"].map((d) => path.join(HOME, d));
-const PUBLISH_WRITE_DIRS = [".config/graphite", ".local/share/graphite"].map((d) => path.join(HOME, d));
 
 // Claude's sandbox proxy refuses SSH (github.com:22), so git and tools built on it (Graphite's gt)
 // cannot fetch or push over an SSH remote. Rewriting GitHub SSH URLs to HTTPS for the task's git
@@ -84,22 +80,6 @@ export function gitHttpsEnv(base) {
 
 function writeDirArgs(dirs) {
   return dirs.filter((d) => fs.existsSync(d)).flatMap((d) => ["--allow-write", d]);
-}
-
-function babysitRelayArgs(relay, cd) {
-  if (!fs.readFileSync(relay, "utf8").includes('"--allow-publish"')) {
-    const patch = path.join(SKILL_DIR, "references", "claude-delegate-network.patch");
-    die(`the claude-delegate relay has no --allow-publish option; re-apply: patch -d ${path.dirname(path.dirname(relay))} -p1 < ${patch}`);
-  }
-  const common = git(cd, ["rev-parse", "--git-common-dir"], { allowFail: true });
-  fs.mkdirSync(PR_DIR, { recursive: true });
-  const writable = [PR_DIR, ...(common ? [path.resolve(cd, common)] : []), ...TOOL_WRITE_DIRS, ...PUBLISH_WRITE_DIRS].filter((d) => fs.existsSync(d));
-  const deny = [...BABYSIT_GH_DENY.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]), ...FORCE_PUSH_DENY.map((r) => `Bash(${r})`)];
-  return [
-    "--allow-domain", "*", "--allow-go-tls", "--allow-publish",
-    ...writable.flatMap((d) => ["--allow-write", d]),
-    ...deny.flatMap((r) => ["--deny", r]),
-  ];
 }
 
 function networkRelayArgs(key, relay, readOnly, offline) {
@@ -127,30 +107,27 @@ function networkRelayArgs(key, relay, readOnly, offline) {
 // like sub-agents of an interactive session: full network and the user's files and tool state.
 // Credential file tools remain denied. `--sandbox` confines a task as before; `--offline` implies
 // it, because only the sandbox can block the network. Read-only tasks keep their read-only enforcement either way.
-// Permission rules still deny commits, pushes, and gh write commands (a babysitter may commit and
-// push, but never force).
-// `publish`: a write task may commit, push without force, and write to GitHub, as babysitters do,
-// unless the user asked to review its work first (start --no-publish). The dangerous commands stay
-// denied either way: force pushes, admin merges, secrets, and creating or deleting repositories.
-function relaySafetyProfile({ key, relay, cd, readOnly, offline, sandbox, confine = false, babysit, publish = true }) {
+// `publish`: a write task may commit, push without force, and write to GitHub, unless the user
+// asked to review its work first (start --no-publish). The dangerous commands stay denied either
+// way: force pushes, admin merges, secrets, and creating or deleting repositories.
+function relaySafetyProfile({ key, relay, readOnly, offline, sandbox, confine = false, publish = true }) {
   if (readOnly || offline || sandbox) {
-    const net = babysit ? { network: "on", args: babysitRelayArgs(relay, cd), note: null } : networkRelayArgs(key, relay, readOnly, offline);
+    const net = networkRelayArgs(key, relay, readOnly, offline);
     return { ...net, args: [...net.args, ...(key === "claude" && (confine || (!readOnly && (offline || sandbox))) ? ["--confine"] : [])], sandboxed: !readOnly, httpsGit: key === "claude" && net.network === "on" };
   }
   if (key === "codex") return { network: "on", args: ["--sandbox", "danger-full-access"], note: null, sandboxed: false, httpsGit: false };
   if (!fs.readFileSync(relay, "utf8").includes('"--no-sandbox"')) {
     const patch = path.join(SKILL_DIR, "references", "claude-delegate-network.patch");
-    const net = babysit ? { network: "on", args: babysitRelayArgs(relay, cd), note: null } : networkRelayArgs(key, relay, readOnly, offline);
+    const net = networkRelayArgs(key, relay, readOnly, offline);
     const note = `the claude-delegate relay has no --no-sandbox option, so this task runs sandboxed; re-apply: patch -d ${path.dirname(path.dirname(relay))} -p1 < ${patch}`;
     return { ...net, note, sandboxed: true, httpsGit: net.network === "on" };
   }
-  const publishes = babysit || publish;
-  const deny = publishes
-    ? [...BABYSIT_GH_DENY.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]), ...FORCE_PUSH_DENY.map((r) => `Bash(${r})`)]
+  const deny = publish
+    ? [...PUBLISH_GH_DENY.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]), ...FORCE_PUSH_DENY.map((r) => `Bash(${r})`)]
     : [...GH_WRITE_COMMANDS.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]), ...GH_API_WRITE_RULES];
   return {
     network: "on",
-    args: ["--no-sandbox", ...(confine ? ["--confine"] : []), ...(publishes ? ["--allow-publish"] : []), ...deny.flatMap((r) => ["--deny", r])],
+    args: ["--no-sandbox", ...(confine ? ["--confine"] : []), ...(publish ? ["--allow-publish"] : []), ...deny.flatMap((r) => ["--deny", r])],
     note: null,
     sandboxed: false,
     httpsGit: false,
@@ -190,7 +167,7 @@ export function credentialFiles(env = process.env) {
 // dangerous ones (force pushes, admin merges, secrets, creating or deleting repositories, token
 // reads); without it, every gh write command as well. Claude and gemini share this list.
 function shellDenyRules(publishing) {
-  const commands = publishing ? BABYSIT_GH_DENY : GH_WRITE_COMMANDS;
+  const commands = publishing ? PUBLISH_GH_DENY : GH_WRITE_COMMANDS;
   return [
     ...commands.flatMap((c) => [`Bash(gh ${c})`, `Bash(gh ${c} *)`]),
     ...(!publishing ? GH_API_WRITE_RULES : []),
@@ -220,8 +197,8 @@ export function unsupportedMode({ key, offline, confine, passthrough = [] }) {
 // reaches the relay from start itself, and runs Cursor's plan mode, which can still run shell
 // commands: with --sandbox too, the relay gets both. --offline and --confine are refused
 // (unsupportedMode). `env` is the relay's environment (credentialFiles).
-function geminiSafety({ readOnly, sandbox, babysit, publish = true, env = process.env }) {
-  const publishing = !readOnly && !sandbox && (babysit || publish);
+function geminiSafety({ readOnly, sandbox, publish = true, env = process.env }) {
+  const publishing = !readOnly && !sandbox && publish;
   const shell = [
     ...shellDenyRules(publishing).map((rule) => rule.replace(/^Bash\(/, "Shell(")),
     ...(publishing ? [] : GIT_PUBLISH_DENY.map((c) => `Shell(${c})`)),

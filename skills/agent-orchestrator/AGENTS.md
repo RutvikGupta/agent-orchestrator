@@ -8,8 +8,8 @@ committing and pushing.
 
 ## Layout
 
-- `SKILL.md` is the instructions agents follow. `references/` holds the agent notes, the babysitter
-  brief and the brief templates (`references/briefs/`).
+- `SKILL.md` is the instructions agents follow. `references/` holds the reference notes and the
+  brief templates (`references/briefs/`).
 - `scripts/orch.mjs` is the CLI entry point: help text, option specs and the command table.
 - `scripts/lib/` holds the modules, with one module per group of commands in `lib/commands/`.
   `lib/runs.mjs` holds run and task state; `describe()` builds each task's row and spreads in

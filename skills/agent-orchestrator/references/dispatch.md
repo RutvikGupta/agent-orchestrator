@@ -31,8 +31,7 @@ $ORCH dispatch <run> [--max N] [--dry-run] [--follow [--timeout DUR]]
   a failure, and `dispatch` does not exit 1 for it. A later `dispatch`, or `dispatch --follow`,
   starts it when there is room. After a busy lock, the wave's other agent tasks wait for the same
   reason without being tried. Command tasks are not checked.
-- It lists the tasks still blocked and what each waits on. It never starts a planned babysitter,
-  which needs a pull request number: it lists the `start` command instead (`SKILL.md`, step 8).
+- It lists the tasks still blocked and what each waits on.
 - `--dry-run` lists what it would start.
 - Work starts as soon as its prerequisites land; there are no waves.
 
@@ -64,7 +63,6 @@ and repeats the call while it exits 3, as it does with `wait`.
   starts them as room appears. It prints the waiting reasons when they change.
 - `--max N` caps how many planned tasks run at once, a retried task included, instead of how many
   one call starts. Other tasks still count against the parallel limit and the machine limit.
-- A planned babysitter is listed and never interrupts it.
 - With `--dry-run`, `--follow` does nothing extra.
 
 ## `start`
@@ -94,11 +92,11 @@ In a run with a plan, the first start of a task is checked against it. `start` r
 - is not in the plan.
 
 Pass `--force` to skip the first two checks. For the third, pass `--unplanned`, which records the
-task as an exception. `--force` does not imply it. A babysitter or a command task that the plan
-does not name needs `--unplanned` too. `--force` never skips the machine limit (below).
+task as an exception. `--force` does not imply it. A command task that the plan does not name needs
+`--unplanned` too. `--force` never skips the machine limit (below).
 
 - Later attempts of a task (a resume, a rework, a retry) skip these checks.
-- A babysitter reserves no owned paths, and a parked task or a command task reserves nothing.
+- A parked task or a command task reserves nothing.
 
 ### Machine limit
 
@@ -117,7 +115,7 @@ full. The details are in `references/memory.md`, "Agent admission".
 - A malformed `AGENT_ORCH_MAX_TOTAL` or `AGENT_ORCH_MIN_FREE_AGENT` is a usage error: `start`,
   `dispatch` and `agents` exit 2.
 - A resume or a rework is checked like a new start. The replacement of an agent that ended (a parked
-  babysitter that its watcher resumes, a retry, an interrupt) skips the count limit but never starts
+  task that its watcher resumes, a retry, an interrupt) skips the count limit but never starts
   while memory is critically low.
 - `start --wait [DUR]` retries every few seconds, for 10 minutes by default. It starts the task as
   soon as there is room, and exits 7 without starting it when `DUR` expires.

@@ -14,7 +14,6 @@ const WITHIN_POINTS = 10;
 // Abilities each --needs value requires, and why an agent that lacks it is excluded.
 const NEEDS = {
   web: { allows: (agent) => agent === "codex", reason: "needs web (live web search is codex only)" },
-  babysit: { allows: (agent) => agent === "claude", reason: "needs babysit (claude only)" },
   offline: { allows: (agent) => agent !== "gemini", reason: "needs offline (not supported on gemini)" },
 };
 
@@ -160,7 +159,7 @@ export function chooseAgent({ type, tier, needs = [], policy, byAgentTierType = 
 }
 
 export function cmdPick(args) {
-  if (args._.length) die("usage: pick --type TYPE --tier TIER [--needs web|babysit|offline] [--since DUR] [--json]", 2);
+  if (args._.length) die("usage: pick --type TYPE --tier TIER [--needs web|offline] [--since DUR] [--json]", 2);
   if (!args.type) die("--type is required (e.g. implement, debug, review, research)", 2);
   const policy = loadPolicy();
   const since = sinceDuration(args.since);

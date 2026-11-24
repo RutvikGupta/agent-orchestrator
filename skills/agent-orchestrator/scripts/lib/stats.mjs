@@ -124,7 +124,8 @@ function taskItems(runs) {
     const row = outcome(run, task, dir, results);
     items.push({ ...baseItem(task, results[1]), modelLabel: modelLabel(task),
       tier: task.attemptTiers?.[1] || task.tier || "unknown",
-      type: task.plan?.type || (task.babysit ? "babysit" : task.readOnly ? "read-only" : "write"),
+      // Older records may hold the retired "babysit" plan type; treat them as ordinary tasks.
+      type: (task.plan?.type && task.plan.type !== "babysit" ? task.plan.type : null) || (task.readOnly ? "read-only" : "write"),
       integrated: Number(Boolean(task.integratedAt) || row.phase === "integrated"),
       failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
       limitHits: Number(Boolean(row.limitHit)), transientErrors: Number(row.health === "transient-error" || task.retries > 0),
@@ -175,7 +176,7 @@ export function tierSummary(items, policy) {
   const entries = [];
   for (const agent of POLICY_AGENTS) {
     for (const tier of Object.keys(policy[agent]?.tiers || {})) {
-      const mine = items.filter(({ chosen, first }) => chosen && first && first.agent === agent
+      const mine = items.filter(({ first }) => first && first.agent === agent
         && (first.model ? tierRunning(policy, agent, first.model, first.effort) : first.tier) === tier);
       const accepted = mine.filter((item) => item.accepted);
       const reviewed = mine.filter((item) => item.reviewed);
@@ -280,8 +281,6 @@ function tierItem(dir, cutoff) {
   });
   return { settled: true, at,
     item: { ...baseItem(task, first.result), tokensIn, costUsd,
-      // A babysitter's tier is fixed, not chosen, so the tier summary leaves it out.
-      chosen: !task.babysit,
       first: { agent: attemptAgent(task, 1), ...firstRan(task, first.result, firstSummary) },
       // The first attempt's outcome is known once it was accepted or rejected, once the task needed
       // another attempt, or once the attempt itself failed: a result that is not "completed", or none

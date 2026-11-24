@@ -17,12 +17,12 @@ the user's choices, and when to ask before dispatching.
 | --- | --- |
 | `goal` | The plan's: the user's original request. A task's: one sentence with a verifiable outcome |
 | `acceptance` | The request restated as checkable behaviors; step 7 checks every one before you report |
-| `id`, `type` | A short lowercase slug; `implement`, `review`, `research`, `debug`, or `babysit`, which picks the brief template |
+| `id`, `type` | A short lowercase slug; `implement`, `review`, `research`, or `debug`, which picks the brief template |
 | `owns`, `readOnly` | Files or directories the task may change; `readOnly: true` (reviews, investigations, research, second opinions) owns nothing |
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts. `dispatch` waits for them, `start` refuses without them, and `integrate` takes tasks in this order |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex or Gemini `light`, `standard`, `strong` or `complex`; required, except that a babysit task may leave it out and runs `standard`), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex or Gemini `light`, `standard`, `strong` or `complex`; required), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
 | `brief` | The brief file, relative to the run directory |
 
 ## Tiers in the plan
@@ -32,7 +32,7 @@ the user's choices, and when to ask before dispatching.
   `standard` task of its own, so that you and the later tasks read its summary, not the raw output.
 - Waiting is no plan entry. A command task runs with no model, and `start --unplanned` starts it
   (`references/dispatch.md`, "Plan checks"). A task that waits for something outside it parks
-  (`references/messages.md`). Never plan a `babysit` task: babysitters are retired (`SKILL.md`, step 8).
+  (`references/messages.md`).
 
 ## Disjoint files are not enough
 

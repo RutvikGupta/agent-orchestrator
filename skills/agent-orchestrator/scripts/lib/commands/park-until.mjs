@@ -52,8 +52,8 @@ export function cmdParkUntil(args) {
   } catch (error) {
     die(`could not record the wake condition (${error.message}): this task cannot park here; wait another way and say so in your report`);
   }
-  // A task that no agent started, and that is not a babysitter, has no finish watcher yet: the
-  // watcher that starts the park watcher once this relay ends.
+  // A task that no agent started has no finish watcher yet: the watcher that starts the park
+  // watcher once this relay ends.
   ensureFinishWatcher(run, task);
   const line = `\`${commandText(argv)}\``;
   emit(args, { run: run.id, task: task.id, ...record, replaced }, [

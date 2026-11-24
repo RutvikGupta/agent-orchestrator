@@ -211,7 +211,7 @@ export function replyHint(run, id) {
 
 // What the agent is told when its command was stopped so a message could reach it.
 export function steeredNote(command) {
-  return `Your command \`${command.replace(/\s+/g, " ").slice(0, 200)}\` was stopped so this message reaches you now. Run it again afterwards if you still need it, in the background if it takes long; for short waits use \`node ${CLI_PATH} nap <duration>\`, \`wait\` or \`pr-watch\`, which return as soon as a message arrives, and for long ones park with \`park-until\`.`;
+  return `Your command \`${command.replace(/\s+/g, " ").slice(0, 200)}\` was stopped so this message reaches you now. Run it again afterwards if you still need it, in the background if it takes long; for short waits use \`node ${CLI_PATH} nap <duration>\` or \`wait\`, which return as soon as a message arrives, and for long ones park with \`park-until\`.`;
 }
 
 // Every reply the agent sent, oldest first.
@@ -256,7 +256,7 @@ Your orchestrator, or the user from the orchestrator dashboard, may send you mes
 
 Stay reachable, so a message from the user is handled before the work in hand:
 - Run any command that may take more than a minute in the background (${polls ? "send its output to a file, start it with `&`, note its PID, and stop it before you finish" : "the Bash tool's `run_in_background: true`"}), then wait for it in short steps with \`node ${CLI_PATH} nap <duration>\`.
-- Wait with \`nap\` instead of \`sleep\`, or with \`wait\` and \`pr-watch\`. All three return as soon as a message arrives.
+- Wait with \`nap\` instead of \`sleep\`, or with \`wait\`. Both return as soon as a message arrives.
 - If a command of yours stops with exit code 143 (SIGTERM) that you did not stop, run ${command} at once: it was stopped so a message reaches you.
 
 ${parkNote()}
@@ -266,7 +266,7 @@ ${parkNote()}
 // The part of every brief that says how to wait for something outside the session: park.
 export function parkNote() {
   const minutes = Math.round(napBudgetMs() / 60000);
-  return `Never wait in your session for more than a few minutes: no sleep, nap or polling loops (\`nap\` refuses once an attempt's naps add up to ${minutes >= 1 ? `${minutes} minute${minutes === 1 ? "" : "s"}` : "its budget"}). To wait for CI, a DAG run, a deploy or a command task, run \`node ${CLI_PATH} park-until --every 2m -- <command that exits 0 once it is done>\`; to wait for tasks you started, nothing needs recording. Then end your turn with a final message whose first line is \`PARKED: waits for <what>\`, and an \`orch-result\` block with outcome \`parked\`. A watcher with no model then resumes this same session when the command exits 0, when a message arrives, or when a task you started finishes. A babysitter keeps parking as its brief says.`;
+  return `Never wait in your session for more than a few minutes: no sleep, nap or polling loops (\`nap\` refuses once an attempt's naps add up to ${minutes >= 1 ? `${minutes} minute${minutes === 1 ? "" : "s"}` : "its budget"}). To wait for CI, a DAG run, a deploy or a command task, run \`node ${CLI_PATH} park-until --every 2m -- <command that exits 0 once it is done>\`; to wait for tasks you started, nothing needs recording. Then end your turn with a final message whose first line is \`PARKED: waits for <what>\`, and an \`orch-result\` block with outcome \`parked\`. A watcher with no model then resumes this same session when the command exits 0, when a message arrives, or when a task you started finishes.`;
 }
 
 // Claude Code's user settings, where the orchestrator registers the orch-inbox hook.

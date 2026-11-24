@@ -100,7 +100,6 @@ export const POLICY_PATH = path.join(SKILL_DIR, "policy.json");
 // task, and must not read the policy for a task whose tier is known.
 export const PRICES_PATH = path.join(SKILL_DIR, "prices.json");
 export const USAGE_CACHE = path.join(STATE_ROOT, "usage.json");
-export const PR_DIR = path.join(STATE_ROOT, "prs");
 export const EXTERNAL_FILE = path.join(STATE_ROOT, "external.jsonl"); // agents started outside the orchestrator (external.mjs)
 export const DASHBOARD_FILE = path.join(STATE_ROOT, "dashboard.json"); // pid and URL of the running dashboard
 export const DASHBOARD_TOKEN_FILE = path.join(STATE_ROOT, "dashboard-token"); // the page's send key; only the user can read it

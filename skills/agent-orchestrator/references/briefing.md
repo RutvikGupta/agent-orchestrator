@@ -6,7 +6,7 @@ delegate skill’s `references/writing-the-brief.md` if present (`cursor-delegat
 ## What `brief` does
 
 ```bash
-$ORCH brief <run> <task-id> [--type implement|review|research|debug|babysit] [--read-only] [--out FILE] [--force]
+$ORCH brief <run> <task-id> [--type implement|review|research|debug] [--read-only] [--out FILE] [--force]
 ```
 
 - It writes a draft from `references/briefs/<type>.md` to the plan's `brief` path (by default
@@ -35,8 +35,8 @@ data or an end-to-end run (in `.claude/skills/` and `.agents/skills/`):
 - then the most relevant others for the task.
 
 The agent must run the one that applies and report it as a check, or say in one line why none
-applies or can run here. A review brief asks the reviewer to check that. Research and babysitter
-briefs omit the section.
+applies or can run here. A review brief asks the reviewer to check that. Research briefs omit the
+section.
 
 ## The shape of a brief
 

@@ -41,8 +41,7 @@ act on. `SKILL.md` step 5 says when to open it.
 
 - One section per launching session, holding all of its runs, and each child session: agent, model,
   why that agent was chosen, state, steps, tokens, session id, and current activity.
-- Any parked task shows as `parked`, with what it waits for, as a babysitter does
-  (`references/monitor.md`, "Parked tasks"). A babysitter's fix attempt shows the reason `fix`.
+- Any parked task shows as `parked`, with what it waits for (`references/monitor.md`, "Parked tasks").
 - Clicking a session shows its final report and its live event log. The log opens at the newest
   events and follows new output while the reader is at the bottom.
 - For a task, the panel also shows its receipts: its brief, one line per attempt (clicking one shows
@@ -73,7 +72,7 @@ The box under a task's details sends it a message (`references/messages.md`).
   that has waited 30 seconds adds a hint about interrupting.
 - **The row marker.** A row with unread messages shows `✉ N waiting` after its name, and its tooltip
   lists them with their senders. Every row that takes messages shows it: a nested run's task, a
-  renamed task, a babysitter, and a command task's row.
+  renamed task, and a command task's row.
 - **Idle tasks.** A task that ended its turn and waits on its own background command shows
   `running · idle`, and its activity says what it waits on. It reads nothing until that command ends.
   So a message from the box interrupts it at once, even with the Interrupt option off: its session
@@ -87,7 +86,7 @@ The box under a task's details sends it a message (`references/messages.md`).
     messages as its next prompt. This is a new attempt, with the reason `interrupt`, and every relay
     option of the attempt it replaces. The resume is checked first: one that cannot start stops
     nothing.
-  - A babysitter, a parked task, a command task, a task whose session id is not known yet, and one
+  - A parked task, a command task, a task whose session id is not known yet, and one
     with a publishing command still running are not interrupted. The messages wait for its next
     step (`references/messages.md`, "The interrupt").
 - **The status line.** The line under the box says which of these happened: "Stopped `npm test` …
@@ -122,7 +121,6 @@ review, and silent, stuck or unreachable tasks (`references/monitor.md`).
   recorded process ended, if it did. Each item's `agentState` holds what is said.
 - A task that a stop ended reads `stopped` and has no item: it did not fail.
 - A decision handed back in a top-level run goes to its session first.
-- A babysitter never awaits review.
 - An `unreachable` item is a running task that ended its turn and waits on its own background
   command while a message waits unread. Nothing reaches it until that command ends, so it does not
   wait to show as silent. The item names the `steer` command that delivers the message now, and so

@@ -58,7 +58,7 @@ const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run,.dot.d-
 const dotClass=t=>{const s=outcome(t);return reviewing(t)?"d-review":s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="parked"?"d-park":s==="idle"||s==="prepared"||s==="closed"?"":"d-bad"};
 // A row's elapsed time in the board's own format, but with no seconds once it passes a minute. A
 // running row's is counted here from its start, every second (tick), so it moves between board
-// reads; any other row shows what the board sent. A parked babysitter does not count up.
+// reads; any other row shows what the board sent. A parked task does not count up.
 function elapsedText(ms){const s=Math.max(0,Math.round(ms/1000)),p=n=>String(n).padStart(2,"0"),d=Math.floor(s/86400);
   return s<60?s+"s":s<3600?Math.floor(s/60)+"m":s<86400?Math.floor(s/3600)+"h"+p(Math.floor(s%3600/60))+"m":d<30?d+"d"+Math.floor(s%86400/3600)+"h":d<365?Math.floor(d/30)+"mo"+d%30+"d":Math.floor(d/365)+"y"+Math.floor(d%365/30)+"mo"}
 const shortElapsed=text=>String(text??"").replace(/^(\d+m)\d+s$/,"$1"),ticking=t=>t.state==="running"&&t.phase!=="parked"&&Number.isFinite(Date.parse(t.startedAt));

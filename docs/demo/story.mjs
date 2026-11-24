@@ -55,7 +55,7 @@ export function story(ids) {
       {
         key: "checkout", agent: "claude", startedMin: 62,
         entries: [
-          { at: 62, t: "user", text: "Let's ship the one-page checkout in example-shop: live cart totals, promo codes and saved addresses. Use the orchestrator, and keep PR #212 (the saved-address API) moving while you work." },
+          { at: 62, t: "user", text: "Let's ship the one-page checkout in example-shop: live cart totals, promo codes and saved addresses. Use the orchestrator." },
           { t: "say", text: "I'll map the checkout code first so the briefs are accurate, then plan the work as tasks." },
           { t: "agent", type: "Explore", description: "Map checkout components", prompt: "Map the checkout flow in src/checkout, src/cart and src/promo: components, hooks, API calls, and which exports the mobile app imports.", out: "Checkout is CheckoutPage → AddressForm; totals come from calculateTotals in src/cart/totals.ts, which apps/mobile imports; promo codes are applied client-side in src/promo/apply.ts." },
           { at: 59, t: "bash", cmd: `${ORCH} agents`, out: "AGENT  VERSION  LOGIN  RELAY  READY\nclaude 2.3.4    yes    yes    yes\ncodex  0.98.0   yes    yes    yes" },
@@ -63,7 +63,6 @@ export function story(ids) {
           { t: "write", file: `~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json` },
           { at: 57, t: "bash", cmd: `${ORCH} plan ${checkout} ~/.local/state/agent-orchestrator/runs/${checkout}/plan-draft.json`, out: "plan recorded: 6 tasks (1 depends on others); briefs to write: 6" },
           { at: 56, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started schema-review → codex gpt-6.1-terra (effort medium, standard tier, read-only)\nwaiting on a brief: address-form, e2e-checkout, tax-rounding, cart-totals\nblocked promo-codes: waits on schema-review (running)" },
-          { at: 50, t: "bash", cmd: `${ORCH} start ${checkout} babysit-pr-212 --agent claude --tier complex --babysit --pr 212 --why "babysits PR #212; Claude costs less than Codex" --brief briefs/babysit-pr-212.md`, out: "started babysit-pr-212 → claude claude-opus-5-5 (effort xhigh, write, babysitter: may commit and push, no sandbox)" },
           { at: 49, t: "bash", cmd: `${ORCH} dispatch ${checkout}`, out: "started address-form → claude claude-opus-5-5 (effort xhigh, write, may commit and push, no sandbox)" },
           { at: 47, t: "bash", cmd: `${ORCH} result ${checkout} schema-review`, out: "task schema-review → codex (read-only), attempt 1: completed (exit 0)\n…\nOne breaking change: Cart.total changed from Float! to Money!." },
           { t: "bash", cmd: `${ORCH} dashboard --detach --open`, out: "dashboard: http://127.0.0.1:4777/  (background pid 48213, opened in the browser)" },
@@ -177,8 +176,7 @@ export function story(ids) {
         key: "checkout", session: "checkout", name: "one-page-checkout", createdMin: 58,
         goal: "Ship the one-page checkout: live cart totals, promo codes and saved addresses",
         // The plan as revised after e2e-checkout failed, recorded with `orch.mjs plan`: the tasks
-        // below with their `type`, `owns` and `dependsOn` (the babysitter is started by hand, outside
-        // it), then the tasks not started yet.
+        // below with their `type`, `owns` and `dependsOn`, then the tasks not started yet.
         plan: {
           acceptance: [
             "The cart shows subtotal, discounts, tax and shipping in integer cents, and updates as lines change",
@@ -215,29 +213,6 @@ export function story(ids) {
               { t: "read", file: "src/api/resolvers/cart.ts", lines: "1,80" },
             ],
             end: { status: "completed", finishedMin: 47, finalMessage: "One breaking change and one risk:\n\n1. `Cart.total` changed from `Float!` to `Money!`. The mobile app queries `total` in `cart.graphql` and `checkout.graphql`, so released app versions would break. Keep `total: Float!` (deprecated) and add `totalMoney: Money!`.\n2. `Cart.totals` resolves tax with the old `roundTax`, so its numbers can differ from the receipt by a cent once tax rounding changes.\n\n```orch-result\n{\"outcome\":\"done\",\"changed\":[],\"checks\":[{\"cmd\":\"npx graphql-inspector diff origin/main:src/api/schema.graphql src/api/schema.graphql\",\"result\":\"fail\",\"note\":\"1 breaking change\"}],\"decisions\":[],\"unresolved\":[]}\n```" },
-          },
-          {
-            id: "babysit-pr-212", agent: "claude", tier: "complex", babysit: true, pr: 212, branch: "checkout/saved-address-api", startedMin: 50, quietMin: 4,
-            why: "babysits PR #212; Claude costs less than Codex",
-            goal: "Babysit pull request #212 (saved-address API) until it merges: fix failing checks, answer review threads, keep it mergeable.",
-            usage: { base: 26000, growLo: 700, growHi: 2600, outLo: 60, outHi: 700 },
-            steps: [
-              { t: "bash", cmd: `${ORCH} pr-watch 212 --once`, out: "PR #212 OPEN · example-org/example-shop · checkout/saved-address-api → main @ 8d41c0e2 · https://github.com/example-org/example-shop/pull/212\n  checks: 11 passed, 1 failed (unit (node 22)), 0 pending · review: REVIEW_REQUIRED · unresolved threads: 1 · mergeable: MERGEABLE (BLOCKED)\n  needs you: check failed: unit (node 22); 1 unresolved review thread(s)" },
-              { t: "bash", cmd: "gh run view 18871 --log-failed | tail -20", out: "FAIL src/address/store.test.ts > saveAddress > trims whitespace in the postcode\nAssertionError: expected ' SW1A 1AA' to be 'SW1A 1AA'\n ❯ src/address/store.test.ts:31:42" },
-              { t: "read", file: "src/address/store.ts" },
-              { t: "edit", file: "src/address/store.ts", old: "...address });", new: "...address, postcode: normalizePostcode(address.postcode) });" },
-              { t: "bash", cmd: "npm test -- src/address", out: " ✓ src/address/store.test.ts (12 tests) 18ms\n\n Test Files  1 passed (1)\n      Tests  12 passed (12)" },
-              { t: "bash", cmd: "git commit -am \"fix(address): normalize the postcode before saving\" && git push", out: "[checkout/saved-address-api 5be0c7a] fix(address): normalize the postcode before saving\n 1 file changed, 2 insertions(+), 1 deletion(-)\nTo github.com:example-org/example-shop.git\n   8d41c0e..5be0c7a  checkout/saved-address-api -> checkout/saved-address-api" },
-              { t: "bash", cmd: "gh api repos/example-org/example-shop/pulls/212/comments --jq '.[] | select(.in_reply_to_id == null) | \"\\(.path):\\(.line) \\(.body)\"'", out: "src/address/store.ts:48 Should we cap how many addresses one customer can save?" },
-              { t: "edit", file: "src/address/store.ts", old: "export async function saveAddress", new: "const MAX_SAVED = 20;\n\nexport async function saveAddress" },
-              { t: "bash", cmd: "npm test -- src/address && git commit -am \"feat(address): keep at most 20 saved addresses per customer\" && git push", out: " ✓ src/address/store.test.ts (13 tests) 19ms\n[checkout/saved-address-api a73e118] feat(address): keep at most 20 saved addresses per customer\nTo github.com:example-org/example-shop.git\n   5be0c7a..a73e118  checkout/saved-address-api -> checkout/saved-address-api" },
-              { t: "bash", cmd: "gh api repos/example-org/example-shop/pulls/212/comments/2291/replies -f body=\"Capped at 20 per customer in a73e118; older addresses stay stored but are hidden from the picker.\"", out: "{\"id\":2304,\"in_reply_to_id\":2291}" },
-              { t: "bash", cmd: `${ORCH} pr-watch 212 --timeout 9m`, pending: true, exit: 3,
-                out: "Exit code 3\nPR #212 OPEN · example-org/example-shop · checkout/saved-address-api → main @ a73e1180 · https://github.com/example-org/example-shop/pull/212\n  checks: 12 passed, 0 failed, 0 pending · review: REVIEW_REQUIRED · unresolved threads: 0 · mergeable: MERGEABLE (BLOCKED)\n  nothing new\n(nothing new: the watch timed out; run it again)" },
-            ],
-            // pr-watch returns after its 9-minute timeout, and the babysitter runs it again.
-            repeatMin: 9,
-            end: { status: "running" },
           },
           {
             id: "address-form", agent: "claude", tier: "complex", worktree: true, startedMin: 49, owns: ["src/checkout/", "e2e/checkout-address.spec.ts"],

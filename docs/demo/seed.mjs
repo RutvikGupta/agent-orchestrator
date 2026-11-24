@@ -177,14 +177,9 @@ function buildWorld() {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(HERE, "relay.mjs"), target);
   }
-  // `start --babysit` reads the pull request with `gh pr view`; this stand-in answers that alone.
+  // Stand-in for the GitHub CLI so the demo reaches nothing external.
   const gh = path.join(dirs.bin, "gh");
   fs.writeFileSync(gh, `#!/bin/sh
-# Demo stand-in for the GitHub CLI: it answers the one question the demo asks and reaches nothing.
-if [ "$1 $2" = "pr view" ]; then
-  echo '{"number":212,"url":"https://github.com/example-org/example-shop/pull/212","state":"OPEN","isDraft":false,"title":"Checkout: saved-address API"}'
-  exit 0
-fi
 echo "gh: not available in the demo" >&2
 exit 1
 `, { mode: 0o755 });
@@ -365,11 +360,9 @@ function writeCodexSession(s) {
 // ---- Runs and tasks, through the CLI --------------------------------------------------------
 
 function brief(run, t) {
-  const role = t.babysit
-    ? `You are the babysitter of pull request #${t.pr} in example-org/example-shop. Keep it moving until it merges: fix failing checks, answer review threads, and keep it mergeable. You may commit and push (never force).`
-    : t.readOnly
-      ? "You are a delegated reviewer working read-only in example-org/example-shop. Do not change any file."
-      : "You are a delegated implementer working in a worktree of example-org/example-shop. Commit your work on this branch as you go.";
+  const role = t.readOnly
+    ? "You are a delegated reviewer working read-only in example-org/example-shop. Do not change any file."
+    : "You are a delegated implementer working in a worktree of example-org/example-shop. Commit your work on this branch as you go.";
   return `${role}
 
 ## Goal
@@ -412,14 +405,14 @@ function relayScript(t, sessionId) {
   };
 }
 
-// A run's plan, from its spec: every task but the babysitter, which is started by hand for an
-// existing pull request, then the tasks not started yet. Briefs are relative to the run directory.
+// A run's plan, from its spec: its tasks, then the tasks not started yet. Briefs are relative to
+// the run directory.
 function planOf(r) {
   const entry = (t) => ({
     id: t.id, goal: t.goal, type: t.type || "implement", owns: t.owns || [], dependsOn: t.dependsOn || [],
     agent: t.agent, tier: t.tier || null, why: t.why, readOnly: Boolean(t.readOnly), brief: `briefs/${t.id}.md`,
   });
-  return { goal: r.goal, acceptance: r.plan.acceptance, tasks: [...r.tasks.filter((t) => !t.babysit), ...r.plan.planned].map(entry) };
+  return { goal: r.goal, acceptance: r.plan.acceptance, tasks: [...r.tasks, ...r.plan.planned].map(entry) };
 }
 
 const seeded = { runs: {}, tasks: [] }; // run key -> { id, dir, spec }; every started task
@@ -455,7 +448,7 @@ function seedRuns(spec, sessions) {
       writeJson(scriptFile, relayScript(t, sessionId));
       const cd = t.cdOf ? readJson(path.join(seeded.runs[r.parent.run].dir, "tasks", t.cdOf, "task.json")).cd : null;
       orch(["start", id, t.id, "--agent", t.agent, ...(t.tier ? ["--tier", t.tier] : []), "--why", t.why, "--brief", briefFile,
-        ...(t.readOnly ? ["--read-only"] : []), ...(t.babysit ? ["--babysit", "--pr", String(t.pr)] : []), ...(cd ? ["--cd", cd] : [])],
+        ...(t.readOnly ? ["--read-only"] : []), ...(cd ? ["--cd", cd] : [])],
       { env: parent, passthrough: [...(t.relayArgs || []), "--demo-script", scriptFile] });
       // The task began earlier than now: its record and its relay's result say when.
       const taskFile = path.join(dir, "tasks", t.id, "task.json");
@@ -472,7 +465,7 @@ async function settleTasks() {
     await until(() => fs.existsSync(path.join(t.outDir, done ? "result.json" : "ready")), `${t.spec.id} to ${done ? "finish" : "start"}`);
     if (t.spec.after === "result") orch(["result", t.run.id, t.spec.id], { env: t.run.env });
     if (t.spec.after === "accept") orch(["accept", t.run.id, t.spec.id], { env: t.run.env });
-    // A babysitter waiting in pr-watch is quiet by design; its stream last moved a few minutes ago.
+    // A session waiting quietly by design keeps its stream's timestamp a few minutes back.
     if (t.spec.quietMin) fs.utimesSync(path.join(t.outDir, "events.jsonl"), new Date(), new Date(at(t.spec.quietMin)));
   }
 }

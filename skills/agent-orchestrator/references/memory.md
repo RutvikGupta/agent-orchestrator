@@ -90,7 +90,7 @@ When a start does not pass:
 - `--force` does not bypass it. It skips plan checks only (`references/dispatch.md`).
 - A resume or a rework is a new start, so it is checked the same way.
 - The agent that takes the place of one that ended does not wait for the count. This covers a
-  parked babysitter that its watcher resumes, a task that `wait` retries, and one that an interrupt
+  parked task that its watcher resumes, a task that `wait` retries, and one that an interrupt
   restarts in its own session. Memory still applies: such a replacement never starts while
   available memory is below the minimum or macOS pressure is critical.
 

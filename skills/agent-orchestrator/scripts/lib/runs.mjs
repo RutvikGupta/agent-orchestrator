@@ -275,31 +275,26 @@ function reportOutcome(message) {
 // message whose first (or last) line starts with `PARKED:` (and an orch-result outcome `parked`).
 // Its relay and agent exit, and a small watcher resumes the same session on the next event. Until
 // then describe() reports the task as running, in phase `parked`, so `wait` keeps waiting for it.
-// A pull-request babysitter always parks that way; any other Claude or Codex task parks only when
-// something can wake it (parkBasis): a wake condition it recorded with `park-until` in that attempt
-// (park-until.json in the attempt's folder), or a task it started that was still running when the
-// attempt ended (children.jsonl in the task's folder, one line per start). Each parked attempt's
-// folder holds the park's files: park-watcher-<k>.json, one per watcher started (the highest k is
-// the current one); park-check.json, the latest check; and park-claim-<k>.json, the claims that end
-// the park (a resume, `stop` or `close`), each created exclusively with the next k, so exactly one
-// claimant wins, and recording its owner's PID and start time.
+// An agent task parks only when something can wake it (parkBasis): a wake condition it recorded
+// with `park-until` in that attempt (park-until.json in the attempt's folder), or a task it started
+// that was still running when the attempt ended (children.jsonl in the task's folder, one line per
+// start). Each parked attempt's folder holds the park's files: park-watcher-<k>.json, one per
+// watcher started (the highest k is the current one); park-check.json, the latest check; and
+// park-claim-<k>.json, the claims that end the park (a resume, `stop` or `close`), each created
+// exclusively with the next k, so exactly one claimant wins, and recording its owner's PID and
+// start time.
 export const PARK_CHECK_FILE = "park-check.json";
 export const PARK_UNTIL_FILE = "park-until.json";
 export const CHILDREN_FILE = "children.jsonl";
-// The finish watcher's claim on an attempt's notice (finish-notice.mjs), which also records the
-// fix attempt it started for a babysitter's NEEDS FIX, or why it started none.
+// The finish watcher's claim on an attempt's notice (finish-notice.mjs).
 export const NOTICE_FILE = "parent-notice.json";
 const PARK_WATCHER_RE = /^park-watcher-(\d+)\.json$/;
 const PARK_CLAIM_RE = /^park-claim-(\d+)\.json$/;
 export const parkWatcherFile = (dir, generation) => path.join(dir, `park-watcher-${generation}.json`);
 export const parkClaimFile = (dir, generation) => path.join(dir, `park-claim-${generation}.json`);
 const PARKED_RE = /^PARKED:\s*(.*?)\s*$/;
-const NEEDS_FIX_RE = /^NEEDS FIX:\s*(.*?)\s*$/;
 const WATCHER_GRACE_MS = 15000;
 const CLAIM_GRACE_MS = 60000; // a claim that names no owner counts as live this long
-// A babysitter's watch attempt that ended with NEEDS FIX shows as running while its fix attempt
-// starts; when none has started this long after, it is handed to the orchestrator instead.
-const FIX_GRACE_MS = 15 * 60000;
 
 // The match of `re` on a final message's first line, or on the last line of its text (before an
 // orch-result block), as `exec` returns it; null when neither line matches. The line must start
@@ -311,54 +306,36 @@ function edgeLine(message, re) {
   return [lines[0], lines[lines.length - 1]].map((line) => (line ? re.exec(line.replace(/\r$/, "")) : null)).find(Boolean) || null;
 }
 
-// What a final message says the task waits for ("PR #42 waits for a human review"), or null when it
-// does not park. A line that starts with `PARKED:` must be the message's first line, or the last
-// line of its text (edgeLine): a babysitter that meant to park must not end unwatched. A `PARKED:`
-// line in the middle does not park. When the message has an orch-result block, that block's
-// outcome must be `parked` too: a message whose two signals disagree does not park. A message that
-// hands back a decision, or asks for a fix (needsFixSignal), does not park.
+// What a final message says the task waits for ("waits for the deploy"), or null when it does not
+// park. A line that starts with `PARKED:` must be the message's first line, or the last line of
+// its text (edgeLine): a task that meant to park must not end unwatched. A `PARKED:` line in the
+// middle does not park. When the message has an orch-result block, that block's outcome must be
+// `parked` too: a message whose two signals disagree does not park. A message that hands back a
+// decision does not park.
 export function parkedSignal(message) {
   const said = parkedText(message);
-  return said === null ? null : said || "its pull request";
+  return said === null ? null : said || "its wake";
 }
 
 // The text after a parking final message's `PARKED:`, which may be empty; null when it does not park.
 function parkedText(message) {
   const text = String(message || "");
   const m = edgeLine(text, PARKED_RE);
-  if (!m || edgeLine(text, NEEDS_FIX_RE)) return null;
+  if (!m) return null;
   const report = reportOutcome(text);
   if ((report.present && report.outcome !== "parked") || report.decisions || decisionsIn(text)) return null;
   return m[1];
 }
 
-// What a babysitter's final message says needs fixing ("PR #42 the unit check fails on a renamed
-// import"), or null. The `NEEDS FIX:` line follows the rules of the `PARKED:` line (edgeLine). A
-// watch attempt that runs below the complex tier ends with it to hand a code change or a
-// substantive reply to a fix attempt (finish-notice.mjs). A message that hands back a decision, or
-// whose orch-result outcome is `parked`, asks for no fix.
-export function needsFixSignal(message) {
-  const text = String(message || "");
-  const m = edgeLine(text, NEEDS_FIX_RE);
-  if (!m) return null;
-  const report = reportOutcome(text);
-  if (report.outcome === "parked" || report.decisions || decisionsIn(text)) return null;
-  return m[1] || "a fix";
-}
-
-// Whether a task babysits a pull request.
-export const isBabysitter = (task) => Boolean(task?.babysit || task?.plan?.type === "babysit");
-
 // Whether a task's current attempt ended because of a stop: `stop`, or `close` of a task that still
 // ran, recorded it on the task (stoppedAt), no later `start` cleared it, and the attempt did not end
 // on its own first. That holds when the relay left no result, when its result is an unsuccessful one
 // written as the stop came or after (a relay records `aborted` on SIGTERM), and when it is a parked
-// babysitter's completed one, whose park the stop ended. A result that completed is the agent's own
+// task's completed one, whose park the stop ended. A result that completed is the agent's own
 // end, and one that came before the stop (a command task's relay that died and left processes that
 // `stop` ended) is too. `result` is the attempt's result.json, or null.
 export function endedByStop(task, result) {
-  // A babysitter's watch attempt that asked for a fix waits for its fix attempt, as a park does.
-  const parked = result?.status === "completed" && Boolean(parkedSignal(result.finalMessage) || (isBabysitter(task) && needsFixSignal(result.finalMessage)));
+  const parked = result?.status === "completed" && Boolean(parkedSignal(result.finalMessage));
   return stopEnded(task?.stoppedAt, result && { status: result.status, finishedAt: result.finishedAt, parked });
 }
 
@@ -385,7 +362,7 @@ function stopperText(actor) {
 // Every agent task may park (Claude, Codex, Gemini: their relays resume a session with --session);
 // a command task never does.
 const PARKING_AGENTS = new Set(["claude", "codex", "gemini"]);
-const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && (isBabysitter(task) || PARKING_AGENTS.has(attemptAgent(task, task.attempt))));
+const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && PARKING_AGENTS.has(attemptAgent(task, task.attempt)));
 
 // `ps` prints start times in the local time zone and language: read them in UTC and the C locale, so
 // that processes with other settings record and compare the same text.
@@ -517,11 +494,9 @@ export function parkedOf(run, task, result) {
   const claim = parkClaim(dir);
   const watcher = parkWatcher(dir);
   const condition = basis.condition ? { command: commandText(basis.condition.command), every: basis.condition.every, until: basis.condition.until, why: basis.condition.why || null } : null;
-  const waitsFor = said || (basis.babysit ? "its pull request" : condition?.why || (condition ? `\`${shortText(condition.command, 80)}\`` : "the tasks it started"));
+  const waitsFor = said || condition?.why || (condition ? `\`${shortText(condition.command, 80)}\`` : "the tasks it started");
   return {
     attempt: task.attempt,
-    pr: basis.babysit ? task.pr?.number ?? null : null,
-    url: basis.babysit ? task.pr?.url ?? null : null,
     waitsFor,
     since: result.finishedAt || null,
     ...(condition ? { condition } : {}),
@@ -552,17 +527,15 @@ export function isParked(run, task) {
 export const NOTICE_GRACE_MS = 2 * 60000;
 
 // What can wake a task whose attempt `n` (default: its current one) ended parked, with that
-// attempt's result: { babysit: true } for a babysitter, which its pull request wakes; else
-// { condition } when the attempt recorded a wake condition with `park-until`; else { children:
-// ["<run>/<task>", ...] }, the tasks it started (in any attempt; children.jsonl records each start,
-// the task's intent to wait for it) whose ending the attempt had not taken in when it ended; else
-// null, and the attempt does not park. From the records alone, a child counts while it has no
-// result or is parked, and once it has ended until its finish notice is consumed: while the notice
-// is not written yet, however late it comes, while it is unread, and when it was read only after
-// this attempt ended. A child can end after its parent has decided to park but before the
-// parent's result is written: its unread notice is then the event that wakes the parent.
+// attempt's result: { condition } when the attempt recorded a wake condition with `park-until`;
+// else { children: ["<run>/<task>", ...] }, the tasks it started (in any attempt; children.jsonl
+// records each start, the task's intent to wait for it) whose ending the attempt had not taken in
+// when it ended; else null, and the attempt does not park. From the records alone, a child counts
+// while it has no result or is parked, and once it has ended until its finish notice is consumed:
+// while the notice is not written yet, however late it comes, while it is unread, and when it was
+// read only after this attempt ended. A child can end after its parent has decided to park but
+// before the parent's result is written: its unread notice is then the event that wakes the parent.
 export function parkBasis(run, task, result, n = task.attempt) {
-  if (isBabysitter(task)) return { babysit: true };
   const condition = readJson(path.join(taskDir(run, task.id), `attempt-${n}`, PARK_UNTIL_FILE));
   if (Array.isArray(condition?.command) && condition.command.length) return { condition };
   const ended = Date.parse(result?.finishedAt) || Date.now();
@@ -638,7 +611,7 @@ export function childrenWaitingOn(run, id) {
     try {
       const childRun = { ...readJson(path.join(RUNS_DIR, c.run, "run.json")), dir: path.join(RUNS_DIR, c.run) };
       const task = loadTask(childRun, c.task);
-      if (!task || task.closedAt || String(task.mode || "").startsWith("babysit") || task.babysit) continue;
+      if (!task || task.closedAt) continue;
       const row = describe(childRun, task);
       const kind = row.state === "needs-decision" ? "needs your decision" : row.phase === "awaiting-review" ? "awaiting your review" : null;
       if (kind) waiting.push({ run: c.run, task: c.task, name: task.name || null, state: row.state, kind });
@@ -668,37 +641,12 @@ function notParkedWhy(run, task, result) {
   return `its final message says PARKED:, but nothing would wake it: it recorded no wake condition with \`park-until\` in this attempt, and no task it started was still running when it ended. It ended as completed`;
 }
 
-// A babysitter's watch attempt that ended with `NEEDS FIX:`: { reason, since } while its fix attempt
-// starts (finish-notice.mjs), or { reason, refused } once none can start: the ceiling forbids the
-// complex tier, the attempt ran complex itself, the start failed, or nothing started it within
-// FIX_GRACE_MS. Null for any other attempt.
-function fixOf(task, result) {
-  if (!isBabysitter(task) || result?.status !== "completed" || task.closedAt || task.stoppedAt || !task.outDir) return null;
-  const reason = needsFixSignal(result.finalMessage);
-  if (!reason) return null;
-  const notice = readJson(path.join(task.outDir, NOTICE_FILE));
-  if (notice?.fixRefused) return { reason, refused: notice.fixRefused };
-  if (!notice?.fix && Date.now() - (Date.parse(result.finishedAt) || 0) > FIX_GRACE_MS) {
-    return { reason, refused: `no fix attempt started within ${FIX_GRACE_MS / 60000} minutes of the watch attempt's end; resume it by hand` };
-  }
-  return { reason, since: result.finishedAt || null };
-}
-
-// Whether a task's current attempt is a babysitter's watch attempt that asked for a fix whose fix
-// attempt has not started yet (nor been refused): `stop` marks it stopped, which keeps that fix
-// from starting (finish-notice.mjs, startFix), also before the fix start holds any claim.
-export function pendingFix(task) {
-  if (!task?.outDir) return false;
-  const fix = fixOf(task, readJson(path.join(task.outDir, "result.json")));
-  return Boolean(fix && !fix.refused);
-}
-
 // Resume claims (steer.mjs, resumeLock). Every way a task is resumed (a `start` by hand, a retry, a
 // rework, an interrupt) claims the attempt it replaces first: resume-<k>.json in that attempt's
 // folder, created whole and exclusively with the next k, naming its owner (PID and start time) and
 // its `kind` ("start", "retry" or "interrupt"; "adopt" for a claimant that took over a relay a dead
 // resume left running, steer.mjs, adoptResume). So two of them never both start the next attempt. A
-// parked babysitter's resume claims its park instead (park.mjs), and an interrupt never resumes one.
+// parked task's resume claims its park instead (park.mjs), and an interrupt never resumes one.
 // The highest k is the current claim: `released` when the resume failed or was refused (with
 // `error`), `attempt` once the resumed attempt is saved. An interrupt stops the running relay first,
 // so while its claim is live, describe() reports the task as running: `wait`, the parallel limit and
@@ -809,7 +757,6 @@ function attemptResult(dir) {
     failedCheck: Boolean(report.failedCheck),
     limitHit: result.status !== "completed" && USAGE_LIMIT_RE.test([result.error && (typeof result.error === "string" ? result.error : JSON.stringify(result.error)), result.stderrTail, result.finalMessage].filter(Boolean).join("\n")),
     parked: result.status === "completed" && Boolean(parkedSignal(result.finalMessage)),
-    needsFix: result.status === "completed" && Boolean(needsFixSignal(result.finalMessage)),
     startedAt: result.startedAt || null,
     finishedAt: result.finishedAt || null,
     model: result.model || null,
@@ -882,18 +829,16 @@ function attemptsOf(task, seen, row) {
     // continues it.
     if (!now && attemptReasonOf(task, n + 1) === "interrupt") state = "interrupted";
     // An earlier attempt that a stop ended (`start` keeps the stop in attemptStops) did not fail either.
-    else if (!now && stopEnded(task.attemptStops?.[n], r && { ...r, parked: r.parked || (isBabysitter(task) && r.needsFix) })) state = "stopped";
+    else if (!now && stopEnded(task.attemptStops?.[n], r)) state = "stopped";
     else if (!now && state === "completed" && r.decisions && task.decisionResolvedAttempt !== n) state = "needs-decision";
-    // An earlier attempt parked when a babysitter's did, or another task's that recorded a wake
-    // condition or had started tasks (parkBasis decided it then; the files show it now).
-    else if (!now && state === "completed" && r.parked && (isBabysitter(task) || fs.existsSync(path.join(dir, PARK_UNTIL_FILE)) || fs.existsSync(path.join(path.dirname(dir), CHILDREN_FILE)))) state = "parked";
-    // A babysitter's watch attempt that handed its work to the fix attempt after it.
-    else if (!now && state === "completed" && r.needsFix && attemptReasonOf(task, n + 1) === "fix") state = "needs-fix";
+    // An earlier attempt parked when it recorded a wake condition or had started tasks (parkBasis
+    // decided it then; the files show it now).
+    else if (!now && state === "completed" && r.parked && (fs.existsSync(path.join(dir, PARK_UNTIL_FILE)) || fs.existsSync(path.join(path.dirname(dir), CHILDREN_FILE)))) state = "parked";
     const startedAt = now ? row.startedAt : r?.startedAt || null;
     const finishedAt = now ? result?.finishedAt || null : r?.finishedAt || null;
     const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
     const errorText = now ? (typeof result?.error === "string" ? result.error : result?.error ? JSON.stringify(result.error) : "") : r?.error || "";
-    const failed = !["completed", "needs-decision", "running", "prepared", "parked", "needs-fix", "interrupted", "stopped"].includes(state);
+    const failed = !["completed", "needs-decision", "running", "prepared", "parked", "interrupted", "stopped"].includes(state);
     return {
       n,
       limitHit: now ? row.limitHit || (state === "aborted" && !result && abortedLimit(dir, summary.error)) : Boolean(r?.limitHit || (r && r.status !== "completed" && USAGE_LIMIT_RE.test(summary.error || "")) || (!r && state === "aborted" && abortedLimit(dir, summary.error))),
@@ -956,20 +901,13 @@ export function describe(run, task) {
   if (!task.pid) state = isClosedPreparation(task) ? "closed" : "prepared";
   else if (running || interrupting) state = "running";
   // An attempt that a stop ended did not fail: it reads `stopped`, whatever the relay recorded. A
-  // stopped park has ended too (a stop keeps a babysitter from parking: parkable).
+  // stopped park has ended too (a stop keeps a task from parking: parkable).
   else if (endedByStop(task, result)) state = "stopped";
   else if (result) state = result.status || "unknown";
   else state = "aborted"; // exited without result.json: usage error, kill, or crash; see the log
   // A session that ended by handing back a question is waiting on its orchestrator, not done.
   let decisions = state === "completed" ? decisionsIn(result.finalMessage) : null;
   if (decisions) state = "needs-decision";
-  // A babysitter's watch attempt that asked for a fix still runs while its fix attempt starts; one
-  // whose fix attempt cannot start waits on its orchestrator, as a decision.
-  const fix = state === "completed" ? fixOf(task, result) : null;
-  if (fix?.refused) {
-    state = "needs-decision";
-    decisions = [`NEEDS FIX: ${fix.reason}`, `No fix attempt was started: ${fix.refused}`];
-  } else if (fix) state = "running";
   // A parked task still runs as far as anyone waiting on it can tell.
   const parked = state === "completed" ? parkedOf(run, task, result) : null;
   if (parked) state = "running";
@@ -1034,7 +972,7 @@ export function describe(run, task) {
   // A task that stopped because its agent ran out of usage: the one case where limits matter.
   const finishedText = [current.error, result?.error, result?.finalMessage, result?.stderrTail].filter(Boolean).join("\n");
   // Only the error counts: a full window or a limit status still leaves the team plans' extra usage.
-  const limitHit = !running && !interrupting && !parked && !fix && !["prepared", "completed", "needs-decision", "stopped"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
+  const limitHit = !running && !interrupting && !parked && !["prepared", "completed", "needs-decision", "stopped"].includes(state) && USAGE_LIMIT_RE.test(finishedText);
   // Where a running agent is in its turn: the foreground shell command it is in, if any, and, for a
   // Claude relay that ended its turn and stays alive on a background command of its own, `idle`
   // ({ since, background, steer }): it reads no message until that command ends.
@@ -1046,7 +984,6 @@ export function describe(run, task) {
   if (running) now = `${quietMs > QUIET_AFTER_MS ? `quiet ${formatElapsed(quietMs)} · ` : ""}${idle ? idleText(idle) : activity}`;
   else if (interrupting) now = "interrupted to deliver a message: resuming its session";
   else if (decisions) now = firstLine(`asks: ${decisions.join(" · ")}`);
-  else if (fix) now = shortText(`needs a fix · ${fix.reason} · starting its fix attempt at the complex tier`, 300);
   else if (parked) now = parkedNow(parked);
   else if (state === "stopped") now = `stopped${task.stoppedBy ? ` by ${stopperText(task.stoppedBy)}` : ""}`;
   else if (result && command) now = commandOutcome(result) || "(no output)";
@@ -1062,7 +999,7 @@ export function describe(run, task) {
     agent: task.agent || "-",
     mode: !task.pid
       ? "-"
-      : `${task.babysit ? "babysit" : task.readOnly ? "read-only" : "write"}${task.network === "off" && !task.readOnly ? "+offline" : task.sandboxed && !task.readOnly ? "+sandbox" : ""}`,
+      : `${task.readOnly ? "read-only" : "write"}${task.network === "off" && !task.readOnly ? "+offline" : task.sandboxed && !task.readOnly ? "+sandbox" : ""}`,
     state,
     attempt: task.attempt || 0,
     elapsed: task.pid ? formatElapsed(elapsedMs) : "-",
@@ -1098,12 +1035,7 @@ export function describe(run, task) {
     ...(idle ? { idle } : {}),
     ...(interrupting ? { interrupting } : {}),
     ...(parked ? { parked } : {}),
-    ...(fix && !fix.refused ? { fixing: fix } : {}),
     ...(notParked ? { notParked } : {}),
-    // Set when this attempt began a fresh session from the babysitter's handoff note (park.mjs).
-    ...(task.handoffs?.[task.attempt] ? { handoff: task.handoffs[task.attempt] } : {}),
-    // How this attempt's start weighed a fresh session against its session's size, fresh or not.
-    ...(task.handoffChecks?.[task.attempt] ? { handoffCheck: task.handoffChecks[task.attempt] } : {}),
     // The context window at which Claude Code compacted this attempt's session (start.mjs).
     ...(task.compactWindows?.[task.attempt] ? { compactWindow: task.compactWindows[task.attempt] } : {}),
   };
