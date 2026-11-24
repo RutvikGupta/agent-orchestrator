@@ -15,7 +15,7 @@ import { liveClaudeSession, liveSessionReason, processExists, sessionIdPrefix } 
 import { resumeLock } from "../steer.mjs";
 import { phaseMap, reviewRoundsOf } from "../lifecycle.mjs";
 import { escalationFor, failureHint } from "../escalation.mjs";
-import { readPlan, runningConflicts } from "../plan.mjs";
+import { readPlan, runningConflicts, typeProblem } from "../plan.mjs";
 import { guard, recordChange } from "../ownership.mjs";
 import { gitHttpsEnv, relaySafetyArgs, unsupportedMode } from "../permissions.mjs";
 import { CLAUDE_DEFAULT_TIER, COMMAND_AGENT, ModelRefused, lowerEffort, callerCeiling, ceilingEnv, ceilingFor, lowerCeiling, modelFor, readPolicy, strongerThan, tierText } from "../policy.mjs";
@@ -94,7 +94,7 @@ const DURATION = /^\d+(?:\.\d+)?(?:ms|s|m|h)?$/;
 // attempt's --done and --timeout unless new ones are given.
 function commandOf(args, prev) {
   const given = NOT_FOR_COMMANDS.filter((name) => args[name] !== undefined && args[name] !== false);
-  if (given.length) refuse(`a command task has no brief or sandbox: drop ${given.map((name) => `--${name}`).join(", ")}`, 2);
+  if (given.length) refuse(`a command task has no brief, sandbox or pull request: drop ${given.map((name) => `--${name}`).join(", ")}`, 2);
   const reused = !args.passthrough.length;
   const argv = reused ? (prev.agent === COMMAND_AGENT && Array.isArray(prev.command) ? prev.command : null) : args.passthrough;
   if (!argv?.length || !argv[0]) refuse("give the command after --: start RUN TASK --agent command --why TEXT -- COMMAND [ARG...]", 2);
@@ -212,6 +212,10 @@ function planChecks(run, id, args, previous, { note = false } = {}) {
     const rows = listTasks(run);
     if (!entry && !args.unplanned && !previous?.unplanned) {
       refuse(`task ${id} is not in the plan; add it with plan, or pass --unplanned to record the exception`);
+    }
+    const badType = entry && typeProblem(entry);
+    if (badType) {
+      refuse(`cannot start ${id}: ${badType}; replace or remove it in the plan and record it again`);
     }
     const readOnly = Boolean(args["read-only"] || args.agent === COMMAND_AGENT);
     const reservation = { ...(entry || { id, owns: readOnly ? [] : ["."] }), agent: args.agent, readOnly };

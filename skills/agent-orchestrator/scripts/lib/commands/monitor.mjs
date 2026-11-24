@@ -8,7 +8,7 @@ import { callerTask } from "../finish-notice.mjs";
 import { agoText, shortText, table } from "../format.mjs";
 import { INBOX_FILE, QUESTIONS_FILE, inboxWake } from "../inbox.mjs";
 import { acceptedNow, lifecycleHints, phaseMap } from "../lifecycle.mjs";
-import { manualMerge, planProgress, readPlan, waitsOnText } from "../plan.mjs";
+import { TASK_TYPES, manualMerge, planProgress, readPlan, waitsOnText } from "../plan.mjs";
 import { reviveParked } from "../park.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
@@ -36,7 +36,8 @@ function plannedTasksOf(run, plan, rows) {
   // A planned task that has a record shows its name (`rename`).
   const names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name]));
   return plan.tasks.map((t) => {
-    const base = { id: t.id, name: names.get(t.id) || null, goal: t.goal, type: t.type ?? "implement", agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
+    const type = t.type === undefined ? "implement" : TASK_TYPES.includes(t.type) ? t.type : "retired";
+    const base = { id: t.id, name: names.get(t.id) || null, goal: t.goal, type, agent: t.agent, tier: t.tier ?? null, readOnly: Boolean(t.readOnly), dependsOn: t.dependsOn || [] };
     if (waiting.has(t.id)) return { ...base, status: "waiting", waitsOn: waiting.get(t.id) };
     if (unbriefed.has(t.id)) return { ...base, status: "ready", briefProblem: unbriefed.get(t.id) };
     const phase = phases.get(t.id);

@@ -100,9 +100,10 @@ test('a parked task shows as parked, keeps wait waiting, and is resumed once per
   const f = await fixture(t);
   const run = await f.newRun();
   const ready = path.join(f.root, 'deploy-ready');
-  await parkTask(f, run, 'sit', { command: condition(ready) });
-  // The briefs a watcher writes have no fake-relay comment: those attempts hold until released.
+  // Set before parkTask so the finish watcher it starts inherits this for attempt 2 (whose brief
+  // has no fake-relay comment and holds until released).
   f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true, finalMessage: PARKED });
+  await parkTask(f, run, 'sit', { command: condition(ready) });
   const row = await parkedRow(f, run, 'sit');
   assert.equal(row.state, 'running');
   assert.equal(row.parked.waitsFor, 'waits for the deploy');

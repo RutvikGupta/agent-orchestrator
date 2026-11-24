@@ -55,6 +55,13 @@ export function briefProblem(runDir, entry) {
 // "light, standard or complex": a tier list for messages.
 const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names.at(-1)}` : names.join(""));
 
+// What is wrong with a planned task's type, or null. `plan` rejects unknown types when recording a
+// plan; `dispatch` and first `start` check saved plans too, so a retired type is never launched.
+export function typeProblem(task) {
+  if (task?.type === undefined || TASK_TYPES.includes(task.type)) return null;
+  return `type ${JSON.stringify(task.type)} is no longer supported (use ${orList(TASK_TYPES)})`;
+}
+
 // What is wrong with a planned task's tier, or null. Every task names one, since `start` refuses a
 // new task without it. `dispatch` uses this too, for a plan recorded before tiers were required.
 export function tierProblem(task, policy = loadPolicy()) {

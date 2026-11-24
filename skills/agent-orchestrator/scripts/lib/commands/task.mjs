@@ -7,7 +7,7 @@ import path from "node:path";
 import { compact, formatElapsed, shortText } from "../format.mjs";
 import { isClosedPreparation, verificationsOf } from "../lifecycle.mjs";
 import { computeEvidence, evidenceText, evidenceWarning } from "../report.mjs";
-import { endPark } from "../park.mjs";
+import { endPark, hasActivePark } from "../park.mjs";
 import { stopResume } from "../steer.mjs";
 import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
@@ -171,8 +171,9 @@ function stopTask(run, task, g) {
   const ended = (text) => ({ finish: () => ({ text, exited: true }) });
   // A parked task has no relay. Mark it stopped first, so that a resume that has not started
   // its relay yet starts nothing and one that has keeps the stop; then end its park, stopping its
-  // watcher and any relay a resume started.
-  if (isParked(run, task)) {
+  // watcher and any relay a resume started. Also catches an in-progress park claim or watcher left
+  // by a retired park mode.
+  if (hasActivePark(run, task)) {
     mark();
     const parked = endPark(run, task, "stop");
     parked?.ended?.();
@@ -401,8 +402,9 @@ export function closeTask(run, task, extra = {}) {
   const now = new Date().toISOString();
   // A parked task has no relay. Mark it closed first, so that a resume that has not started
   // its relay yet starts nothing and one that has keeps the close; then end its park, stopping its
-  // watcher and any relay a resume started.
-  if (isParked(run, task)) {
+  // watcher and any relay a resume started. Also catches an in-progress park claim or watcher left
+  // by a retired park mode.
+  if (hasActivePark(run, task)) {
     saveTask(run, { ...(loadTask(run, task.id) || task), ...extra, closedAt: now });
     const parked = endPark(run, task, "close");
     parked?.ended?.();

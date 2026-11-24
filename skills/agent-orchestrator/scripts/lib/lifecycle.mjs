@@ -50,10 +50,12 @@ export function unlinkedVerifications(verifications, rounds) {
 
 // Why attempt `n` started: `first`, `resume` (a follow-up attempt), `rework` (after a `changes`
 // verdict) or `retry` (the automatic retry after a transient error). Records from before
-// attemptReasons existed fall back to their retry log.
+// attemptReasons existed fall back to their retry log; retired `fix` reasons show as `resume`.
 export function attemptReasonOf(task, n = task.attempt || 0) {
   if (!n) return null;
-  return task.attemptReasons?.[n] || (task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume");
+  const raw = task.attemptReasons?.[n];
+  if (raw) return raw === "fix" ? "resume" : raw;
+  return task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume";
 }
 
 // Preparing a closed, never-started task again reopens it until the next close.

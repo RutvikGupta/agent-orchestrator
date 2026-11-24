@@ -526,6 +526,16 @@ export function isParked(run, task) {
 // Past this, the parent's park watcher writes it instead (lateNotices; park.mjs, checkPark).
 export const NOTICE_GRACE_MS = 2 * 60000;
 
+// A finish notice suppressed only because the child parked on an earlier version (such as a retired
+// park mode) when this attempt is no longer parked under the current rules (no wake condition, no
+// pending children). Converted once into a normal finish notice so a parked parent still wakes.
+export function retiredParkedNotice(childRun, record, own, notice, attempt = record?.attempt) {
+  if (!notice?.parked || !notice?.skipped || notice?.message) return false;
+  if (!record || record.attempt !== attempt || !own) return false;
+  if (isParked(childRun, record)) return false;
+  return !parkBasis(childRun, record, own, attempt);
+}
+
 // What can wake a task whose attempt `n` (default: its current one) ended parked, with that
 // attempt's result: { condition } when the attempt recorded a wake condition with `park-until`;
 // else { children: ["<run>/<task>", ...] }, the tasks it started (in any attempt; children.jsonl
@@ -559,8 +569,9 @@ export function parkBasis(run, task, result, n = task.attempt) {
       pending = Boolean(m) && (!m.read || Date.parse(m.readAt) > ended);
     } else {
       // Not written yet, or being written: the parent waits for it, and its park watcher writes it
-      // when it is late (lateNotices). A notice that went nowhere (skipped) wakes nothing.
-      pending = !notice?.skipped;
+      // when it is late (lateNotices). A notice that went nowhere (skipped) wakes nothing, except
+      // one suppressed only by a retired park mode on a child that is now finished.
+      pending = !notice?.skipped || retiredParkedNotice(childRun, record, own, notice, record.attempt);
     }
     if (pending) children.push(`${child.run}/${child.task}`);
   }
@@ -569,16 +580,26 @@ export function parkBasis(run, task, result, n = task.attempt) {
 
 // The finish notices of the tasks a parked task started that ended more than NOTICE_GRACE_MS ago
 // and have none written, not even claimed: their finish watchers are gone (after a reboot, say), so
-// nothing would wake the parent. [{ runDir, task, attempt }], for the parent's park watcher to send.
+// nothing would wake the parent. Also includes a child whose notice was suppressed only by a
+// retired park mode and is no longer parked now. [{ runDir, task, attempt }], for the parent's park
+// watcher to send.
 export function lateNotices(run, task) {
   const late = [];
   for (const child of childrenOf(run, task.id)) {
     const runDir = path.join(RUNS_DIR, child.run);
-    const record = fs.existsSync(path.join(runDir, "run.json")) ? loadTask({ dir: runDir }, child.task) : null;
+    const childRun = { ...readJson(path.join(runDir, "run.json")), dir: runDir };
+    const record = childRun.id ? loadTask(childRun, child.task) : null;
     if (!record?.attempt) continue;
     const dir = path.join(runDir, "tasks", child.task, `attempt-${record.attempt}`);
     const own = readJson(path.join(dir, "result.json"));
-    if (!own || fs.existsSync(path.join(dir, NOTICE_FILE))) continue;
+    if (!own) continue;
+    const noticePath = path.join(dir, NOTICE_FILE);
+    if (fs.existsSync(noticePath)) {
+      if (retiredParkedNotice(childRun, record, own, readJson(noticePath), record.attempt)) {
+        late.push({ runDir, task: child.task, attempt: record.attempt });
+      }
+      continue;
+    }
     if (Date.now() - (Date.parse(own.finishedAt) || Date.now()) > NOTICE_GRACE_MS) late.push({ runDir, task: child.task, attempt: record.attempt });
   }
   return late;

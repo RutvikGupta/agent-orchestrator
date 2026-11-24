@@ -11,7 +11,7 @@ import path from "node:path";
 import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, nodeBin, parallelAt } from "../config.mjs";
 import { agoText, formatElapsed, table } from "../format.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
-import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, validatePlan, waitsOnText } from "../plan.mjs";
+import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, typeProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
 import { describe, detectOrchestrator, listRuns, listTaskRecords, listTasks, loadRun, loadTask, saveTask, taskLastActivity, validTask } from "../runs.mjs";
 import { die, emit, git, parseDuration, writeJson } from "../util.mjs";
@@ -236,6 +236,10 @@ function dispatchWave(args, until = null) {
   const lines = [];
   for (const entry of progress.ready) {
     try {
+      // A saved plan from an earlier version may hold a retired task type: refuse it rather than
+      // launching it with ordinary defaults.
+      const badType = typeProblem(entry);
+      if (badType) throw new StartRefused(`${badType}; replace or remove it in the plan and record it again (${CLI} plan ${run.id} FILE)`);
       // A plan recorded before tiers were required may lack one: refuse this task, not the batch.
       const noTier = tierProblem(entry);
       if (noTier) throw new StartRefused(`${noTier}; set its tier in the plan and record it again (${CLI} plan ${run.id} FILE)`);
@@ -317,6 +321,7 @@ function dispatchWave(args, until = null) {
       [dryRun ? "wouldStart" : "started"]: started,
       failed, waitingForSlot: waiting, waitingForConflict: conflicts, waitingForMachine: machineWaiting,
       blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
+      manual: [],
     },
     text: lines.join("\n"),
   };
@@ -933,6 +938,7 @@ function recoverRun(run, rows, own, dirty) {
         ...Object.fromEntries(groups.filter((g) => !["awaiting-review", "blocked"].includes(g.key)).map((g) => [g.key, ids(g.items)])),
         "awaiting-review": groups.find((g) => g.key === "awaiting-review").items.map((r) => ({ id: r.id, awaitingReviewMs: r.awaitingReviewMs })),
         blocked: progress.blocked.map((b) => ({ id: b.task.id, waitsOn: b.waitsOn })),
+        manual: [],
         integrated: ids(integrated),
         closedFailed: ids(closedFailed),
         closedStopped: ids(closedStopped),

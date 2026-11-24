@@ -321,6 +321,19 @@ function refusalFor(task, dir, holder) {
   return `task ${task.id} is parked, and its watcher is resuming it right now; run \`status\` to see its new attempt`;
 }
 
+// Whether `task`'s current attempt is parked, or still has an in-progress park claim, an adopted
+// relay in a park claim, or a live park watcher (for example, a retired park whose resume or
+// watcher was already running before upgrade).
+export function hasActivePark(run, task) {
+  if (isParked(run, task)) return true;
+  if (!task?.attempt) return false;
+  const dir = attemptDir(run, task.id, task.attempt);
+  const claim = parkClaim(dir);
+  if (claim.state === "live" || relayRunning(claim.record?.relay)) return true;
+  const watcher = parkWatcher(dir);
+  return Boolean(watcher?.pid && parkWatcherAlive(dir, watcher.generation, watcher.pid) === true);
+}
+
 // For `start` and the watcher: claim a parked task's park before writing anything of the next
 // attempt, so that exactly one resume ends it and a resume that loses changes nothing. A `start`
 // that finds the watcher holding the claim waits up to claimWaitMs() for it to end (its try at a
@@ -333,7 +346,7 @@ function refusalFor(task, dir, holder) {
 // done(task) once the new attempt is saved, which records it and stops the watcher (unless the
 // watcher is the one resuming).
 export function claimParked(run, task, by = "start") {
-  if (!isParked(run, task)) return null;
+  if (by === "watcher" ? !isParked(run, task) : !hasActivePark(run, task)) return null;
   const dir = attemptDir(run, task.id, task.attempt);
   const since = { closedAt: task.closedAt || null, stoppedAt: task.stoppedAt || null };
   let won = takeClaim(run, dir, by, since);
@@ -358,28 +371,30 @@ export function claimParked(run, task, by = "start") {
 }
 
 // For `stop` and `close`, which mark the task stopped or closed first: end a parked task's park and
-// stop its watcher. Never throws. Null when the task is not parked; { stopped: [pids], ended() } once
-// this call holds the park (ended() records that the caller is done); { resumed: attempt } when a
-// resume saved its attempt (or its relay was adopted), which the caller then stops; { busy: holder,
-// relayStopped } when a resume holds the claim, after stopping the relay it started, if any, which
-// it waits up to 10 seconds for; { error } when something failed.
+// stop its watcher. Never throws. Null when the task is not parked and has no active park claim or
+// watcher; { stopped: [pids], ended() } once this call holds the park (ended() records that the
+// caller is done); { resumed: attempt } when a resume saved its attempt (or its relay was adopted),
+// which the caller then stops; { busy: holder, relayStopped } when a resume holds the claim, after
+// stopping the relay it started, if any, which it waits up to 10 seconds for; { error } when
+// something failed.
 export function endPark(run, task, by) {
   try {
-    if (!isParked(run, task)) return null;
+    if (!hasActivePark(run, task)) return null;
     const dir = attemptDir(run, task.id, task.attempt);
-    const until = Date.now() + 10000;
+    const waitMs = process.env.AGENT_ORCH_PARK_CLAIM_WAIT !== undefined ? claimWaitMs() : 10000;
+    const until = Date.now() + waitMs;
     for (;;) {
       const won = takeClaim(run, dir, by);
-      if (won.adopted) return { resumed: won.adopted.attempt, stopped: [] };
+      if (won.adopted) return { resumed: won.adopted.attempt, stopped: stopWatchers(dir) };
       if (won.generation) {
         return { stopped: stopWatchers(dir), ended: () => writeJson(won.file, { ...won.record, ended: true, endedAt: new Date().toISOString() }) };
       }
       const claim = parkClaim(dir);
-      if (claim.record?.attempt) return { resumed: claim.record.attempt, stopped: [] };
+      if (claim.record?.attempt) return { resumed: claim.record.attempt, stopped: stopWatchers(dir) };
       // A resume that started its relay and has not saved it yet: its save keeps the close or stop,
       // so stopping that relay is all that is left.
-      if (relayRunning(claim.record?.relay)) return { busy: won.holder, relayStopped: stopRelay(claim.record.relay.pid), stopped: [] };
-      if (claim.state === "done" || Date.now() >= until) return { busy: won.holder, stopped: [] };
+      if (relayRunning(claim.record?.relay)) return { busy: won.holder, relayStopped: stopRelay(claim.record.relay.pid), stopped: stopWatchers(dir) };
+      if (claim.state === "done" || Date.now() >= until) return { busy: won.holder, stopped: stopWatchers(dir) };
       if (claim.state === "live") spawnSync("sleep", ["0.2"]);
     }
   } catch (error) {

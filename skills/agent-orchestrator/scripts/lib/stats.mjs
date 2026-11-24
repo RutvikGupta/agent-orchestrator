@@ -7,6 +7,7 @@ import { attemptCost, attemptModel, usdText } from "./cost.mjs";
 import { summarizeEvents } from "./events.mjs";
 import { compact, formatElapsed } from "./format.mjs";
 import { phaseOf } from "./lifecycle.mjs";
+import { TASK_TYPES } from "./plan.mjs";
 import { POLICY_AGENTS, loadPolicy, modelLabel, readPolicy } from "./policy.mjs";
 import { reportFields } from "./report.mjs";
 import { attemptAgent, describe, relayAlive } from "./runs.mjs";
@@ -125,7 +126,7 @@ function taskItems(runs) {
     items.push({ ...baseItem(task, results[1]), modelLabel: modelLabel(task),
       tier: task.attemptTiers?.[1] || task.tier || "unknown",
       // Older records may hold the retired "babysit" plan type; treat them as ordinary tasks.
-      type: (task.plan?.type && task.plan.type !== "babysit" ? task.plan.type : null) || (task.readOnly ? "read-only" : "write"),
+      type: (TASK_TYPES.includes(task.plan?.type) ? task.plan.type : null) || (task.readOnly ? "read-only" : "write"),
       integrated: Number(Boolean(task.integratedAt) || row.phase === "integrated"),
       failed: Number(!["completed", "needs-decision", "running", "prepared"].includes(row.state)),
       limitHits: Number(Boolean(row.limitHit)), transientErrors: Number(row.health === "transient-error" || task.retries > 0),

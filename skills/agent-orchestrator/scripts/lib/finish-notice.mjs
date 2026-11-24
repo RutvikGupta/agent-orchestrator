@@ -24,7 +24,7 @@ import { CLI_PATH, NODE_FALLBACK, RUNS_DIR, nodeBin } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { firstLine } from "./format.mjs";
 import { spawnParkWatcher } from "./park.mjs";
-import { NOTICE_FILE, attemptAgent, describe, endedByStop, loadTask, parkBasis, parkedSignal, processStarted, resumeFile, taskDir } from "./runs.mjs";
+import { NOTICE_FILE, attemptAgent, describe, endedByStop, loadTask, parkBasis, parkedSignal, processStarted, resumeFile, retiredParkedNotice, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
 import { SendError, deliverMessage } from "./commands/inbox.mjs";
 
@@ -209,17 +209,24 @@ export function sendFinishNotice(runDir, id, attempt, { pid = null, started = nu
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
     const taken = readJson(claim);
-    if (!stranded(path.dirname(claim), taken)) return null;
-    // Several processes may find the claim stranded at once: the one that creates the recovery file
-    // takes it over, and the others leave it.
-    const generation = taken.interrupt.generation;
+    const isStranded = stranded(path.dirname(claim), taken);
+    const own = !isStranded ? readJson(path.join(path.dirname(claim), "result.json")) : null;
+    const isRetiredPark = !isStranded && retiredParkedNotice(run, task, own, taken, attempt);
+    if (!isStranded && !isRetiredPark) return null;
+    // Several processes may find the claim recoverable at once: the one that creates the recovery
+    // file takes it over, and the others leave it.
+    const recovery = isStranded
+      ? { generation: taken.interrupt.generation, pid: process.pid, at: new Date().toISOString() }
+      : { retiredPark: true, pid: process.pid, at: new Date().toISOString() };
     try {
-      fs.writeFileSync(path.join(path.dirname(claim), RECOVERY_FILE), `${JSON.stringify({ generation, pid: process.pid, at: new Date().toISOString() })}\n`, { flag: "wx" });
+      fs.writeFileSync(path.join(path.dirname(claim), RECOVERY_FILE), `${JSON.stringify(recovery)}\n`, { flag: "wx" });
     } catch (other) {
       if (other.code === "EEXIST") return null;
       throw other;
     }
-    record.recovered = `the interrupt that took this notice (resume claim ${generation}) ended before it resumed the session`;
+    record.recovered = isStranded
+      ? `the interrupt that took this notice (resume claim ${taken.interrupt.generation}) ended before it resumed the session`
+      : "the earlier parked notice came from a retired park; delivering its finish notice now";
     writeJson(claim, record);
   }
   const parent = attemptParent(run, task, attempt);
