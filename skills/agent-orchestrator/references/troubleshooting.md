@@ -5,10 +5,10 @@ you find a bug in the skill itself ("Report a bug in this skill", below).
 
 | Symptom | Action |
 | --- | --- |
-| `start` says that no relay was found | Install the delegate skill: `npx skills add amElnagdy/delegate-skills -g -s claude-delegate` (or `codex-delegate`); check that `AGENT_ORCH_SKILLS_DIR` is not set to another folder |
+| `start` says that no relay was found | Install the delegate skill: `npx skills add amElnagdy/delegate-skills -g -s claude-delegate` (or `codex-delegate`); for Gemini install this repository's `cursor-delegate`; check that `AGENT_ORCH_SKILLS_DIR` is not set to another folder |
 | `<cli>_unavailable` | The CLI is not on `PATH`: install it, or fix `PATH` for non-interactive shells |
-| `failed`, with auth errors in the log | Ask the user to log in: `claude auth login` or `codex login` |
-| `USAGE LIMIT` in `wait` or `result` | The agent's usage window is used up: ping the user and resume on the other agent (`SKILL.md`, "Usage limits") |
+| `failed`, with auth errors in the log | Ask the user to log in: `claude auth login`, `codex login` or `agent login` |
+| `USAGE LIMIT` in `wait` or `result` | The agent's usage window is used up: ping the user and resume on another ready agent (`SKILL.md`, "Usage limits") |
 | You lost track of what runs (restart, compaction) | `$ORCH recover`, then act on what it lists (`SKILL.md`, "Setup") |
 | Results sat unread while the session was alive (the notice says it "is not reading its results") | The session was stopped in a question dialog or a long turn: nothing reaches a Claude Code session while a dialog is open. Answer the dialog, then have the session run `$ORCH recover` and handle what it lists. Register `scripts/hooks/orch-ask.mjs` (`integrations/claude/settings.example.json`), which refuses the dialog while tasks run (`references/monitor.md`, "Question dialogs") |
 | "No agent named ... is reachable" for a session you expect to run, or a `claude --resume` / `start ... -- --session` that is refused because the session is "still running" | The session restarted under a new name, and is not gone. Find its new name by its session id in `ListAgents` or `claude agents --json`, and message that; never resume a running session (`references/messages.md`, "Reaching another session"). `AGENT_ORCH_RESUME_GUARD=off` turns the hook off |

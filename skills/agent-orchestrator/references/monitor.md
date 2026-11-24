@@ -81,7 +81,7 @@ small shell. It checks watched PIDs and message and result files every second. I
 a change, at the deadline, or after `AGENT_ORCH_PARK_MAX` (default `30s`). Other attention, such as
 a task becoming silent, is checked at that maximum interval.
 
-Inside a Claude or Codex task, `nap` also keeps a budget. Each nap adds its duration to a total for
+Inside a Claude, Codex or Gemini task, `nap` also keeps a budget. Each nap adds its duration to a total for
 the attempt (`naps.json` in the attempt's folder). Once the total would pass `AGENT_ORCH_NAP_BUDGET`
 (default `10m`), `nap` refuses with exit 2 and a message that says to park with `park-until`
 (below). Outside a task, and in a command task, `nap` is unchanged, and so is a babysitter's
@@ -91,7 +91,7 @@ the attempt (`naps.json` in the attempt's folder). Once the total would pass `AG
 
 A task that has only a wait left can **park**: it ends its turn, its agent exits and frees its
 memory, and a small watcher wakes the same session later. The watcher is a shell loop with no model.
-A babysitter parks this way (`references/babysit.md`). So can any Claude or Codex task, for a wait of
+A babysitter parks this way (`references/babysit.md`). So can any Claude, Codex or Gemini task, for a wait of
 more than a few minutes.
 
 - **Record the wait.** `$ORCH park-until [--every DUR] [--for DUR] [--why TEXT] -- COMMAND [ARGS...]`
@@ -103,7 +103,7 @@ more than a few minutes.
     `COMMAND` is neither a file nor a program on `PATH`.
   - It prints what the agent must do next: end its turn with `PARKED: waits for <what>` and an
     `orch-result` outcome `parked`.
-- **Who parks.** A babysitter, as before. And any Claude or Codex task whose attempt ends with
+- **Who parks.** A babysitter, as before. And any Claude, Codex or Gemini task whose attempt ends with
   `PARKED:`, when either it recorded a wake condition in that attempt, or a task it started (with
   `start`, in any attempt) had not ended for it when the attempt ended: it still ran or was parked,
   or its finish notice was not read yet. A child that ends just before the parent's result is
@@ -249,3 +249,15 @@ In a run with a plan, `status` also shows:
   that records it (`references/integrate.md`, "A branch merged by hand"). `recover` flags the same.
 
 `--json` adds `plannedTasks`, `unplannedTasks` and `manualMerges`.
+
+## Usage limits
+
+Never weigh any agent's usage when you delegate, choose an agent or tier, or schedule work: never
+defer a task, move it to another agent, or do it yourself because a window is nearly used up, and
+never mention usage in `--why`. Act only when a task stopped on a usage limit (`USAGE LIMIT` in
+`wait` or `result`), never on what `agents` shows, even a window at 100%: team plans add more. Then:
+
+1. Ping the user once per limit, with the agent and the error's reset time if it gives one: a Slack
+   DM through the `post-on-slack` skill where it is available, otherwise in your reply.
+2. Resume the work on another agent if it is ready (a fresh session, a full brief, and a `--why`
+   naming the limit). If all are limited, say so in the ping, and retry once one works again.

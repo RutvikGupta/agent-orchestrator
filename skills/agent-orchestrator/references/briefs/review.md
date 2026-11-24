@@ -1,4 +1,4 @@
-<!-- tier: standard for a small diff, on the agent that did not write it; complex for a large or risky diff -->
+<!-- tier: standard for a small diff, on the agent that did not write it; complex for a large or risky diff; Gemini Neon is a candidate for coding reviews at strong or complex -->
 {{role}}
 
 ## Goal

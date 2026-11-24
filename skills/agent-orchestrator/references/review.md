@@ -1,13 +1,13 @@
 # Reviewing, accepting and reworking a result (step 6)
 
 Read this before you review a result. Also follow the agent's
-`~/.agents/skills/<agent>-delegate/references/review-and-land.md`.
+delegate skill’s `references/review-and-land.md` if present (`cursor-delegate` for Gemini).
 
 ## The review loop
 
 ```bash
 $ORCH result <run> <task-id>   # the report, its checks, and the evidence for them
-$ORCH review <run> <task-id>   # the other model reviews the work, read-only
+$ORCH review <run> <task-id>   # another agent reviews the work, read-only
 $ORCH rework <run> <task-id>   # the review found defects: the author fixes them
 $ORCH accept <run> <task-id> --note "<why>"   # the review found none
 ```
@@ -77,11 +77,11 @@ round (next section).
 ## Review with the other model
 
 ```bash
-$ORCH review <run> <task-id> [--tier <tier>] [--focus "<what to look at hardest>"]
+$ORCH review <run> <task-id> [--agent <agent>] [--tier <tier>] [--focus "<what to look at hardest>"]
 ```
 
-`review` starts the other model (Codex on Claude's work, Claude on Codex's) as a read-only reviewer
-of a finished task. It builds the reviewer's brief itself. When `wait` names the reviewer, read it
+`review` starts another agent (Codex on Claude's or Gemini's work, Claude on Codex's) as a read-only reviewer
+of a finished task. It builds the reviewer's brief itself, including the diff for a Gemini reviewer. When `wait` names the reviewer, read it
 with `result <run> review-<task-id>`, and verify each defect it reports before you act on it.
 
 - **Name.** `review-<task-id>`, then `review-<task-id>-2`, `-3` and on for later rounds. It works in
@@ -122,7 +122,7 @@ line of its own, then its `orch-result` block with one defect per line under `un
 
 ### A reviewer started by hand
 
-`review` always uses the other model, its own brief and its own checklist. For another agent, or a
+`review` uses its default reviewer, its own brief and its own checklist. Use `review --agent <agent>` to choose another reviewer. For a
 brief of your own, write the brief with `brief --type review` (`references/briefing.md`) and start
 the reviewer read-only through `start`. Ask it to end as above, with the `VERDICT:` line and the
 `unresolved` list. Then pass its task to `rework --from`, or record its verdict yourself with
@@ -173,7 +173,7 @@ number goes up. Leave out `--tier`, so that automatic escalation still applies (
 A follow-up is any later attempt of a task: a rework, a resume, or a new attempt after a failure.
 `SKILL.md`, "Choose the agent and model", says how to choose the agent and the tier.
 
-- A follow-up of either agent may omit `--tier`: it keeps the tier of the task's last attempt. A
+- A follow-up of any agent may omit `--tier`: it keeps the tier of the task's last attempt. A
   Claude task recorded before tiers existed resumes at `complex`. A Codex task recorded before tiers
   existed needs `--tier`.
 - It may omit `--why` when it keeps its agent and tier, or when `start` escalates it (the reason is
@@ -181,8 +181,8 @@ A follow-up is any later attempt of a task: a rework, a resume, or a new attempt
 - **Two counted failures** at the task's tier: `start` moves the next attempt one tier up (`standard`
   to `complex`, `complex` to `frontier`), in the task's last session when it has one, and prints a
   `note:` that says so.
-- **Two more failures** at that higher tier, or two at the top tier: `start` refuses. It names the
-  other agent and the tier to start there: the same rank, or the closest lower one. Start it with a
+- **Two more failures** at that higher tier, or two at the top tier: `start` refuses. It names
+  another agent and the tier to start there: the same rank, or the closest lower one. Start it with a
   fresh brief and a new `--why`.
 - **Overrides.** `--tier` picks the tier itself, with no automatic move. A changed `--agent` starts
   a new count for that agent, and needs `--tier` and `--why`. `--no-escalate` keeps the tier and
@@ -206,7 +206,7 @@ A follow-up is any later attempt of a task: a rework, a resume, or a new attempt
 - A large session whose cache is cold (about an hour idle), or that an escalation moves to another
   model, rewrites its whole context when it resumes. Start it fresh with a short brief instead
   (`references/tiers.md`, "Where the cost goes").
-- After two failures on a similar task, start the next one on the other agent.
+- After two failures on a similar task, start the next one on another agent.
 
 ## Accept
 

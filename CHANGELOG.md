@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Gemini 4 as a third agent, through Cursor's `agent` CLI. A new `cursor-delegate` skill runs
+  `agent -p --output-format stream-json` headlessly, writes Claude-shaped `events.jsonl` and a
+  `result.json` with the session id and token usage, resumes sessions with `--session`, and enforces
+  permission rules through a per-run `CURSOR_CONFIG_DIR` (merging the user's and the project's rules,
+  then `--disable-project-configs`). `--agent gemini` runs four tiers (`light` and `standard` on
+  Gemini 4 Hydrogen, `strong` and `complex` on Gemini 4 Neon), priced in `prices.json`. Gemini tasks
+  get enforced deny rules: credential files, force pushes, admin merges, secrets, repository create
+  and delete, and with `--no-publish` commits, pushes and `gh` writes; `--offline` and `--babysit`
+  are refused. Stats, cost, admission, plans, `agents`, the dashboard, reviews (`review --agent`;
+  Codex reviews Gemini's work by default) and the usage-limit hand-over handle three agents.
+  `SKILL.md` makes Gemini Neon the first candidate for coding at `strong` and `complex` until it has
+  a record of 5 tasks of a kind, and `references/tiers.md` gives the evidence for Neon and why Carbon
+  and Argon are left out.
+- The GitHub deny rules that every agent shares now match the other spellings of the same flags
+  (`gh auth status -t`, `gh api --method=POST`), not only `--flag value`.
+
 - A dashboard tab without the send key gets one. The key reaches a browser only in the address that
   `dashboard --open` opens, and `--open` opened nothing while any tab showed the board, so a tab opened
   by its address, or before a server that a login item started, could never send. Each tab now tells

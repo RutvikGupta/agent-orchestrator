@@ -7,9 +7,9 @@ conditions below say when it usually does.
 - **Parallel build:** one write task per independent area, each in its own worktree, then a
   cross-agent read-only review of the combined diff before the final merge. `review` covers one
   task's diff, so brief this review by hand (`brief --type review`).
-- **Second opinion:** the same read-only brief to both agents in the main checkout. Compare their
+- **Second opinion:** the same read-only brief to each reviewing agent in the main checkout. Compare their
   findings, verify each claimed defect yourself, and report only those that survive.
-- **Implement, then review, then fix:** one agent implements; `$ORCH review` has the other model
+- **Implement, then review, then fix:** one agent implements; `$ORCH review` has another agent
   review it read-only; `$ORCH rework` resumes the implementer with the findings you kept
   (`references/review.md`).
 - **Competing hypotheses (debugging):** when a bug has several plausible causes, start one

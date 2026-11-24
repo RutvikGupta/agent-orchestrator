@@ -36,13 +36,13 @@ How it admits a command:
 
 ## Agent admission
 
-`start` and `dispatch` check the whole machine before they launch a Claude or Codex agent. The
+`start` and `dispatch` check the whole machine before they launch a Claude, Codex or Gemini agent. The
 per-run parallel limit (`references/plan.md`, "Parallel limit") still applies: a start must pass
 both.
 
 What it checks:
 
-- **Count.** Live Claude and Codex relays in every run under the state root count, not only your
+- **Count.** Live Claude, Codex and Gemini relays in every run under the state root count, not only your
   run's. Command tasks do not count.
 - **The count limit** is `AGENT_ORCH_MAX_TOTAL`. Its default is 75% of the machine's RAM in GiB,
   rounded, and at least 4: 12 on a 16 GiB machine, 24 on 32 GiB. Setting it to `0` turns off the
