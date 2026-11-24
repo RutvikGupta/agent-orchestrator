@@ -68,13 +68,27 @@ export function attemptModel(task, n, agent, policy = null, dir = null) {
   return (policy && tier && policy[agent]?.tiers?.[tier]?.model) || task.model || null;
 }
 
+// Reread only when the file changes: the dashboard describes every task each second, and only the
+// current attempt's result changes (as runs.mjs caches attemptResult).
+const savedModels = new Map(); // result.json path -> { mtimeMs, size, model }
 function savedModel(dir) {
+  const file = path.join(dir, "result.json");
+  let st;
   try {
-    const model = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"))?.model;
-    return typeof model === "string" ? model : null;
+    st = fs.statSync(file);
   } catch {
+    savedModels.delete(file);
     return null;
   }
+  const hit = savedModels.get(file);
+  if (hit?.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.model;
+  let model = null;
+  try {
+    const value = JSON.parse(fs.readFileSync(file, "utf8"))?.model;
+    if (typeof value === "string") model = value;
+  } catch {}
+  savedModels.set(file, { mtimeMs: st.mtimeMs, size: st.size, model });
+  return model;
 }
 
 // The price of `model`, as { input, cacheWrite, cacheRead, output, longContext? }, or null.
