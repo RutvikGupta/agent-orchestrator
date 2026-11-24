@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The dashboard keeps your place inside the Brief and the final report. The details panel is rebuilt
+  as a running task writes events, every few seconds, and each rebuild put those boxes back at their
+  top while you scrolled them; a rebuild now restores each box's scroll position for the same row.
+
 - A running Gemini task shows a token estimate instead of "at end". Cursor reports usage only in
   its final event, so the cursor-delegate relay estimates each model call from the stream (context
   read, mostly from cache, and what the call wrote) and puts it on the call's events, marked as an
