@@ -1,11 +1,41 @@
 // Settings shared by every module: where the CLI, the skill, and the state live (and the
 // environment variables that move them), the nesting limits, and the supported agents.
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOME = os.homedir();
+
+// The Node binary that the processes the CLI starts run: relays, finish and park watchers, the
+// idle shell of `wait` and `nap`, interrupt helpers, the dashboard. process.execPath is the resolved
+// binary, which for Homebrew is a versioned Cellar path that an upgrade or a switch of versions
+// deletes; every watcher started with it then fails to run Node, and a parked task never wakes. So
+// prefer a `node` on PATH that is a link to the same binary (Homebrew's /opt/homebrew/bin/node
+// follows each upgrade), else process.execPath while it exists, else the first `node` on PATH.
+// The shell scripts that hold this path for a long time fall back to PATH as well (NODE_FALLBACK).
+export function nodeBin(env = process.env) {
+  const own = process.execPath;
+  const exists = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+  let real = null;
+  try { real = fs.realpathSync(own); } catch {}
+  const name = process.platform === "win32" ? "node.exe" : "node";
+  const onPath = String(env.PATH || "").split(path.delimiter).filter((dir) => dir && path.isAbsolute(dir)).map((dir) => path.join(dir, name));
+  if (real) {
+    for (const candidate of onPath) {
+      if (candidate === real) continue;
+      try { if (fs.realpathSync(candidate) === real) return candidate; } catch {}
+    }
+    return own;
+  }
+  return onPath.find(exists) || own;
+}
+
+// Shell code that replaces the Node binary in "$1" with the first `node` on PATH when "$1" is an
+// absolute path that is no longer an executable file: a watcher started before an upgrade still runs
+// Node after it. A command named without a path (as tests do with `echo`) is left alone.
+export const NODE_FALLBACK = 'case "$1" in /*) [ -x "$1" ] || { _n=$(command -v node 2>/dev/null) && [ -n "$_n" ] && shift && set -- "$_n" "$@"; };; esac;';
 // The CLI that briefs, hints, and `dashboard --detach` name: scripts/orch.mjs, next to lib/.
 export const CLI_PATH = fileURLToPath(new URL("../orch.mjs", import.meta.url));
 export const SKILL_DIR = path.dirname(path.dirname(CLI_PATH));

@@ -7,6 +7,7 @@ import path from "node:path";
 import http from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { nodeBin } from "./config.mjs";
 
 const CACHE_MS = 5000;
 const TIMEOUT_MS = 1900;
@@ -120,7 +121,7 @@ export function codexThreads() {
     // shorter than CODEX_HOME, which matters for the Unix socket path length limit.
     const socketPath = fs.realpathSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
       "app-server-control", "app-server-control.sock"));
-    return { cmd: process.execPath, args: [self, "--read-codex-status", socketPath] };
+    return { cmd: nodeBin(), args: [self, "--read-codex-status", socketPath] };
   }, (threads) => {
     if (!Array.isArray(threads)) return null;
     const result = new Map();

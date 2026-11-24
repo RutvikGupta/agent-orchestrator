@@ -56,7 +56,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HANDOFF_RULES } from "./briefs.mjs";
-import { CLI_PATH } from "./config.mjs";
+import { CLI_PATH, NODE_FALLBACK, nodeBin } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { durationText, shortText } from "./format.mjs";
 import { INBOX_FILE, fromAgent, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
@@ -83,7 +83,7 @@ const DONE = 3;
 // generation, $5 the task's inbox file, $6 the seconds between checks, $7 the seconds per step.
 // It runs `check` at once, whenever the inbox grows, and every $6 seconds; `check` exiting 3 (or
 // Node missing) ends it, and 30 failed checks in a row end it too.
-export const PARK_SCRIPT = 'n=0; size=-; fails=0; while :; do now=$(wc -c 2>/dev/null < "$5"); if [ "$n" -le 0 ] || [ "$now" != "$size" ]; then size=$now; "$1" "$2" check "$3" "$4"; rc=$?; case $rc in 0) fails=0 ;; 3|126|127) exit 0 ;; *) fails=$((fails+1)); [ "$fails" -lt 30 ] || exit 1 ;; esac; n=$6; fi; sleep "$7"; n=$((n-$7)); done';
+export const PARK_SCRIPT = `n=0; size=-; fails=0; while :; do now=$(wc -c 2>/dev/null < "$5"); if [ "$n" -le 0 ] || [ "$now" != "$size" ]; then size=$now; ${NODE_FALLBACK} "$1" "$2" check "$3" "$4"; rc=$?; case $rc in 0) fails=0 ;; 3|126|127) exit 0 ;; *) fails=$((fails+1)); [ "$fails" -lt 30 ] || exit 1 ;; esac; n=$6; fi; sleep "$7"; n=$((n-$7)); done`;
 
 // Seconds between the watcher's checks: AGENT_ORCH_PARK_INTERVAL (90s, 2m, ...), default 60s, at
 // least 1s. A bad value falls back to the default rather than stopping the caller (the dashboard).
@@ -316,7 +316,7 @@ export function spawnParkWatcher(run, task, { by = "park", table = null } = {}) 
     // Detached, and on macOS started through launchd, outside the terminal application (detach.mjs).
     const { pid } = startDetached({
       command: "/bin/sh",
-      args: ["-c", PARK_SCRIPT, "park-watch", process.execPath, SCRIPT, dir, String(generation), inbox, String(seconds), String(Math.min(5, seconds))],
+      args: ["-c", PARK_SCRIPT, "park-watch", nodeBin(), SCRIPT, dir, String(generation), inbox, String(seconds), String(Math.min(5, seconds))],
       cwd: dir,
       near: [run.repo, task.cd],
       env: parkEnv(task),

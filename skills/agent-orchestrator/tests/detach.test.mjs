@@ -302,7 +302,8 @@ test('on macOS a relay starts through a one-off launchd job, in its folder, with
   // files were private to the user while they existed, and are all gone now.
   assert.deepEqual(calls[0].modes, { jobs: '700', folder: '700', job: '600', spec: '600' });
   assert.equal(calls[0].args.length, 3);
-  assert.equal(calls[0].args[0], process.execPath);
+  // Node by a path that survives upgrades (config.mjs nodeBin), which runs the same binary.
+  assert.equal(fs.realpathSync(calls[0].args[0]), fs.realpathSync(process.execPath));
   assert.match(calls[0].args[1], /scripts\/detach-helper\.mjs$/);
   assert.equal(calls[0].args[2], path.join(jobsFolder(f), task.launch.label, 'spec.json'));
   for (const job of fake.jobs()) {

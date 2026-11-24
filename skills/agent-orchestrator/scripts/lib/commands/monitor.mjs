@@ -13,7 +13,7 @@ import { reviveParked } from "../park.mjs";
 import { reportHints } from "../report.mjs";
 import { retryTask } from "../retry.mjs";
 import { taskAttention } from "../escalate.mjs";
-import { CLI_PATH, RUNS_DIR, WAIT_POLL_MS } from "../config.mjs";
+import { CLI_PATH, NODE_FALLBACK, RUNS_DIR, WAIT_POLL_MS, nodeBin } from "../config.mjs";
 import { addresseeOf } from "../dashboard-state.mjs";
 import { launcherLabel, markNoticesSeen, mayAct, noticeText, noticesFile, ownershipOf, touchOwner, unseenNotices } from "../ownership.mjs";
 import { describe, isParked, listRuns, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, shownName } from "../runs.mjs";
@@ -173,6 +173,7 @@ done
 if [ "$woke" -eq 0 ] && [ "$tail" != 0 ]; then sleep "$tail" & child=$!; wait "$child"; child=; fi
 n=$1; shift
 while [ "$n" -gt 0 ]; do shift; n=$((n-1)); done
+${NODE_FALLBACK}
 exec "$@" "$file" "$dir"`;
     const ms = Math.min(max, Math.max(0, deadline - Date.now()));
     const watchedPids = [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
@@ -180,7 +181,7 @@ exec "$@" "$file" "$dir"`;
     process.execve("/bin/sh", ["sh", "-c", script, label,
       file, dir, String(Math.floor(ms / 1000)), String((ms % 1000) / 1000),
       String(watchedPids.length), ...watchedPids.map(String), String(watchedFiles.length), ...watchedFiles,
-      process.execPath, ...process.execArgv, "--input-type=module", "-e", source], process.env);
+      nodeBin(), ...process.execArgv, "--input-type=module", "-e", source], process.env);
   } catch {
     // A missing execve facility or unwritable temporary folder must not break waiting.
   } finally {

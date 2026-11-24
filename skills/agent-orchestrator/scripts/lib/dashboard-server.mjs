@@ -2,7 +2,7 @@
 // pushes a "change" event to open tabs as soon as an agent writes.
 
 import { awakeClock } from "./awake-clock.mjs";
-import { CLI_PATH } from "./config.mjs";
+import { CLI_PATH, nodeBin } from "./config.mjs";
 import { fork, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -193,6 +193,7 @@ export async function serveDashboard({ host, port, args }) {
   let lastPage = null;
   let address = null;
   const tabs = new Set(); // presence streams of the open tabs
+  const keyedTabs = new Set(); // those of tabs that hold the send key (`?keyed=1`)
   // Only a worker process (dashboard-worker.mjs) builds the board, so a slow build never holds up
   // HTTP: reads get the last board at once. One build runs at a time, and there is never more than
   // one worker: a worker that fails, or whose build runs past AGENT_ORCH_BUILD_KILL_TIMEOUT (5m), or
@@ -540,16 +541,18 @@ export async function serveDashboard({ host, port, args }) {
       const asset = page.get(url.pathname);
       if (asset) return send(200, asset.type, asset.body);
       if (url.pathname === "/api/health") {
-        return send(200, "application/json", JSON.stringify({ pid: process.pid, url: address, startedAt, pageAgoMs: lastPage ? Date.now() - lastPage : null, tabs: tabs.size, disk: diskReading() }));
+        return send(200, "application/json", JSON.stringify({ pid: process.pid, url: address, startedAt, pageAgoMs: lastPage ? Date.now() - lastPage : null, tabs: tabs.size, keyedTabs: keyedTabs.size, disk: diskReading() }));
       }
       if (url.pathname === "/api/presence") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", "x-orch-server": startedAt });
         res.write(": open\n\n");
         tabs.add(res);
+        if (url.searchParams.get("keyed") === "1") keyedTabs.add(res);
         const ping = setInterval(() => res.write(": ping\n\n"), 25000);
         req.on("close", () => {
           clearInterval(ping);
           tabs.delete(res);
+          keyedTabs.delete(res);
           lastPage = Date.now();
         });
         return;
@@ -728,7 +731,7 @@ export async function serveDashboard({ host, port, args }) {
   const pump = () => {
     if (housekeeper || !queue.length) return;
     const chore = queue.shift();
-    const child = spawn(process.execPath, [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
+    const child = spawn(nodeBin(), [CLI_PATH, ...chore.argv], { stdio: ["ignore", "inherit", "inherit"], env: chore.env });
     housekeeper = { chore, child };
     let done = false;
     const finish = () => {

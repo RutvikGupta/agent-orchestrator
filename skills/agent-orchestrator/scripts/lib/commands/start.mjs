@@ -4,7 +4,7 @@ import { admissionReason, admissionEnabled, admissionSettingsError, AdmissionRev
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, parallelAt, relayFolder } from "../config.mjs";
+import { AGENTS, CLI_PATH, DEPTH, MAX_NEST_DEPTH, SKILL_DIR, SKILL_ROOTS, nodeBin, parallelAt, relayFolder } from "../config.mjs";
 import { HANDOFF_RULES, costNote, decisionNote, handoffNote, nestingNote, publishHoldNote, waitingChildrenNote, watchTierNote } from "../briefs.mjs";
 import { priceOf } from "../cost.mjs";
 import { startDetached } from "../detach.mjs";
@@ -746,7 +746,7 @@ function failedStart(id, outDir, error) {
 function spawnRelay(run, id, relay, relayArgs, outDir, cd, env) {
   const log = path.join(outDir, "relay.log");
   return startDetached({
-    command: process.execPath,
+    command: nodeBin(),
     args: [relay, ...relayArgs],
     cwd: cd,
     near: [run.repo],

@@ -167,9 +167,10 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Same tree as a local web page (127.0.0.1), with each session's
                                   reason for its agent, final report, live event log, and both
                                   agents' usage limits. Reuses a dashboard that is already running.
-                                  --open opens the default browser unless a tab already shows it,
-                                  handing it the key that lets it message running tasks; --new-tab
-                                  opens one anyway, to give a browser that lacks it the key.
+                                  --open opens the default browser unless a tab that holds the
+                                  key already shows it, handing it the key that lets it message
+                                  running tasks; --new-tab opens one anyway, to give a browser that
+                                  lacks it the key.
                                   --detach runs it in the background until no task is running and
                                   no tab has shown it for --idle-exit (default 30m); --stop ends it.
                                   Without --detach it runs until Ctrl-C
