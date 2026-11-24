@@ -144,7 +144,10 @@ function prepareConfig(dir, opts, root, mergedFiles) {
   const allow = [...new Set([...merged.allow, ...opts.allow])];
   // Cursor uses Write for both Write and StrReplace. Its glob matcher needs **/* for absolute paths.
   const deny = [...new Set([...merged.deny, ...opts.deny, ...(opts.readOnly ? ["Write(**)", "Write(**/*)"] : [])])];
-  fs.writeFileSync(path.join(dir, "cli-config.json"), JSON.stringify({ version: 1, permissions: { allow, deny } }) + "\n", { mode: 0o600 });
+  // Delegated work is committed under the repository's own rules, so Cursor adds no co-author
+  // trailer to commits and no attribution to pull requests (its default turns both on).
+  const attribution = { attributeCommitsToAgent: false, attributePRsToAgent: false };
+  fs.writeFileSync(path.join(dir, "cli-config.json"), JSON.stringify({ version: 1, permissions: { allow, deny }, attribution }) + "\n", { mode: 0o600 });
   const chats = path.join(userDir, "chats");
   fs.mkdirSync(chats, { recursive: true, mode: 0o700 });
   fs.symlinkSync(chats, path.join(dir, "chats"), "junction");
