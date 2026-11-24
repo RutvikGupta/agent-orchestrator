@@ -51,6 +51,18 @@ if (args[0] === "--version") {
       events.push({ ...result, result: first + second });
       raw = events.map((e) => JSON.stringify(e)).join("\\n") + "\\n";
     }
+    if (mode === "glued-message") {
+      // One assistant event that holds two closing messages: the second runs into the first one's
+      // closing fence, as Cursor joins them.
+      const fence = "\\u0060\\u0060\\u0060";
+      const text = "Report one\\n\\n" + fence + "orch-result\\n{\\"outcome\\":\\"partial\\"}\\n" + fence
+        + "PARKED: waits for the suite\\n\\nStill waiting.\\n\\n" + fence + "orch-result\\n{\\"outcome\\":\\"parked\\"}\\n" + fence;
+      const events = raw.trimEnd().split("\\n").map((line) => JSON.parse(line)).filter((e) => e.type !== "assistant");
+      const result = events.pop();
+      events.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] }, session_id: result.session_id });
+      events.push({ ...result, result: text });
+      raw = events.map((e) => JSON.stringify(e)).join("\\n") + "\\n";
+    }
     if (mode === "custom-tools") {
       const events = raw.trimEnd().split("\\n");
       const result = events.pop();
@@ -484,4 +496,18 @@ test("the final message is Cursor's last message, not its result text that joins
   const texts = f.events().filter((e) => e.type === "assistant").flatMap((e) => e.message.content).filter((b) => b.type === "text").map((b) => b.text);
   assert.equal(texts.length, 2);
   assert.match(texts[0], /^Report one/);
+});
+
+test("a closing message glued to the previous one's closing fence becomes the final message on its own", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run([], { env: { FAKE_MODE: "glued-message" } }).status, 0);
+  const final = f.result().finalMessage;
+  assert.equal(final.split("\n")[0], "PARKED: waits for the suite");
+  assert.equal((final.match(/```orch-result/g) || []).length, 1);
+  assert.match(final, /"outcome":"parked"/);
+  assert.equal(f.artifact("final.txt"), final);
+  // A message whose fences are all ordinary keeps every line.
+  const g = fixture(t);
+  assert.equal(g.run([], { env: { FAKE_FIXTURE: "simple-text" } }).status, 0);
+  assert.equal(g.result().finalMessage, "pong");
 });

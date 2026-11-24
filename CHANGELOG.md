@@ -6,10 +6,11 @@
   to its agent by default, so every commit a Gemini task made ended with `Co-authored-by: Cursor`.
   The relay's per-run config now turns both off, whatever the user's own Cursor config says.
 
-- A Gemini task's final message is its last message. Cursor's result text joins every closing
-  message with no separator, so a task that wrote two closing messages had its `PARKED:` line in
-  the middle of the text and did not park. The relay now keeps the last message as the final
-  message (Cursor's result text only when no message came, or for an error result).
+- A Gemini task's final message is its last message. Cursor joins a model's closing messages with no
+  separator, in its result text and sometimes inside one assistant event, so a task that wrote two
+  closing messages had its `PARKED:` line glued to the first one's closing fence and did not park.
+  The relay now keeps the last message: the last assistant event, split at a closing fence that has
+  text after it (Cursor's result text only when no message came, or for an error result).
 
 - The dashboard keeps your place inside the Brief and the final report. The details panel is rebuilt
   as a running task writes events, every few seconds, and each rebuild put those boxes back at their
