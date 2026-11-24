@@ -1,7 +1,13 @@
 # Babysitting a pull request (step 8)
 
-Read this before you start a babysitter, and when one finishes. `SKILL.md` step 8 says when to start
-one.
+**Retired: never start a babysitter.** Pull requests are not babysat (`SKILL.md` step 8): no agent
+starts a babysitter task, watches a pull request, or sends one to a code-review agent. This file only
+describes the babysitter code that remains until it is removed.
+
+A babysitter runs `standard` by default (`--tier light` or `complex`; `frontier` is refused). Work that
+needs a code change, a reply that explains or defends code, or a conflicting rebase ends its attempt
+with a last line `NEEDS FIX: PR #<n> <one line>`; the orchestrator then resumes the same session at
+once on `complex` to fix, push, reply and park, and the next wake resumes at the watch tier.
 
 ## Brief it
 
@@ -66,16 +72,13 @@ implementer hands its pull request over instead ("Hand it over from a Codex or G
 ### Hand it over from a Codex or Gemini implementer
 
 Claude cannot continue a Codex or Gemini session, so a pull request that either task implemented goes to a new
-babysitter task. That task starts from the babysit brief and the implementer's handoff note:
+babysitter task. That task starts from the babysit brief and the implementer's final report:
 
-1. The implement brief (`references/briefs/implement.md`, "Handoff note") asks every implementer
-   whose work becomes a pull request to write a handoff note before it finishes: the pull request
-   and its branch, what it built, the decisions it took and why, the review items still open, and
-   the gates it ran. It writes the note to a file and names that file in its final report.
-2. Read the report with `$ORCH result <run> <task>`, and find the note's path there.
-3. Write the babysit brief as in "Brief it", and add the note's text at its end, under a heading
-   "Handoff note from the implementer".
-4. Start the babysitter as in "Start it". It watches at `standard` like any other.
+1. Read the report with `$ORCH result <run> <task>`: what it built, the decisions it took, and the
+   gates it ran.
+2. Write the babysit brief as in "Brief it", and add a summary of the report at its end, under a
+   heading "From the implementer", with the pull request and its branch.
+3. Start the babysitter as in "Start it". It watches at `standard` like any other.
 
 **Make it a babysitter; never tell it by message to babysit.** An implementer that a message tells
 to watch its pull request stays an implementer. It waits on its own timers or background scripts:

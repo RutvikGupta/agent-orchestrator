@@ -36,14 +36,6 @@ gate too: use it as that section says, and report it as a check.
 
 Change an existing test only when the goal changes the behavior it checks, and say so in your report.
 
-## Handoff note
-
-If your work becomes a pull request, write a handoff note before you finish, so that a babysitter
-can take the pull request over without your session. Put it in a file outside the repository, for
-example `$TMPDIR/handoff-<branch>.md`, and give its path in your final report. Use at most 60
-lines: the pull request and its branch, what you built, the decisions you took and why, the review
-items still open, and the gates you ran with their results.
-
 ## Report contract
 
 Use at most about 25 lines before the `orch-result` block; that block is not counted. Give one

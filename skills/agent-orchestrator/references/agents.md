@@ -44,9 +44,8 @@ These are hard limits of the relays on this machine:
 ## Practical notes
 
 - **Implementation is ordinary work for Codex.** Its write mode has the network and the user's tools
-  (`danger-full-access`), so it builds, tests and pushes as a Claude task does. Its pull request goes to
-  a Sonnet babysitter, which starts from the implementer's handoff note (`references/babysit.md`,
-  "Keep it with its implementer"). Which agent implements a task is chosen by the agents' records
+  (`danger-full-access`), so it builds, tests and pushes as a Claude task does. Like every implementer, it
+  reports the pull request it opens, and nobody babysits it (`SKILL.md`, step 8). Which agent implements a task is chosen by the agents' records
   (`SKILL.md`, "Choose the agent and model").
 - **Gemini is a third implementer.** It is Gemini 4 through Cursor's `agent` CLI, started with
   `--agent gemini` and run by the `cursor-delegate` relay. Its `light` and `standard` tiers run
@@ -57,9 +56,8 @@ These are hard limits of the relays on this machine:
   `CURSOR_CONFIG_DIR` per run and writes `result.json` (session and usage), Claude-shaped
   `events.jsonl` and raw `cursor-events.jsonl`. Its flags include `--brief`, `--cd`, `--out-dir`,
   `--model`, `--effort`, `--read-only`, `--sandbox`, `--deny`, `--allow`, `--session` and `--timeout`.
-  The relay combines model and effort as Cursor's `ID-LEVEL`. A Gemini implementer's
-  pull request goes to a Claude babysitter, which starts from the implementer's handoff note, as a
-  Codex implementer's does (`references/babysit.md`, "Keep it with its implementer"). When to choose
+  The relay combines model and effort as Cursor's `ID-LEVEL`. Like every implementer, it
+  reports the pull request it opens, and nobody babysits it (`SKILL.md`, step 8). When to choose
   it: `references/tiers.md`, "Choosing between the agents".
 - **Who reviews.** `review` starts another agent as the read-only reviewer: Codex for Claude's work,
   Claude for Codex's, and Codex for Gemini's. `review --agent <agent>` picks a different one. A
