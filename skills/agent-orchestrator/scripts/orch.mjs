@@ -31,6 +31,7 @@ import { cmdQuestions } from "./lib/commands/questions.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdSkill } from "./lib/commands/skill.mjs";
 import { cmdStats } from "./lib/commands/stats.mjs";
+import { cmdPick } from "./lib/commands/pick.mjs";
 import { cmdCost } from "./lib/commands/cost.mjs";
 import { cmdModel } from "./lib/commands/model.mjs";
 import { cmdRename, resolveTaskNames } from "./lib/commands/rename.mjs";
@@ -371,6 +372,11 @@ Usage: node orch.mjs <command> [args] [--json]
   stats [RUN] [--since DUR]        Task outcomes by agent/model, type and agent/tier/type (default: last 30d),
                                   with input tokens and dollars per accepted task (all the group's
                                   input and cost over its accepted tasks)
+  pick --type TYPE --tier TIER [--needs web|babysit|offline] [--since DUR]
+                                  Choose the agent for a task type and tier by the rule in
+                                  SKILL.md (alternation below 5 tasks, then first-try
+                                  acceptance and cost per accepted over --since, default 30d),
+                                  and print a ready --why line. --needs may be repeated
   cost [RUN TASK]                 What a task and the tasks it started have cost, against its tier's
                                   budget (inside a task, its own); without a task, what each tier
                                   costs here per accepted task. API-equivalent dollars.
@@ -440,6 +446,7 @@ const specs = {
   cleanup: { bool: ["force", "delete-branches", "adopt"] },
   runs: {},
   stats: { value: ["since"] },
+  pick: { value: ["type", "tier", "since"], multi: ["needs"] },
   cost: {},
   skill: { bool: ["loaded"] },
   "pr-watch": { value: ["repo", "timeout", "interval"], bool: ["once"] },
@@ -486,6 +493,7 @@ const handlers = {
   gc: cmdGc,
   runs: cmdRuns,
   stats: cmdStats,
+  pick: cmdPick,
   cost: cmdCost,
   skill: cmdSkill,
   "pr-watch": cmdPrWatch,

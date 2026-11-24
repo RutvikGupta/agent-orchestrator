@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `orch.mjs pick --type <type> --tier <tier> [--needs web|babysit|offline] [--since 30d] [--json]`
+  applies the agent-choice rule from `SKILL.md` (alternation under 5 finished tasks with Gemini
+  first for coding at `strong`/`complex`, else lowest default budget; then first-try acceptance and
+  cost per accepted within 10 points) and prints a ready `--why` line.
 - Gemini 4 as a third agent, through Cursor's `agent` CLI. A new `cursor-delegate` skill runs
   `agent -p --output-format stream-json` headlessly, writes Claude-shaped `events.jsonl` and a
   `result.json` with the session id and token usage, resumes sessions with `--session`, and enforces

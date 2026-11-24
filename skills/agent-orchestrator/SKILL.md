@@ -112,6 +112,7 @@ prefer an agent because it is the CLI you run in, and none is the default.
   coding indexes at a lower price per token. While Gemini has under 5 finished tasks of that coding
   kind, its turn comes first. Then the records decide. Never Gemini for a babysitter (Claude only),
   live web research (Codex only), `frontier` work, or `--offline` (`references/tiers.md`).
+- `$ORCH pick --type <type> --tier <tier>` applies this rule and prints the `--why`.
 - **Weigh cost against complexity.** The table sets the lowest tier the task's complexity allows
   (costly or subtle mistakes need `complex`). At or above it, take the tier and agent with the lowest
   cost per accepted task (`$ORCH cost`; `$ORCH stats`), never a bigger model for comfort. In November

@@ -103,6 +103,10 @@ export function parseArgs(argv, spec) {
       const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
       if (value === undefined) die(`--${name} needs a value`, 2);
       out[name] = value;
+    } else if ((spec.multi || []).includes(name)) {
+      const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
+      if (value === undefined) die(`--${name} needs a value`, 2);
+      (out[name] ??= []).push(value);
     } else {
       die(`unknown option --${name}`, 2);
     }
