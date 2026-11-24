@@ -255,6 +255,10 @@ function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.le
 // arrive; a reader who scrolled up keeps their place, and the jump buttons take them back down.
 const atBottom=({scrollTop,scrollHeight,clientHeight})=>scrollTop+clientHeight>=scrollHeight-40;
 const logScroll=(same,panel)=>!same||atBottom(panel)?"bottom":panel.scrollTop;
+// Boxes inside the panel scroll on their own (the Brief, the final report). A rebuild keeps where
+// the reader left each one, by its data-sk key, while the panel still shows the same row.
+function innerScroll(d,same){return same?new Map([...d.querySelectorAll("[data-sk]")].map(e=>[e.dataset.sk,e.scrollTop])):new Map()}
+function restoreInner(d,saved){for(const e of d.querySelectorAll("[data-sk]")){const y=saved.get(e.dataset.sk);if(y)e.scrollTop=y}}
 // The latest log fetched for each recently shown row, so a row paints at once when chosen. A
 // row's log starts loading when the pointer reaches it, so it is usually ready by the click, and
 // a row never has two loads at once.
@@ -336,7 +340,7 @@ function paint(key,t,ext,ev,keep){
   const up=t.taskAgent?state.find(r=>r.id===key.split("/")[0])?.tasks.find(x=>x.key===t.parentKey):null; // the task that started this agent
   const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(failed?"!":"")+"|"+agentList(key,t).map(x=>x.key+x.state+x.model+x.taskAttempt).join()+(up?up.attempt:"")+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
   const d=document.getElementById("detail");if(holding(d)){behind=true;return}lastDetail=sig;
-  const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d);
+  const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d),inner=innerScroll(d,d.dataset.sel===key);
   const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
   const a=document.activeElement,focus=a&&d.dataset.sel===key&&d.contains(a)?focusedOn(d,PANEL_FOCUS):null;
   d.replaceChildren($("div",{class:"dhead"},$("h2",{},(t.name||t.id)+" · "+t.agent+" · ",$("span",{class:"state "+cls(t.phase==="parked"?"parked":t.state)},t.phase==="parked"?"parked":t.state)),
@@ -348,14 +352,14 @@ function paint(key,t,ext,ev,keep){
     ...(own?[...contextView(t,n),...briefView(key,t,n),...attemptsView(key,t,n)]:[]),
     ...reportView(t),
     ...reviewView(t),
-    ...(message?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final"},$("pre",{},message))]:[]),
+    ...(message?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final","data-sk":"final"},$("pre",{},message))]:[]),
     ...(t.main?[$("p",{class:"muted"},"The session that launched this run. Its counts cover the whole session and are not in the run's totals.")]:[]),
     ...messagesView(key,t),
     $("h3",{},t.external&&!src?"Events: its transcript was not found":failed&&!good?"Events: could not be read, trying again"
         :(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":"")+(failed?"; the latest read failed, trying again":""):" (loading…)"),
       past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
     ...rows.map(eventView));
-  d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;
+  d.dataset.sel=key;d.scrollTop=to==="bottom"?d.scrollHeight:to;restoreInner(d,inner);
   if(focus)refocus(d,focus);
 }
 // The receipts of a task that orch.mjs started: what it was given (a Context line, and its brief,
@@ -393,7 +397,7 @@ function toggleBrief(key,t,n,open){if(open===(briefOpen.get(key)===n))return;
   if(!open){briefOpen.delete(key);return}
   briefOpen.set(key,n);loadBrief(key,t,n,true);repaint(key)}
 function briefView(key,t,n){const b=briefs.get(briefKey(t,n)),open=briefOpen.get(key)===n;
-  const body=!open?null:b?.text!=null?$("div",{class:"final"},$("pre",{},b.text)):$("p",{class:"muted"},b?.error?"Not loaded: "+b.error+".":b?"Loading…":"Not loaded; close and open the Brief to load it.");
+  const body=!open?null:b?.text!=null?$("div",{class:"final","data-sk":"brief:"+n},$("pre",{},b.text)):$("p",{class:"muted"},b?.error?"Not loaded: "+b.error+".":b?"Loading…":"Not loaded; close and open the Brief to load it.");
   return[$("details",{class:"brief",...(open?{open:""}:{}),ontoggle:e=>toggleBrief(key,t,n,e.currentTarget.open)},
     $("summary",{class:"bsum"},"Brief",t.attempt>1?$("span",{class:"muted"}," · attempt "+n):null),body)]}
 // One line: the brief's size, whether the attempt resumed an earlier session (and which), how many

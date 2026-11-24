@@ -103,6 +103,23 @@ test('a new dashboard server reloads the browser and SSE change calls the refres
   assert.equal(listeners.change, soon);
 });
 
+test('a panel rebuild keeps where the reader scrolled inside the Brief and the final report', () => {
+  const box = (sk, scrollTop = 0) => ({ dataset: { sk }, scrollTop });
+  let shown = [box('brief:2', 300), box('final', 50), box('other')];
+  const panel = { querySelectorAll: (sel) => { assert.equal(sel, '[data-sk]'); return shown; } };
+  const context = vm.createContext({ Map });
+  vm.runInContext(snippet('function innerScroll(', '// The latest log fetched'), context);
+  const saved = context.innerScroll(panel, true);
+  // The rebuild puts new boxes in place, scrolled to the top; the closed box is gone.
+  shown = [box('brief:2'), box('final')];
+  context.restoreInner(panel, saved);
+  assert.deepEqual(shown.map((b) => b.scrollTop), [300, 50]);
+  // Another row, or another attempt's Brief, starts at the top.
+  shown = [box('brief:3'), box('final')];
+  context.restoreInner(panel, context.innerScroll(panel, false));
+  assert.deepEqual(shown.map((b) => b.scrollTop), [0, 0]);
+});
+
 test('a tab reopens its presence stream as keyed once it gets the send key, and only then', () => {
   const opened = [], closed = [];
   let key = null;
@@ -201,7 +218,8 @@ test('selecting a row opens its detail panel and schedules its live log', async 
 
 test('details fetch transcript logs for main and native rows and attempt logs for launched tasks', async () => {
   const fetched = [];
-  const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, replaceChildren(...children) { this.children = children; } };
+  // querySelectorAll: the panel holds no inner scrolling box here (innerScroll, restoreInner).
+  const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, querySelectorAll: () => [], replaceChildren(...children) { this.children = children; } };
   const context = vm.createContext({
     sel: null, state: [], lastDetail: '', holding: () => false,
     document: { getElementById: () => panel },
