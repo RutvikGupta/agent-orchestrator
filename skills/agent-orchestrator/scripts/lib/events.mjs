@@ -49,11 +49,17 @@ export function newSummary() {
   };
 }
 
+// Which shape an agent's relay events have, so which parser reads them: Codex's `exec --json`
+// events, or Claude Code's stream-json, which the cursor-delegate relay writes for a gemini task (and
+// the command relay for a command task). Transcripts of hosts' own sessions name their parser.
+const EVENT_SHAPES = { claude: "claude", codex: "codex", gemini: "claude", command: "claude" };
+export const eventShape = (agent) => (Object.hasOwn(EVENT_SHAPES, agent) ? EVENT_SHAPES[agent] : "claude");
+
 // The foreground shell command the session is in now, from its summary, or null: the latest Claude
 // Bash call without a result that does not run in the background (the session's or a sub-agent's),
 // or the latest Codex command that has not completed.
 export function shellNow(agent, s) {
-  if (agent === "codex") return Object.values(s?.openCommands || {}).at(-1) ?? null;
+  if (eventShape(agent) === "codex") return Object.values(s?.openCommands || {}).at(-1) ?? null;
   const tool = Object.values(s?.openTools || {}).filter((t) => t.name === "Bash" && !t.background && t.command && !t.ended).at(-1);
   return tool ? tool.command : null;
 }
@@ -138,8 +144,9 @@ export function summarizeEvents(agent, file, cwd) {
     entry = loadSaved(file, `events:${agent}`) || { offset: 0, rest: "", summary: newSummary() };
     eventCache.set(file, entry);
   }
-  const apply = agent === "codex" ? applyCodexEvent : applyClaudeEvent;
-  const act = agent === "codex" ? codexActionEvent : claudeActionEvent;
+  const codex = eventShape(agent) === "codex";
+  const apply = codex ? applyCodexEvent : applyClaudeEvent;
+  const act = codex ? codexActionEvent : claudeActionEvent;
   const s = entry.summary;
   const tracker = actionTracker(s);
   const limitsBefore = s.limits;
@@ -653,7 +660,7 @@ export function commandRuns(agent, file) {
     entry = { offset: 0, rest: "", state: { runs: [], byId: new Map() } };
     commandCache.set(file, entry);
   }
-  const apply = agent === "codex" ? codexCommandEvent : claudeCommandEvent;
+  const apply = eventShape(agent) === "codex" ? codexCommandEvent : claudeCommandEvent;
   readNewLines(entry, file, (line) => {
     if (!COMMAND_LINE.test(line)) return;
     try {

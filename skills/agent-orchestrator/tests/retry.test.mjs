@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fixture, eventually, readJson, writeJson } from './helpers.mjs';
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`wait retries ${agent} once in the same session and waits for completion`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

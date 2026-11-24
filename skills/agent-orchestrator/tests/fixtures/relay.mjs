@@ -1,4 +1,7 @@
-// Copied to both <agent>-delegate/scripts/relay.mjs by the test harness.
+// Copied to each relay folder by the test harness: claude-delegate, codex-delegate, and
+// cursor-delegate (gemini). The folder decides the vendor it plays. The gemini relay writes Claude's
+// stream-json shape with no cost, puts the session id and usage in result.json, and, like the real
+// cursor-delegate relay, exits 2 on a flag outside its contract (after writing invocation.json).
 // These literal capability markers match the real Claude relay's source checks:
 // "--allow-domain" "--allow-publish" "--no-sandbox"
 import fs from 'node:fs';
@@ -11,11 +14,17 @@ const brief = fs.readFileSync(value('--brief'), 'utf8');
 // A brief without a fake-relay comment, such as one a parked babysitter's watcher writes, uses
 // FAKE_RELAY_CONFIG from the environment.
 const config = JSON.parse(/<!-- fake-relay (.*?) -->/.exec(brief)?.[1] || process.env.FAKE_RELAY_CONFIG || '{}');
-const claude = process.argv[1].includes('claude-delegate');
-const session = argv.includes('--session') ? value('--session') : `fixture-${claude ? 'claude' : 'codex'}`;
+const vendor = process.argv[1].includes('claude-delegate') ? 'claude' : process.argv[1].includes('cursor-delegate') ? 'gemini' : 'codex';
+const gemini = vendor === 'gemini';
+const claude = vendor !== 'codex'; // Claude's event shape: Claude, and Gemini through the cursor relay
+const session = argv.includes('--session') ? value('--session') : `fixture-${vendor}`;
 const startedAt = new Date().toISOString();
 const model = value('--model');
 const effort = value('--effort');
+// As the real gemini relay does: its events name the id Cursor ran, which carries the effort
+// (gemini-4-neon-high), and result.json's `model` is the base id given with --model.
+const cursorModel = effort ? `${model}-${effort}` : model;
+const eventModel = gemini ? cursorModel : model;
 const event = (entry) => fs.appendFileSync(path.join(out, 'events.jsonl'), `${JSON.stringify(entry)}\n`);
 fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'invocation.json'), JSON.stringify({
@@ -23,10 +32,20 @@ fs.writeFileSync(path.join(out, 'invocation.json'), JSON.stringify({
   run: process.env.AGENT_ORCH_RUN, task: process.env.AGENT_ORCH_TASK,
   compactWindow: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null,
 }));
+if (gemini) {
+  const VALUE_FLAGS = new Set(['--brief', '--cd', '--out-dir', '--model', '--effort', '--sandbox', '--deny', '--allow', '--session', '--timeout']);
+  for (let i = 0; i < argv.length; i++) {
+    if (VALUE_FLAGS.has(argv[i])) { i++; continue; }
+    if (argv[i] === '--read-only') continue;
+    process.stderr.write(`cursor-delegate: unknown argument ${argv[i]}\n`);
+    process.exit(2);
+  }
+  if (argv.includes('--sandbox') && !['enabled', 'disabled'].includes(value('--sandbox'))) process.exit(2);
+}
 // A larger last model call, for tests of the handoff limits: `contextTokens` input tokens.
 const usage = { input_tokens: config.contextTokens ? config.contextTokens - 20 : 100, cache_read_input_tokens: 20, output_tokens: 30 };
 event(claude
-  ? { type: 'system', subtype: 'init', session_id: session, model }
+  ? { type: 'system', subtype: 'init', session_id: session, model: eventModel }
   : { type: 'thread.started', thread_id: session });
 for (const extra of config.extraEvents || []) event(extra);
 // A shell command running under the relay, as an agent's pending tool call would be; its pid is in
@@ -40,16 +59,19 @@ if (config.shell) {
 function finish(status = config.status || 'completed', signal = null) {
   const finalMessage = config.finalMessage ?? 'Fixture task finished.';
   const exitCode = status === 'completed' ? 0 : 1;
+  // The gemini relay reports usage once, in its result event, and no cost; a stopped Cursor run
+  // reports none, so neither does its result.
+  const resultUsage = gemini && signal ? null : { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 30 };
   if (claude) {
     event({ type: 'assistant', effort, message: {
-      id: 'message-1', model, stop_reason: 'end_turn',
+      id: 'message-1', model: eventModel, stop_reason: 'end_turn',
       content: [{ type: 'text', text: finalMessage }],
-      usage,
+      ...(gemini ? {} : { usage }),
     } });
     event({ type: 'result', subtype: exitCode ? 'error_during_execution' : 'success',
       is_error: Boolean(exitCode), result: config.error || finalMessage, session_id: session,
-      usage: { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 30 },
-      total_cost_usd: 0.01 });
+      ...(resultUsage ? { usage: resultUsage } : {}),
+      ...(gemini ? {} : { total_cost_usd: 0.01 }) });
   } else {
     event({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: finalMessage } });
     event({ type: 'turn.completed', usage: { input_tokens: 120, cached_input_tokens: 20, output_tokens: 30 } });
@@ -59,6 +81,8 @@ function finish(status = config.status || 'completed', signal = null) {
   const result = {
     schema: 'delegate-relay.result.v1', status, exitCode, signal, finalMessage,
     ...(claude ? { sessionId: session } : { threadId: session }),
+    ...(gemini ? { agentVersion: 'fixture-cursor 1.0', cursorModel,
+      usage: resultUsage && { inputTokens: 100, outputTokens: 30, cacheReadTokens: 20, cacheWriteTokens: 0 }, stderrTail: '' } : {}),
     model, effort, touchedFiles: config.touchedFiles || [], finishedAt: new Date().toISOString(),
     startedAt, readOnlyViolation: config.readOnlyViolation ?? false, error: config.error || null,
   };

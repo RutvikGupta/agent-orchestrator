@@ -74,7 +74,7 @@ test('plan rejects invalid fields, unknown dependencies, and cycles without reco
     /task claude-null: a Claude task needs a tier \(light, standard, complex or frontier\): the lightest that does the task as well as the top one/,
     /task claude-absent: a Claude task needs a tier \(light, standard, complex or frontier\)/, /task codex-absent: a Codex task needs a tier \(light, standard, strong or complex\)/,
     /task babysit-frontier: a babysit task watches at light, standard or complex \(default standard\), and its fix attempts run complex/,
-    /task robot: agent must be claude or codex/, /task no-why: why is empty/,
+    /task robot: agent must be claude, codex or gemini/, /task no-why: why is empty/,
     /task no-brief: brief is empty: the path of its brief file/, /task no-goal: goal is empty/,
     /task reader: is read-only, so it owns nothing/,
   ]) assert.match(out.stderr, pattern);

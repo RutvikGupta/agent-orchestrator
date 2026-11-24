@@ -132,7 +132,7 @@ test('usage header readings expose both vendors and their rolling windows', asyn
   assert.match(usage.claude.full, /resets/);
 });
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`${agent}: log tails the current attempt's relay and stderr while a task runs`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

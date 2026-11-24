@@ -158,14 +158,18 @@ export function applyClaudeEvent(s, e, cwd) {
     s.interrupted = false;
     s.busy = true;
   } else if (e.type === "result") {
-    const u = e.usage || {};
-    s.tokens = {
-      input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0),
-      cached: u.cache_read_input_tokens || 0,
-      output: u.output_tokens || 0,
-    };
+    // A result without usage (the gemini relay's when Cursor reported none, as after a stop) leaves
+    // the count as the messages had it: an estimate, or unknown.
+    const u = e.usage;
+    if (u) {
+      s.tokens = {
+        input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0),
+        cached: u.cache_read_input_tokens || 0,
+        output: u.output_tokens || 0,
+      };
+      s.exact = true;
+    }
     if (typeof e.total_cost_usd === "number") s.costUsd = e.total_cost_usd;
-    s.exact = true;
     if (own) s.sessionId = e.session_id || s.sessionId;
     if (e.is_error) s.error = shortText(e.result || e.subtype);
   } else if (e.type === "rate_limit_event") {

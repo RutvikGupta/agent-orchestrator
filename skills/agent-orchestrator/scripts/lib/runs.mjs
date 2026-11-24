@@ -382,7 +382,10 @@ function stopperText(actor) {
 // Whether a task can be parked now: a Claude or Codex task's started attempt, neither closed nor
 // stopped (a command task has no session to resume). `close` and `stop` mark the task itself
 // (closedAt, stoppedAt), whatever its attempt, and only a `start` by hand clears them.
-const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && (isBabysitter(task) || ["claude", "codex"].includes(attemptAgent(task, task.attempt))));
+// Every agent task may park (Claude, Codex, Gemini: their relays resume a session with --session);
+// a command task never does.
+const PARKING_AGENTS = new Set(["claude", "codex", "gemini"]);
+const parkable = (task) => Boolean(task?.attempt && !task.closedAt && !task.stoppedAt && (isBabysitter(task) || PARKING_AGENTS.has(attemptAgent(task, task.attempt))));
 
 // `ps` prints start times in the local time zone and language: read them in UTC and the C locale, so
 // that processes with other settings record and compare the same text.
@@ -1002,7 +1005,16 @@ export function describe(run, task) {
     tokens.input += t.input;
     tokens.cached += t.cached;
     tokens.output += t.output;
-    const cost = attemptCost(agent, { ...s, tokens: t }, attemptModel(task, i + 1, agent));
+    // Gemini reports usage only when an attempt ends, and not always then (a stopped Cursor run): an
+    // attempt without that reading has unknown tokens and cost, never an exact zero.
+    if (agent === "gemini" && !s.exact) {
+      exact = false;
+      costExact = false;
+      current = s;
+      seen.push({ dir, agent, summary: s, tokens: t });
+      continue;
+    }
+    const cost = attemptCost(agent, { ...s, tokens: t }, attemptModel(task, i + 1, agent, null, dir));
     if (cost) {
       costUsd = (costUsd || 0) + cost.usd;
       if (!cost.exact) costExact = false;

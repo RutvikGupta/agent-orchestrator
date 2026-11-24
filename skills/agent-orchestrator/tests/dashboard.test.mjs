@@ -16,7 +16,7 @@ test('dashboard HTTP API and native transcript states', async (t) => {
   const transcripts = claudeTranscripts(f, 'session-a');
   claudeTranscripts(f, 'session-b');
   const codexFile = codexTranscript(f);
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     await f.start(second, `${agent}-task`, { agent, config: { finalMessage: `${agent} dashboard report` }, flags: ['--read-only'] });
     await f.finished(second, `${agent}-task`);
   }
@@ -34,12 +34,16 @@ test('dashboard HTTP API and native transcript states', async (t) => {
     for (const run of [...a.runs, ...b.runs]) assert.deepEqual(Object.keys(run).sort(), ['createdAt', 'goal', 'id', 'parent']);
     assert.equal(a.tasks.filter((row) => row.main).length, 1);
     assert.equal(a.tasks.filter((row) => row.native).length, 4);
-    for (const agent of ['claude', 'codex']) {
+    for (const agent of ['claude', 'codex', 'gemini']) {
       const row = a.tasks.find((row) => row.id === `${agent}-task`);
       assert.equal(row.state, 'completed');
       assert.equal(row.finalMessage, `${agent} dashboard report`);
       assert.equal(row.exitCode, 0);
     }
+    // Gemini reports no cost, so the board estimates it from the result event's tokens.
+    const gemini = a.tasks.find((row) => row.id === 'gemini-task');
+    assert.deepEqual([gemini.agent, gemini.tokensIn, gemini.tokensOut, gemini.costExact], ['gemini', 120, 30, false]);
+    assert.ok(gemini.costUsd > 0, `gemini cost ${gemini.costUsd}`);
   });
 
   for (const expected of ['running', 'completed', 'stopped', 'needs-decision']) {
@@ -68,7 +72,7 @@ test('dashboard HTTP API and native transcript states', async (t) => {
   });
 
   await t.test('/api/events returns both stream formats and rejects malformed or unknown runs', async () => {
-    for (const agent of ['claude', 'codex']) {
+    for (const agent of ['claude', 'codex', 'gemini']) {
       const body = await board.json(`/api/events?run=${second.id}&task=${agent}-task`);
       assert.ok(body.events.some((event) => event.text.includes(`${agent} dashboard report`)));
     }

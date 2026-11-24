@@ -15,13 +15,13 @@ const tierList = (agent) => tiersOf(agent).map(([tier, choice]) => `${tier} = ${
 test('model policy rejects direct and passthrough overrides and unknown tiers before dispatch', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     for (const flags of [['--model', 'wrong'], ['--', '--model=wrong'], ['--', '--effort', 'low']]) {
       const result = await f.command(['start', run.id, 'refused', '--agent', agent,
-        ...(agent === 'codex' ? ['--tier', 'standard'] : []),
+        ...(agent !== 'claude' ? ['--tier', 'standard'] : []),
         '--why', 'Policy regression', '--brief', f.brief('refused'), ...flags], { code: 2 });
       if (agent === 'claude') assert.ok(result.stderr.includes(`choose the Claude model with --tier (${tierList('claude')}), not --model/--effort`), result.stderr);
-      else assert.match(result.stderr, /choose the Codex model with --tier/);
+      else assert.match(result.stderr, agent === 'codex' ? /choose the Codex model with --tier/ : /choose the Gemini model with --tier/);
     }
   }
   for (const [agent, tier, message] of [
@@ -29,6 +29,8 @@ test('model policy rejects direct and passthrough overrides and unknown tiers be
     ['claude', 'constructor', 'unknown --tier "constructor" for Claude'],
     ['codex', 'imaginary', 'unknown --tier "imaginary" (choose: light, standard, strong, complex)'],
     ['codex', 'frontier', 'unknown --tier "frontier"'],
+    ['gemini', 'imaginary', 'unknown --tier "imaginary" (choose: light, standard, strong, complex)'],
+    ['gemini', 'frontier', 'unknown --tier "frontier"'],
   ]) {
     const result = await f.command(['start', run.id, 'refused', '--agent', agent, '--tier', tier,
       '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
@@ -36,6 +38,8 @@ test('model policy rejects direct and passthrough overrides and unknown tiers be
   }
   const codex = await f.command(['start', run.id, 'refused', '--agent', 'codex', '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
   assert.ok(codex.stderr.includes(`--tier is required for Codex: ${tierList('codex')}`), codex.stderr);
+  const gemini = await f.command(['start', run.id, 'refused', '--agent', 'gemini', '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
+  assert.ok(gemini.stderr.includes(`--tier is required for Gemini: ${tierList('gemini')}`), gemini.stderr);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 });
 
@@ -56,7 +60,7 @@ test('the frontier tier runs Fable at high, or medium with --effort, and never a
     assert.match(refused.stderr, new RegExp(`--effort ${level} is not allowed for the claude frontier tier: choose medium or high \\(never higher\\)`));
   }
   // Every other tier runs at its own effort only.
-  for (const [agent, tier] of [['claude', 'complex'], ['codex', 'complex']]) {
+  for (const [agent, tier] of [['claude', 'complex'], ['codex', 'complex'], ['gemini', 'complex']]) {
     const refused = await f.command(['start', run.id, `${agent}-effort`, '--agent', agent, '--tier', tier, '--effort', 'high',
       '--why', 'Policy regression', '--brief', f.brief('refused')], { code: 2 });
     assert.match(refused.stderr, new RegExp(`the ${agent} ${tier} tier runs at \\w+ only`));
@@ -67,7 +71,7 @@ test('the frontier tier runs Fable at high, or medium with --effort, and never a
 test('every tier reaches the relay with its policy model and effort, and status shows the tier', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
-  const all = ['claude', 'codex'].flatMap((agent) => tiersOf(agent).map(([tier, choice]) => [agent, tier, choice]));
+  const all = ['claude', 'codex', 'gemini'].flatMap((agent) => tiersOf(agent).map(([tier, choice]) => [agent, tier, choice]));
   for (const [agent, tier, choice] of all) {
     const id = `${agent}-${tier}`;
     const started = await f.start(run, id, { agent, flags: ['--tier', tier] });
@@ -84,7 +88,7 @@ test('every tier reaches the relay with its policy model and effort, and status 
   for (const [agent, tier, choice] of all) {
     const row = rows.get(`${agent}-${tier}`);
     assert.equal(row.tier, tier);
-    assert.equal(row.modelLabel, `${choice.model.replace(/^(claude|gpt)-/, '')} ${choice.effort || ''}`.trim());
+    assert.equal(row.modelLabel, `${choice.model.replace(/^(claude|gpt|gemini)-/, '')} ${choice.effort || ''}`.trim());
     assert.match(text, new RegExp(`${agent}-${tier}\\s+${agent} ${tier}: `));
   }
 });
@@ -150,7 +154,7 @@ test('a babysitter refuses a watch tier above complex before reading the pull re
 test('a same-tier follow-up keeps its choice until two failures, then escalates in the same session', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     const id = `retry-${agent}`;
     const first = await f.start(run, id, { agent, flags: ['--tier', 'light'], config: { status: 'failed' } });
     await f.finished(run, id);
@@ -281,12 +285,13 @@ test('a bad policy.json stops start with a message that names the problem', asyn
   const { light, standard } = policy.claude.tiers;
   for (const [content, message] of [
     ['{not json', /orch: missing or invalid \S+policy\.json: it is not readable JSON/],
-    [JSON.stringify({ claude: { model: 'claude-opus-5-5', effort: 'xhigh' }, codex: policy.codex }),
+    [JSON.stringify({ claude: { model: 'claude-opus-5-5', effort: 'xhigh' }, codex: policy.codex, gemini: policy.gemini }),
       /orch: invalid \S+policy\.json: claude\.tiers must be an object with at least one tier$/m],
-    [JSON.stringify({ claude: { tiers: { light, standard } }, codex: policy.codex }), /claude\.tiers needs a "complex" tier/],
-    [JSON.stringify({ claude: { tiers: { ...policy.claude.tiers, standard: { effort: 'high' } } }, codex: { tiers: { standard: { model: 'gpt-x', effort: 7 } } } }),
+    [JSON.stringify({ claude: { tiers: { light, standard } }, codex: policy.codex, gemini: policy.gemini }), /claude\.tiers needs a "complex" tier/],
+    [JSON.stringify({ claude: { tiers: { ...policy.claude.tiers, standard: { effort: 'high' } } }, codex: { tiers: { standard: { model: 'gpt-x', effort: 7 } } }, gemini: policy.gemini }),
       /claude\.tiers\.standard\.model must be a model name; codex\.tiers\.standard\.effort must be a level/],
-    [JSON.stringify({ claude: policy.claude, codex: { tiers: {} } }), /codex\.tiers must be an object with at least one tier/],
+    [JSON.stringify({ claude: policy.claude, codex: { tiers: {} }, gemini: policy.gemini }), /codex\.tiers must be an object with at least one tier/],
+    [JSON.stringify({ claude: policy.claude, codex: policy.codex, gemini: { tiers: {} } }), /gemini\.tiers must be an object with at least one tier/],
   ]) {
     fs.writeFileSync(path.join(copy, 'policy.json'), content);
     const result = spawnSync(process.execPath, [cli, 'start', run.id, 'bad', '--agent', 'claude', '--why', 'Policy regression',

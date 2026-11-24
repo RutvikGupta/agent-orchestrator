@@ -233,13 +233,18 @@ export function markRead(dir, ids, { attempt = null } = {}) {
   fs.appendFileSync(path.join(dir, READ_FILE), ids.map((id) => `${JSON.stringify({ id, time, ...at })}\n`).join(""));
 }
 
+// The agents that read their inbox only by running `inbox`: Codex runs hooks only once the user
+// trusts them, and Gemini (Cursor's `agent` CLI) has no orch-inbox hook. Claude gets the hook.
+export const POLLING_AGENTS = new Set(["codex", "gemini"]);
+
 // Text appended to every brief after the decisions note, telling the agent how to read its inbox.
-// Codex runs hooks only once the user trusts them, so it polls; Claude gets the hook, and polls at
-// gate runs in case the hook is not registered.
+// Codex and Gemini poll; Claude gets the hook, and polls at gate runs in case the hook is not
+// registered.
 export function inboxNote(run, id, agent) {
   const command = `\`node ${CLI_PATH} inbox ${run.id} ${id} --ack\``;
+  const polls = POLLING_AGENTS.has(agent);
   const how =
-    agent === "codex"
+    polls
       ? `After each gate run, and at least every 10 commands, run ${command} and follow any new message.`
       : `They may appear as context after a tool call. At each gate run, also run ${command} and follow any new message.`;
   return `
@@ -250,7 +255,7 @@ ${INBOX_HEADING}
 Your orchestrator, or the user from the orchestrator dashboard, may send you messages while you work. ${how} Answer each message from the user, in one or two sentences, with \`node ${CLI_PATH} reply ${run.id} ${id} "<your answer>"\` before you carry on.
 
 Stay reachable, so a message from the user is handled before the work in hand:
-- Run any command that may take more than a minute in the background (${agent === "codex" ? "send its output to a file, start it with `&`, note its PID, and stop it before you finish" : "the Bash tool's `run_in_background: true`"}), then wait for it in short steps with \`node ${CLI_PATH} nap <duration>\`.
+- Run any command that may take more than a minute in the background (${polls ? "send its output to a file, start it with `&`, note its PID, and stop it before you finish" : "the Bash tool's `run_in_background: true`"}), then wait for it in short steps with \`node ${CLI_PATH} nap <duration>\`.
 - Wait with \`nap\` instead of \`sleep\`, or with \`wait\` and \`pr-watch\`. All three return as soon as a message arrives.
 - If a command of yours stops with exit code 143 (SIGTERM) that you did not stop, run ${command} at once: it was stopped so a message reaches you.
 
@@ -317,7 +322,7 @@ export function readsWhen(run, task, row) {
   }
   const resume = "stop it and resume it with a delta brief instead";
   const noted = briefNoted(task.outDir);
-  if (task.agent === "codex") {
+  if (POLLING_AGENTS.has(task.agent)) {
     if (!noted) return { how: "never", text: `Its brief has no inbox note, so it will not read them; ${resume}.` };
     return { how: "inbox", text: `It reads them the next time it runs \`inbox\`: after each gate run, and at least every 10 commands.${row.shell ? ` It is in the shell command ${quoted(row.shell)} now${held ? `.${waits}` : "; interrupt it to deliver them now."}` : ""}`, ...(row.shell ? offer : {}) };
   }

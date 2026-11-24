@@ -4,12 +4,12 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CLI_PATH, napBudgetMs } from "../config.mjs";
+import { CLI_PATH, agentName, napBudgetMs } from "../config.mjs";
 import { ORCHESTRATOR, mainSession, sessionGone } from "../addressee.mjs";
 import { callerTask, runById } from "../finish-notice.mjs";
 import { durationText } from "../format.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
-import { CLAUDE_SETTINGS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
+import { CLAUDE_SETTINGS, POLLING_AGENTS, REPLY_PREFIX, USER_FIRST, appendMessage, appendReply, briefNoted, childHint, fromAgent, inboxHookRegistered, inboxWake, markRead, markSteered, openQuestions, readInbox, readQuestions, readReplies, recordAnswers, replyHint, senderLabel, steeredNote } from "../inbox.mjs";
 import { actorLabel, guard, recordChange } from "../ownership.mjs";
 import { PARK_CHECK_FILE, attemptAgent, describe, interruptHeld, isParked, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { adoptResume, awaitInterrupt, claimResume, heldBy, launchInterrupt, planSteer, shorten, stopCommand } from "../steer.mjs";
@@ -31,10 +31,11 @@ function delivery(run, task, row = null) {
   }
   const noted = briefNoted(task.outDir);
   const will = (text) => ({ delivery: text, reaches: !text.includes("will not read it") });
-  if (task.agent === "codex") {
+  if (POLLING_AGENTS.has(task.agent)) {
+    const name = agentName(task.agent);
     return will(noted
-      ? "Codex reads it the next time it runs `inbox`: after each gate run, and at least every 10 commands"
-      : `this attempt's brief has no inbox note, so Codex will not read it; ${resume}`);
+      ? `${name} reads it the next time it runs \`inbox\`: after each gate run, and at least every 10 commands`
+      : `this attempt's brief has no inbox note, so ${name} will not read it; ${resume}`);
   }
   if (inboxHookRegistered()) return will("the orch-inbox hook adds it to Claude's context after its next tool call");
   const unhooked = `the orch-inbox hook is not registered in ${CLAUDE_SETTINGS}`;
@@ -183,7 +184,7 @@ export function deliverMessage(run, id, text, { from = null, images = [], steer 
   }
   const sent = paths.length
     ? [text || `The ${from === "user" ? "user" : "orchestrator"} attached ${paths.length === 1 ? "an image" : `${paths.length} images`}.`, "",
-      `Attached ${paths.length === 1 ? "image" : "images"}: open ${paths.length === 1 ? "it" : "each"} with your image-viewing tool (Claude: Read; Codex: view_image).`,
+      `Attached ${paths.length === 1 ? "image" : "images"}: open ${paths.length === 1 ? "it" : "each"} with your image-viewing tool (Claude: Read; Codex: view_image; Gemini: its file-reading tool).`,
       ...paths.map((file) => `- ${file}`)].join("\n")
     : text;
   // The plan is made before the message is written, so the agent learns its command was stopped,

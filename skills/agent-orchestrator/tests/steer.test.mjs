@@ -22,7 +22,8 @@ async function busy(f, run, id, { agent = 'claude', command = 'sleep 61; echo do
   return { task, pid };
 }
 
-for (const agent of ['claude', 'codex']) {
+// Gemini's relay writes Claude's events, with Claude's tool names: its shell call is a Bash call.
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`send --steer stops a ${agent} agent's pending command so the message reaches it now`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

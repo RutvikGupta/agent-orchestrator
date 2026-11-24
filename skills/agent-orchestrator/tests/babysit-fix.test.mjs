@@ -284,7 +284,7 @@ test('a Codex babysitter is refused with the real reason, before the pull reques
   const refused = await f.command(['start', run.id, 'sit', '--agent', 'codex', '--tier', 'standard', '--babysit', '--pr', '42',
     '--why', 'Babysits the fixture PR', '--brief', f.brief('sit')], { code: 2 });
   assert.match(refused.stderr, /pull-request babysitting runs on Claude: a babysitter \(--babysit\) parks and resumes the same Claude session/);
-  assert.match(refused.stderr, /A Codex implementer hands its pull request to a Claude babysitter through its handoff note \(references\/babysit\.md\)/);
+  assert.match(refused.stderr, /A Codex or Gemini implementer hands its pull request to a Claude babysitter through its handoff note \(references\/babysit\.md\)/);
   assert.doesNotMatch(refused.stderr, /costs less/);
   assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
 });

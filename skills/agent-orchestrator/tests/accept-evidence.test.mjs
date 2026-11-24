@@ -98,7 +98,7 @@ test('invalid report accepts with a warning', async (t) => {
   assert.match(accepted.stderr, /WARNING:.*invalid orch-result report/);
 });
 
-for (const agent of ['claude', 'codex']) test(`${agent} missing event log accepts with a warning`, async (t) => {
+for (const agent of ['claude', 'codex', 'gemini']) test(`${agent} missing event log accepts with a warning`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
   await f.start(run, 'missing-log', { agent, config: { finalMessage: report([pass('npm test')]) } });
   const finished = await f.finished(run, 'missing-log');
@@ -121,9 +121,10 @@ test('Codex exact failed run refuses despite a later narrower success', async (t
   assert.match(denied.stderr, /pytest tests\/.*exited 1/);
 });
 
-for (const agent of ['claude', 'codex']) test(`${agent} later compatible success accepts`, async (t) => {
+// Gemini's relay writes Claude's events.
+for (const agent of ['claude', 'codex', 'gemini']) test(`${agent} later compatible success accepts`, async (t) => {
   const f = await fixture(t), run = await f.newRun();
-  const events = agent === 'claude'
+  const events = agent !== 'codex'
     ? [...runEvent('first', 'pytest tests/', 'Exit code 1', true), ...runEvent('second', 'pytest -q tests/')]
     : ['pytest tests/', 'pytest -q tests/'].map((command, i) => ({ type: 'item.completed', item: {
       type: 'command_execution', id: String(i), command: `/bin/zsh -lc '${command}'`, exit_code: i === 0 ? 1 : 0, status: 'completed',

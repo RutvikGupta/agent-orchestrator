@@ -49,11 +49,12 @@ test('new records the repository and worktree prepares an isolated branch', asyn
   assert.ok(await f.git(['branch', '--list', wt.branch]));
 });
 
-for (const agent of ['claude', 'codex']) {
+// Gemini runs through the cursor-delegate relay, which writes Claude's event shape.
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`${agent}: start, augmented brief, event accounting, wait, result, and close`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun(agent);
-    const extraEvents = agent === 'claude'
+    const extraEvents = agent !== 'codex'
       ? [{ type: 'assistant', message: { id: 'tool-message', model: 'claude-opus-5-5',
           content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'README.md' } }] } }]
       : [{ type: 'item.started', item: { id: 'tool-1', type: 'command_execution', command: 'cat README.md' } },
@@ -197,6 +198,8 @@ for (const [agent, error, limited] of [
   ['codex', 'You have hit your usage limit.', true],
   ['codex', 'You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.', true],
   ['codex', 'Compilation failed: missing semicolon.', false],
+  ['gemini', 'You have hit your usage limit.', true],
+  ['gemini', 'Compilation failed: missing semicolon.', false],
 ]) {
   test(`${agent} failure: ${limited ? 'usage limit is highlighted' : 'ordinary error is not a usage limit'}`, async (t) => {
     const f = await fixture(t);
@@ -210,7 +213,7 @@ for (const [agent, error, limited] of [
     const waited = await f.command(['wait', run.id, '--timeout', '1s']);
     if (limited) {
       assert.match(result.stdout, /USAGE LIMIT/);
-      assert.match(waited.stdout, /failed-task \((claude|codex)\) stopped on a usage limit/);
+      assert.match(waited.stdout, new RegExp(`failed-task \\(${agent}\\) stopped on a usage limit`));
     } else {
       assert.doesNotMatch(result.stdout, /USAGE LIMIT/);
       assert.doesNotMatch(waited.stdout, /stopped on a usage limit/);

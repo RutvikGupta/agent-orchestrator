@@ -41,7 +41,7 @@ export function headlessKind(command) {
 // it that runs a file, below the session that ran the command. An orchestrator relay is not such a
 // script: an agent a command task runs directly has no launcher, so it is not named after the relay.
 const SCRIPT = /\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl)$/;
-const RELAY = /skills\/(agent-orchestrator|claude-delegate|codex-delegate)\/scripts\/(command-relay|relay)\.mjs$/;
+const RELAY = /skills\/(agent-orchestrator|claude-delegate|codex-delegate|cursor-delegate)\/scripts\/(command-relay|relay)\.mjs$/;
 const INTERPRETER = /^((ba|z|da)?sh|python3?(\.\d+)?|node|bun|deno|ruby|perl)$/;
 export function externalLauncher(pid, table) {
   for (let p = table.get(pid)?.ppid, hops = 0; p > 1 && hops < 6; hops++) {

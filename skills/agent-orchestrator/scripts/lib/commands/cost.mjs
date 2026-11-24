@@ -6,7 +6,7 @@
 // acceptance, for choosing a model.
 import { CLI_PATH } from "../config.mjs";
 import { budgetFor, priceOf, prices, usdText } from "../cost.mjs";
-import { loadPolicy } from "../policy.mjs";
+import { POLICY_AGENTS, loadPolicy } from "../policy.mjs";
 import { childrenOf, describe, loadRun, loadTask, taskIdOf } from "../runs.mjs";
 import { EVIDENCE_MIN_TASKS, tierEvidence } from "../stats.mjs";
 import { die, emit } from "../util.mjs";
@@ -39,8 +39,8 @@ function tierTable(args) {
   const evidence = tierEvidence(policy);
   const table = prices();
   const rows = [];
-  for (const agent of ["claude", "codex"]) {
-    for (const [tier, spec] of Object.entries(policy[agent].tiers)) {
+  for (const agent of POLICY_AGENTS) {
+    for (const [tier, spec] of Object.entries(policy[agent]?.tiers || {})) {
       const entry = evidence?.find((e) => e.agent === agent && e.tier === tier);
       const enough = entry && entry.tasks >= EVIDENCE_MIN_TASKS;
       const price = priceOf(spec.model, table);

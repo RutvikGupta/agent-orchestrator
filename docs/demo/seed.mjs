@@ -171,8 +171,9 @@ function git(args, cwd = repo, extra = {}) {
 
 function buildWorld() {
   for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true });
-  for (const agent of ["claude", "codex"]) {
-    const target = path.join(dirs.skills, `${agent}-delegate`, "scripts", "relay.mjs");
+  // One relay folder per agent: claude-delegate, codex-delegate, and cursor-delegate for gemini.
+  for (const relay of ["claude", "codex", "cursor"]) {
+    const target = path.join(dirs.skills, `${relay}-delegate`, "scripts", "relay.mjs");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(HERE, "relay.mjs"), target);
   }

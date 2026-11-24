@@ -49,9 +49,15 @@ function statusRows(tasks) {
     state: `${stateLabel(t)}${attemptsLabel(t)}`,
     elapsed: t.elapsed,
     steps: t.steps,
-    tokens: t.tokensIn || t.tokensOut ? `${t.tokensExact ? "" : "~"}${compact(t.tokensIn)}/${compact(t.tokensOut)}` : "-",
+    tokens: t.tokensIn || t.tokensOut ? `${t.tokensExact ? "" : "~"}${compact(t.tokensIn)}/${compact(t.tokensOut)}` : noTokens(t),
     now: shortText(`${stuckMarker(t)}${t.now ?? ""}`, 70),
   }));
+}
+
+// The tokens cell of a task with none counted: Gemini's relay reports tokens once, when the
+// attempt ends, so a running gemini task's cell says when they come.
+function noTokens(t) {
+  return t.state === "running" && t.agent === "gemini" ? "at end" : "-";
 }
 
 // "stuck: `npm test` failed 3× · " before a stuck task's activity; empty otherwise.

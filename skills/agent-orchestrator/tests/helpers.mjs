@@ -10,6 +10,10 @@ import { after } from 'node:test';
 
 const cli = fileURLToPath(new URL('../scripts/orch.mjs', import.meta.url));
 const relay = fileURLToPath(new URL('./fixtures/relay.mjs', import.meta.url));
+// Each agent's relay folder, where the harness puts a copy of the fake relay.
+export const RELAY_FOLDERS = { claude: 'claude-delegate', codex: 'codex-delegate', gemini: 'cursor-delegate' };
+// The tier `f.start` names unless its flags name another.
+const DEFAULT_TIERS = { claude: 'complex', codex: 'standard', gemini: 'standard' };
 // Make the test worker the nearest fake host. CLI children stop here instead of
 // walking the user's session ancestry; explicit fake hosts below it still win.
 // All process scans keep using the real table, including PID and group checks.
@@ -64,8 +68,9 @@ export async function fixture(t) {
   for (const dir of [repo, state, home, path.join(root, 'tmp'), path.join(claude, 'projects'), path.join(codex, 'sessions')]) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  for (const agent of ['claude', 'codex']) {
-    const target = path.join(skills, `${agent}-delegate`, 'scripts', 'relay.mjs');
+  // One fake per relay folder; gemini runs the cursor-delegate relay.
+  for (const folder of Object.values(RELAY_FOLDERS)) {
+    const target = path.join(skills, folder, 'scripts', 'relay.mjs');
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(relay, target);
   }
@@ -96,7 +101,13 @@ export async function fixture(t) {
       assert.equal(result.code, code, `node orch.mjs ${args.join(' ')}\n${result.stdout}\n${result.stderr}\nsignal: ${result.signal}`);
       return result;
     },
-    async json(args, opts) { return JSON.parse((await f.command([...args, '--json'], opts)).stdout); },
+    // --json goes before `--`: the words after it are the relay's, or a command task's, own.
+    async json(args, opts) {
+      const at = args.indexOf('--');
+      const head = at < 0 ? args : args.slice(0, at);
+      const withJson = head.includes('--json') ? args : [...head, '--json', ...(at < 0 ? [] : args.slice(at))];
+      return JSON.parse((await f.command(withJson, opts)).stdout);
+    },
     async git(args) {
       const result = await execute('git', args, options());
       assert.equal(result.code, 0, result.stderr);
@@ -118,10 +129,10 @@ export async function fixture(t) {
       return file;
     },
     // Every new task names its tier. The default keeps the model the fixtures assumed (`complex`
-    // for Claude, `standard` for Codex); `flags` may name another tier, which wins.
+    // for Claude, `standard` for Codex and Gemini); `flags` may name another tier, which wins.
     async start(run, id, { agent = 'claude', config = {}, flags = [], env: extra = {} } = {}) {
       return f.json(['start', run.id, id, '--agent', agent,
-        '--tier', agent === 'codex' ? 'standard' : 'complex',
+        '--tier', DEFAULT_TIERS[agent] ?? 'complex',
         '--why', 'Exercises the CLI with a local fake relay', '--brief', f.brief(id, config), ...flags], { env: extra });
     },
     taskFile(run, id) { return path.join(run.dir, 'tasks', id, 'task.json'); },

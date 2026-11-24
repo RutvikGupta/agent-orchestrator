@@ -7,7 +7,7 @@ import { attemptCost, attemptModel, usdText } from "./cost.mjs";
 import { summarizeEvents } from "./events.mjs";
 import { compact, formatElapsed } from "./format.mjs";
 import { phaseOf } from "./lifecycle.mjs";
-import { loadPolicy, modelLabel, readPolicy } from "./policy.mjs";
+import { POLICY_AGENTS, loadPolicy, modelLabel, readPolicy } from "./policy.mjs";
 import { reportFields } from "./report.mjs";
 import { attemptAgent, describe, relayAlive } from "./runs.mjs";
 import { die, readJson, writeJson } from "./util.mjs";
@@ -50,7 +50,7 @@ function outcome(run, task, dir, results) {
     const summary = summarizeEvents(agent, path.join(dir, `attempt-${n}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
     tokensOut += summary.tokens.output;
-    costUsd += attemptCost(agent, summary, attemptModel(task, n, agent, tierPolicy()))?.usd || 0;
+    costUsd += attemptCost(agent, summary, attemptModel(task, n, agent, tierPolicy(), path.join(dir, `attempt-${n}`)))?.usd || 0;
   }
   const state = decisionsIn(result.finalMessage) ? "needs-decision" : "completed";
   const row = { state, result, tokensIn, tokensOut, costUsd, limitHit: false, phase: phaseOf(task, state) };
@@ -96,7 +96,7 @@ function* taskDirs(runs) {
 // sessions, and native sub-agents are not.
 function dispatchedTask(dir) {
   const task = readJson(path.join(dir, "task.json"));
-  return task && ["claude", "codex"].includes(task.agent) && task.attempt > 0 ? task : null;
+  return task && POLICY_AGENTS.includes(task.agent) && task.attempt > 0 ? task : null;
 }
 
 function attemptResults(dir, task) {
@@ -166,15 +166,15 @@ function tierRunning(policy, agent, model, effort) {
   return same.length === 1 ? same[0][0] : null;
 }
 
-// One entry per policy tier, in policy order (claude, then codex, lightest first), from the
+// One entry per policy tier, in policy order (claude, codex, then gemini, lightest first), from the
 // per-task records `tierItem` makes. An entry counts the tier's finished tasks (first attempt
 // ended), how many of the reviewed ones were accepted on that first attempt, the median
 // first-attempt time, and what an accepted task cost: every input token of the tier's finished
 // tasks, accepted or not, over the accepted ones.
 export function tierSummary(items, policy) {
   const entries = [];
-  for (const agent of ["claude", "codex"]) {
-    for (const tier of Object.keys(policy[agent].tiers)) {
+  for (const agent of POLICY_AGENTS) {
+    for (const tier of Object.keys(policy[agent]?.tiers || {})) {
       const mine = items.filter(({ chosen, first }) => chosen && first && first.agent === agent
         && (first.model ? tierRunning(policy, agent, first.model, first.effort) : first.tier) === tier);
       const accepted = mine.filter((item) => item.accepted);
@@ -275,7 +275,7 @@ function tierItem(dir, cutoff) {
     const agent = attemptAgent(task, i + 1);
     const summary = summarizeEvents(agent, path.join(dir, `attempt-${i + 1}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
-    costUsd += attemptCost(agent, summary, attemptModel(task, i + 1, agent, tierPolicy()))?.usd || 0;
+    costUsd += attemptCost(agent, summary, attemptModel(task, i + 1, agent, tierPolicy(), path.join(dir, `attempt-${i + 1}`)))?.usd || 0;
     if (i === 0) firstSummary = summary;
   });
   return { settled: true, at,

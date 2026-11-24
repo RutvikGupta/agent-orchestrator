@@ -37,7 +37,7 @@ const idle = async (f, run, id) => {
 // its next tool call; an idle agent must not be told that.
 const hookOn = (f) => writeJson(path.join(f.claude, 'settings.json'), { hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'node orch-inbox.mjs' }] }] } });
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`send --steer resumes a ${agent} agent that is mid-turn but not in a shell command, in its own session`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

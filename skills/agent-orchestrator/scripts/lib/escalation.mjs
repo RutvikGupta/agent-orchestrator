@@ -67,7 +67,7 @@ export function escalationFor(task, attempts) {
   const alreadyUp = same.some((a) => task.automaticEscalations?.[a.n]?.to === tier);
   if (!next || alreadyUp) {
     const peer = peerTier(agent, tier);
-    return { refusal: `${failures} counted failures at ${agent} ${tier}${alreadyUp ? " after automatic escalation" : ", the top tier"}; start the other agent with a fresh brief: --agent ${peer.agent} --tier ${peer.tier} and a new --why (${peer.equalRank ? "equal rank in policy.json" : "no equal rank in policy.json; closest lower rank"}).` };
+    return { refusal: `${failures} counted failures at ${agent} ${tier}${alreadyUp ? " after automatic escalation" : ", the top tier"}; start another agent with a fresh brief: --agent ${peer.agent} --tier ${peer.tier} and a new --why (${peer.equalRank ? "equal rank in policy.json" : "no equal rank in policy.json; closest lower rank"}).` };
   }
   return { tier: next, note: `automatically escalated ${agent} from ${tier} to ${next}: ${failures} counted failures at the ${tier} tier` };
 }

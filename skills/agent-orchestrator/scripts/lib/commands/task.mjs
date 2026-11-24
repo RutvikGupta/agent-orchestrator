@@ -13,7 +13,7 @@ import { guard, ownershipOf, recordChange } from "../ownership.mjs";
 import { endRecordedGroup } from "../command-group.mjs";
 import { COMMAND_AGENT } from "../policy.mjs";
 import { attemptAgent, describe, earlierNames, interruptHeld, isParked, listRuns, pendingFix, listTaskRecords, listTasks, loadRun, loadTask, relayAlive, saveTask, shownName, taskDir, validTask, waitForExit } from "../runs.mjs";
-import { die, emit, tail } from "../util.mjs";
+import { die, emit, handOverText, tail } from "../util.mjs";
 
 const short = (sha) => String(sha || "").slice(0, 12);
 
@@ -133,7 +133,7 @@ export function cmdResult(args) {
     `${d.failureCount || 0} counted failures; attempts: ${(d.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}${a.reason === "fix" ? " (fix)" : ""}`).join(", ") || "none"}`,
     d.why ? `why: ${d.why}` : null,
     `cd: ${d.cd}${d.branch ? `  [branch ${d.branch}]` : ""}`,
-    `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${d.model ? ` · model ${d.model}` : ""}`,
+    `elapsed ${d.elapsed} · ${d.steps} steps · tokens ${d.tokensExact ? "" : "~"}${compact(d.tokensIn)} in (${compact(d.tokensCached)} cached) / ${compact(d.tokensOut)} out${tokensLater(d)}${d.model ? ` · model ${d.model}` : ""}`,
     session ? `session: ${session}  (resume with: start ... -- --session ${session})` : null,
     d.handoff ? `fresh session: attempt ${d.attempt} started from the handoff note, since attempt ${d.handoff.fromAttempt}'s context had grown to ${d.handoff.contextTokens} tokens (limit ${d.handoff.limit}${d.handoff.limitKind === "cold" ? `, the cold limit: ${d.handoff.coldWhy === "model" ? "a switch of model" : "the prompt cache had expired"}` : ""})` : null,
     !d.handoff && d.handoffCheck ? keptLine(d.handoffCheck) : null,
@@ -141,7 +141,7 @@ export function cmdResult(args) {
     d.fixing ? `needs a fix: ${d.fixing.reason}; its fix attempt is starting at the complex tier` : null,
     d.notParked ? `not parked: ${d.notParked}` : null,
     d.compactWindow ? `compact window: ${d.compactWindow.value ? `${d.compactWindow.value} tokens (${d.compactWindow.from === "default" ? "the default of AGENT_ORCH_CLAUDE_COMPACT_WINDOW" : `from ${d.compactWindow.from}`})` : `Claude Code's default (${d.compactWindow.from})`}` : null,
-    d.limitHit ? `USAGE LIMIT: ${d.agent} reached a usage limit. Ping the user once, and resume the task on the other agent if it is ready (SKILL.md, "Usage limits")` : null,
+    d.limitHit ? `USAGE LIMIT: ${d.agent} reached a usage limit. Ping the user once, and ${handOverText(d.agent)} (SKILL.md, "Usage limits")` : null,
     d.decisions ? `NEEDS DECISION: decide what the user's request covers and resume this session with the answer; ask the user only about scope, security posture, or cost${d.decisions.map((q) => `\n  - ${q}`).join("")}` : null,
     Array.isArray(r?.touchedFiles) ? `touched (${r.touchedFiles.length}):${r.touchedFiles.map((f) => `\n  ${f}`).join("")}` : null,
     r?.readOnlyViolation ? "WARNING: readOnlyViolation=true; the read-only run changed files" : null,
@@ -459,4 +459,10 @@ export function closeTask(run, task, extra = {}) {
   saveTask(run, { ...(loadTask(run, task.id) || task), ...decision, ...extra, closedAt: now });
   reclaimTask(run, task);
   return `${note}${row.state === "needs-decision" ? "; its decision is marked resolved" : ""}`;
+}
+
+// A running gemini attempt has no token count until it ends: the cursor-delegate relay reports usage
+// once, in its result.
+function tokensLater(d) {
+  return d.state === "running" && d.agent === "gemini" && !d.tokensIn && !d.tokensOut ? " (Gemini reports tokens when the attempt ends)" : "";
 }

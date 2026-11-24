@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { eventually, fixture, readJson, writeJson } from './helpers.mjs';
+import { RELAY_FOLDERS, eventually, fixture, readJson, writeJson } from './helpers.mjs';
 
 // `stop` and `close` reach the tasks a stopped task started (the tasks of every run it created, and so
 // on down); a task that a stop ended reads `stopped` and is not reported as failed or unread; and an
@@ -32,8 +32,8 @@ const minutesAgo = (n) => new Date(Date.now() - n * 60_000).toISOString();
 // These tests make their fixture's fakes record `aborted` too, so they see what a stop leaves behind
 // with the real relays.
 function abortOnSigterm(f) {
-  for (const agent of ['claude', 'codex']) {
-    const file = path.join(f.skills, `${agent}-delegate`, 'scripts', 'relay.mjs');
+  for (const folder of Object.values(RELAY_FOLDERS)) {
+    const file = path.join(f.skills, folder, 'scripts', 'relay.mjs');
     const source = fs.readFileSync(file, 'utf8');
     assert.ok(source.includes("finish('stopped', 'SIGTERM')"), 'the fake relay\'s SIGTERM handler was found');
     fs.writeFileSync(file, source.replace("finish('stopped', 'SIGTERM')", "finish('aborted', 'SIGTERM')"));

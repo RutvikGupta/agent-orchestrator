@@ -47,7 +47,8 @@ const codex = {
   piped: (command, output, code = 0) => codex.run(command, code, output),
   edit: (name, failed = false) => [{ type: 'item.completed', item: { id: `item_${++ids}`, type: 'file_change', status: failed ? 'failed' : 'completed', changes: [{ path: 'src/a.js', kind: 'update' }] } }],
 };
-const agents = { claude, codex };
+// Gemini's relay (cursor-delegate) writes Claude's events, so its streams are built as Claude's.
+const agents = { claude, codex, gemini: claude };
 const times = (n, make) => Array.from({ length: n }, make).flat();
 const at = (events, iso) => events.map((e, i) => (i === events.length - 1 ? { ...e, timestamp: iso } : e));
 
@@ -69,7 +70,7 @@ function streams(t) {
   return { open, stuck: (agent, events) => open(agent, events).stuck() };
 }
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   const a = agents[agent];
 
   test(`${agent}: three failing runs with only reads between them are stuck`, (t) => {
@@ -354,7 +355,7 @@ test('stuck ranks after failed and before awaiting review, waits from its first 
   assert.deepEqual(lane.sort(byUrgency).map((item) => [item.kind, item.rank]), [['failed', 2], ['stuck', 2.5], ['awaiting-review', 3], ['silent', 4]]);
 });
 
-for (const agent of ['claude', 'codex']) {
+for (const agent of ['claude', 'codex', 'gemini']) {
   test(`${agent}: status, watch and the dashboard show a stuck task while it runs, and never once it finishes`, async (t) => {
     const f = await fixture(t);
     const run = await f.newRun();

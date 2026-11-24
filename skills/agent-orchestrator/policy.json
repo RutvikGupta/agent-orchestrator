@@ -69,6 +69,39 @@
       }
     }
   },
-  "rankNote": "rank is how strong a tier's model is, on one scale for both agents. A delegated task may start tasks at its own rank or lower, never higher (start refuses it).",
+  "gemini": {
+    "note": "Gemini 4 only, through Cursor's agent CLI (the cursor-delegate relay). Tiers are listed lightest first. Hydrogen is the fast, cheap model; Neon is the coding model: first on public agentic-coding indexes, at a lower price per token than Opus or astra. Cursor puts the effort in the model id (gemini-4-neon-high).",
+    "tiers": {
+      "light": {
+        "model": "gemini-4-hydrogen",
+        "rank": 1,
+        "effort": "low",
+        "use": "mechanical steps with nothing to judge: running tests or gates and reporting, inventories and summaries, mechanical edits",
+        "budget": 1
+      },
+      "standard": {
+        "model": "gemini-4-hydrogen",
+        "rank": 2,
+        "effort": "high",
+        "use": "well-specified, bounded coding: small changes with clear done criteria in 1 to 5 files, tests for existing behavior, lint or type fixes, follow-on fixes",
+        "budget": 3
+      },
+      "strong": {
+        "model": "gemini-4-neon",
+        "rank": 3,
+        "effort": "medium",
+        "use": "coding that needs more judgment: a change across a few modules from a clear design, debugging in a known area, reviews of medium diffs, a standard attempt that failed",
+        "budget": 6
+      },
+      "complex": {
+        "model": "gemini-4-neon",
+        "rank": 4,
+        "effort": "high",
+        "use": "hard or high-risk implementation: several modules, an interface other code depends on, a large unfamiliar subsystem, a large or risky review, a failed strong attempt",
+        "budget": 12
+      }
+    }
+  },
+  "rankNote": "rank is how strong a tier's model is, on one scale for every agent. A delegated task may start tasks at its own rank or lower, never higher (start refuses it).",
   "budgetNote": "budget: a tier's default cost budget per task in US dollars, used until the tier has 5 finished tasks on this machine; after that the budget is the tier's measured cost per accepted task (orch.mjs cost)."
 }

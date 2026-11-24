@@ -1,7 +1,7 @@
 // `review` and `rework`: one review round of a task's work in two commands.
 //
-// `review RUN TASK` starts the other model (Codex on Claude's work, Claude on Codex's) as a
-// read-only reviewer task, `review-TASK` (`review-TASK-2` and on for later rounds), with a brief
+// `review RUN TASK` starts another model (Codex on Claude's or Gemini's work, Claude on Codex's; or
+// the agent `--agent` names) as a read-only reviewer task, `review-TASK` (`review-TASK-2` and on for later rounds), with a brief
 // built here: the author's brief, the diff of its work, its final report, and what to report. The
 // size of the diff picks the reviewer's tier. `rework RUN TASK` resumes the author's own session
 // with the reviewer's findings.
@@ -17,7 +17,7 @@ import path from "node:path";
 import { CACHE_PATH, CLI_PATH, TASK_ID } from "../config.mjs";
 import { attemptReasonOf, reviewRoundsOf, reviewsPath, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
 import { callerIdentity, guard, mayAct, ownershipOf, recordChange, runNamed } from "../ownership.mjs";
-import { COMMAND_AGENT } from "../policy.mjs";
+import { COMMAND_AGENT, POLICY_AGENTS, peerAgent } from "../policy.mjs";
 import { describe, loadRun, loadTask, relayAlive, taskDir, validTask } from "../runs.mjs";
 import { die, emit, readJson } from "../util.mjs";
 import { lessonsSection, reviewTestingSection } from "./brief.mjs";
@@ -68,10 +68,11 @@ export function cmdReview(args) {
   const change = changeOf(run, author);
   if (!change.files.length) die(`${id} has no changes since ${short(change.base)} (committed, uncommitted or new files), so there is nothing to review`);
   const size = sizeOf(change);
-  const agent = author.agent === "claude" ? "codex" : "claude";
+  const agent = reviewerOf(author, args.agent);
   const tier = args.tier || size.tier;
   const { round, name } = nextReview(run, id);
-  const why = `${agent} reviews ${id}'s ${author.agent} work, the other model; ${size.text}${args.tier && args.tier !== size.tier ? `; --tier ${args.tier} given` : ""}`;
+  const chosen = args.agent === undefined ? "the other model" : "chosen with --agent";
+  const why = `${agent} reviews ${id}'s ${author.agent} work, ${chosen}; ${size.text}${args.tier && args.tier !== size.tier ? `; --tier ${args.tier} given` : ""}`;
   const file = path.join(run.dir, "reviews", `${name}.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, reviewBrief({ run, author, row, agent, change, focus, root: change.cwd || run.repo }));
@@ -109,11 +110,20 @@ export function cmdReview(args) {
   );
 }
 
+// The agent that reviews `author`'s work: the one --agent names, or by default another model (Codex
+// reviews Claude's and Gemini's work, Claude reviews Codex's: policy.mjs, peerAgent).
+function reviewerOf(author, wanted) {
+  if (wanted === undefined) return peerAgent(author.agent);
+  const agent = String(wanted).trim();
+  if (!POLICY_AGENTS.includes(agent)) die(`--agent must name the reviewing agent: ${POLICY_AGENTS.join(", ")}`, 2);
+  return agent;
+}
+
 // Why a task's work cannot be reviewed with `review`, or null.
 function authorProblem(task) {
   if (task.reviews) return `${task.id} is itself a review; review the task it reviewed (${task.reviews.task})`;
   if (task.agent === COMMAND_AGENT) return `${task.id} is a command task: it has no brief or session to review`;
-  if (!["claude", "codex"].includes(task.agent)) return `${task.id} has not started, so there is nothing to review`;
+  if (!POLICY_AGENTS.includes(task.agent)) return `${task.id} has not started, so there is nothing to review`;
   if (task.babysit) return `${task.id} babysits a pull request; review the pull request instead`;
   if (task.readOnly) return `${task.id} is read-only, so it changed nothing to review`;
   return null;
@@ -498,10 +508,16 @@ function missingSection(missing, change, agent) {
     const what = m.shown ? `cut short: the brief shows its first ${kb(m.shown)}` : "left out";
     return `- ${code(m.path)} (${lines ? `${lines}, ` : ""}${size}): ${what}`;
   });
+  // A Codex reviewer runs git itself. A Claude reviewer has no shell, and a Gemini reviewer's
+  // read-only mode is not known to have one, so both read files with their file tools.
   const read = agent === "codex"
     ? change.cwd
       ? `Read each of them directly: \`git -C ${quote(change.cwd)} diff ${change.mergeBase} -- <file>\` shows a changed file's diff, and a new file you read in full in ${code(change.cwd)}.`
       : `Read each of them directly: \`git -C ${quote(change.repo)} diff ${change.mergeBase} ${change.ref} -- <file>\` shows its diff.`
+    : agent === "gemini"
+      ? change.cwd
+        ? `Read each of them directly with your file tools, in ${code(change.cwd)}, which holds the author's version; the paths are relative to that folder.`
+        : "Your directory does not hold the author's version of these files: review what is shown, and list in your report each file you could not see."
     : change.cwd
       ? `Read each of them directly with the Read tool, in ${code(change.cwd)}, which holds the author's version; the paths are relative to that folder.`
       : "Your directory does not hold the author's version of these files, and you have no shell to see their diff: review what is shown, and list in your report each file you could not see.";
@@ -536,6 +552,10 @@ function reviewBrief({ run, author, row, agent, change, focus, root }) {
   const amount = `It is ${plural(lines, "changed line")} in ${plural(change.files.length, "file")}: ${fileList(change.files)}.`;
   const how = agent === "codex"
     ? `See it yourself with ${change.commands.map(code).join(", and new files with ")}${change.cwd ? " (the diff leaves new files out; the copy below has them)" : ""}. The same diff follows.`
+    : agent === "gemini"
+      ? change.cwd
+        ? `You run read-only, so the diff follows. Read the changed files in full in ${code(change.cwd)}, with your file tools, wherever the diff's context is not enough.`
+        : `You run read-only, so the diff follows. The files in your directory are not the author's version: rely on the diff.`
     : change.cwd
       ? `Your read-only mode has no shell, so the diff follows. Read the changed files in full in ${code(change.cwd)}, with Read, Glob and Grep, wherever the diff's context is not enough.`
       : `Your read-only mode has no shell, so the diff follows. The files in your directory are not the author's version: rely on the diff.`;
@@ -563,6 +583,8 @@ function reviewBrief({ run, author, row, agent, change, focus, root }) {
 
   s.push(agent === "codex"
     ? "## How to confirm a finding\n\nYou run in a read-only sandbox. Run the tests, or any command that writes no file, to reproduce a finding. A command that must write may fail there: then show the defect from the code, and say that you could not run it."
+    : agent === "gemini"
+      ? "## How to confirm a finding\n\nYou run read-only. Show each defect from the code: the input that makes it fail, and the path the code takes on it. Run a command only if it writes no file; when one is refused, rely on the code."
     : "## How to confirm a finding\n\nYou have no shell. Show each defect from the code: the input that makes it fail, and the path the code takes on it.");
 
   s.push(`## Report

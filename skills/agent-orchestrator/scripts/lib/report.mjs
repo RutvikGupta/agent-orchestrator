@@ -621,10 +621,13 @@ export function reportFields(run, task, row) {
 
 const quote = (value) => /^[\w./:-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", "'\\''")}'`;
 
+// The agents that name their tier on every attempt; a Claude follow-up keeps its tier by itself.
+const TIER_EVERY_ATTEMPT = new Set(["codex", "gemini"]);
+
 // The command that resumes a task row's session with a delta brief, keeping its agent, its Codex
-// tier and its read-only mode, which `start` does not carry over by itself.
+// or Gemini tier and its read-only mode, which `start` does not carry over by itself.
 export function resumeCommand(run, task) {
-  return `node ${quote(CLI_PATH)} start ${quote(run.id)} ${quote(task.id)} --agent ${quote(task.agent)}${task.agent === "codex" && task.tier ? ` --tier ${quote(task.tier)}` : ""}${task.mode?.split("+")[0] === "read-only" ? " --read-only" : ""} --brief <delta> -- --session ${task.session ? quote(task.session) : "<id>"}`;
+  return `node ${quote(CLI_PATH)} start ${quote(run.id)} ${quote(task.id)} --agent ${quote(task.agent)}${TIER_EVERY_ATTEMPT.has(task.agent) && task.tier ? ` --tier ${quote(task.tier)}` : ""}${task.mode?.split("+")[0] === "read-only" ? " --read-only" : ""} --brief <delta> -- --session ${task.session ? quote(task.session) : "<id>"}`;
 }
 
 // Extra lines that `wait` prints for these task rows, for example a dead or silent task.

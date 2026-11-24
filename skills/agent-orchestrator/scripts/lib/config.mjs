@@ -72,11 +72,21 @@ export function napBudgetMs(value = process.env.AGENT_ORCH_NAP_BUDGET) {
   return m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : 10 * 60000;
 }
 
-// Supported implementers. Keys match the delegate-skills naming: `<key>-delegate`.
+// Supported implementers. `relay` names the delegate skill that runs the agent, `<relay>-delegate`
+// (relayFolder); it defaults to the key. Gemini models run through Cursor's `agent` CLI, so the
+// gemini key runs the cursor-delegate relay.
 export const AGENTS = {
   claude: { bin: "claude", vendor: "Anthropic", authCmd: ["auth", "status"] },
   codex: { bin: "codex", vendor: "OpenAI", authCmd: ["login", "status"] },
+  // Cursor's status in JSON says isAuthenticated, which is false for a partial login (a missing
+  // refresh token) although the command exits 0 (util.mjs, agentLogin).
+  gemini: { bin: "agent", relay: "cursor", vendor: "Google via Cursor", authCmd: ["status", "--format", "json"], authJson: true },
 };
+
+// The delegate skill folder whose scripts/relay.mjs runs an agent: claude-delegate, cursor-delegate.
+export const relayFolder = (key) => `${(Object.hasOwn(AGENTS, key) && AGENTS[key].relay) || key}-delegate`;
+// An agent's display name: "Claude", "Codex", "Gemini".
+export const agentName = (key) => String(key).charAt(0).toUpperCase() + String(key).slice(1);
 
 // The hosts' own files: Claude Code's transcripts, and Codex's session logs (rollouts).
 export const CLAUDE_PROJECTS = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects");

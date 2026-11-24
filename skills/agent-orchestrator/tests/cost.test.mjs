@@ -11,7 +11,7 @@ const table = JSON.parse(fs.readFileSync(new URL('../prices.json', import.meta.u
 const close = (actual, expected, what) => assert.ok(Math.abs(actual - expected) < 1e-9, `${what}: ${actual} != ${expected}`);
 
 test('every tier model has a price, and the price table is valid', () => {
-  for (const agent of ['claude', 'codex']) {
+  for (const agent of ['claude', 'codex', 'gemini']) {
     for (const [tier, spec] of Object.entries(policy[agent].tiers)) {
       assert.ok(priceOf(spec.model, table), `${agent} ${tier} (${spec.model}) has no price`);
       assert.ok(spec.budget > 0, `${agent} ${tier} has no default budget`);
@@ -50,6 +50,10 @@ test("an attempt's cost: Claude's own figure first, else each call at its model,
   // A model the events name but the table no longer prices falls back to the tier's model.
   close(attemptCost('codex', { model: 'gpt-5-retired', tokens: { input: 1e6, cached: 0, output: 0 } }, 'gpt-6.1-terra', table).usd, 1, 'retired model');
   assert.equal(attemptCost('codex', { model: 'gpt-5-retired', tokens: { input: 1 } }, null, table), null);
+  // Gemini, like Codex, counts cache reads inside its input and prices the rest at the input rate.
+  close(attemptCost('gemini', { tokens: { input: 3e6, cached: 2e6, output: 1e6 } }, 'gemini-4-neon', table).usd, 3 + 0.3 + 15, 'gemini totals');
+  // An agent the table has no rule for is not priced as another agent.
+  assert.equal(attemptCost('robot', { tokens: { input: 1e6, cached: 0, output: 0 } }, 'gemini-4-neon', table), null);
 });
 
 test("a tier's budget is its measured cost per accepted task once it has enough tasks, else its default", () => {
