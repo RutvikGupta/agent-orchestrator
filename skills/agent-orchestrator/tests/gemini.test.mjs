@@ -186,7 +186,6 @@ test('start refuses a gemini task what it cannot honor, and starts nothing', asy
   await refused(['--tier', 'standard', '--effort', 'low'], /the gemini standard tier runs at high only/);
   await refused(['--tier', 'standard', '--offline'], /--offline is not supported for gemini: Cursor's sandbox has not been shown to block the network/);
   await refused(['--tier', 'standard', '--confine'], /--confine applies to Claude tasks only; a gemini task takes --sandbox or --read-only/);
-  await refused(['--tier', 'standard', '--babysit', '--pr', '42'], /A Codex or Gemini implementer hands its pull request to a Claude babysitter/);
   // A sandbox mode after -- would run a mode other than the one start records.
   for (const passthrough of [['--sandbox', 'disabled'], ['--sandbox=enabled']]) {
     await refused(['--tier', 'standard', '--sandbox', '--', ...passthrough], /a gemini task's sandbox mode comes from start: pass --sandbox before --/);

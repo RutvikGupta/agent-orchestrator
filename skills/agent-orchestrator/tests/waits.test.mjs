@@ -42,10 +42,9 @@ test('every brief says to park instead of waiting in the session, and the decisi
     assert.match(note, /Never wait in your session for more than a few minutes: no sleep, nap or polling loops/);
     assert.match(note, /park-until --every 2m -- <command that exits 0 once it is done>/);
     assert.match(note, /end your turn with a final message whose first line is `PARKED: waits for <what>`/);
-    assert.match(note, /A babysitter keeps parking as its brief says/);
     assert.doesNotMatch(note, /nap 30s \|\| break/, 'no polling loop is suggested');
   }
-  assert.match(decisionNote(false), /nap 5m`, which returns as soon as a message arrives \(an attempt's naps may add up to 10 minutes; past that, `nap` refuses/);
+  assert.match(decisionNote(), /nap 5m`, which returns as soon as a message arrives \(an attempt's naps may add up to 10 minutes; past that, `nap` refuses/);
 });
 
 test('a Claude relay compacts at AGENT_ORCH_CLAUDE_COMPACT_WINDOW, 300k by default; a set CLAUDE_CODE_AUTO_COMPACT_WINDOW is kept', () => {

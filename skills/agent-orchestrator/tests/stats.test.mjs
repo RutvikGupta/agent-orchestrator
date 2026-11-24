@@ -32,7 +32,7 @@ test('stats groups task outcomes and reports every column using all attempts', a
   writeJson(resumed.file, { ...record, acceptedAt: '2026-01-01T00:10:00Z', acceptedAttempt: 2, retries: 2 });
   await task(f, run, 'limited', { config: { status: 'failed', error: 'Usage limit reached' }, fields: { plan: { type: 'implement' } }, elapsed: 120000 });
   await task(f, run, 'transient', { config: { status: 'failed', error: 'HTTP 503 Service Unavailable' }, fields: { readOnly: true }, elapsed: 240000 });
-  await task(f, run, 'stopped', { config: { status: 'stopped' }, fields: { babysit: true }, elapsed: 300000 });
+  await task(f, run, 'stopped', { config: { status: 'stopped' }, fields: { plan: { type: 'debug' } }, elapsed: 300000 });
   const aborted = await task(f, run, 'aborted', { config: { status: 'aborted' }, fields: { tier: 'standard', attemptTiers: { 1: 'standard' } }, elapsed: 360000 });
   // A relay that exits without a result is also aborted, and has no timing sample.
   fs.unlinkSync(aborted.resultFile);
@@ -55,7 +55,7 @@ test('stats groups task outcomes and reports every column using all attempts', a
   assert.deepEqual(counts(implement), { tasks: 3, attempts: 4, firstAttemptAccepted: 1, accepted: 2, integrated: 1,
     failed: 1, limitHits: 1, transientErrors: 1, tokensIn: 480, tokensOut: 120,
     medianFirstAttemptMs: 120000, medianReviewWaitMs: 180000, tokensInPerAccepted: 240 });
-  assert.deepEqual(stats.byType.map((g) => g.type).sort(), ['babysit', 'implement', 'read-only', 'research', 'write']);
+  assert.deepEqual(stats.byType.map((g) => g.type).sort(), ['debug', 'implement', 'read-only', 'research', 'write']);
   assert.equal(stats.byType.find((g) => g.type === 'research').failed, 0);
   const tierImplement = stats.byAgentTierType.find((g) => g.agent === 'codex' && g.type === 'implement');
   assert.deepEqual(counts(tierImplement), counts(implement));

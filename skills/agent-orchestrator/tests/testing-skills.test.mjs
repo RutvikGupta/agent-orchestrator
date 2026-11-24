@@ -134,7 +134,7 @@ test('the section is left out without testing skills, and a long list ends with 
   assert.equal(lines[25], '- Less likely to apply: `mock-26`, `mock-27` (in .claude/skills/ or .agents/skills/)');
 });
 
-test('reviews check that the skill ran, research and babysitters get no section, and every brief asks for the check', async (t) => {
+test('reviews check that the skill ran, research gets no section, and every brief asks for the check', async (t) => {
   const f = await fixture(t);
   skills(f);
   const run = await f.newRun('variants');
@@ -153,7 +153,7 @@ test('reviews check that the skill ran, research and babysitters get no section,
   assert.ok(section(debug.text).includes(INSTRUCTION));
   assert.match(debug.text, /## Gates\n\n[\s\S]*If this brief has a "Testing skills" section, use the skill from it that applies to reproduce the/);
 
-  for (const [id, extra] of [['research-feed', []], ['babysit-1', ['--type', 'babysit']]]) {
+  for (const [id, extra] of [['research-feed', []]]) {
     const shown = await f.command(['brief', run.id, id, ...extra]);
     assert.doesNotMatch(shown.stdout, /testing skills/, id);
     const out = await draft(f, run, id, [...extra, '--force']);

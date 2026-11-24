@@ -548,7 +548,7 @@ test('elapsed time shows seconds only under a minute, and only a running row cou
   assert.deepEqual(['45s', '27m18s', '1h05m', '18d0h', '-'].map(shortElapsed), ['45s', '27m', '1h05m', '18d0h', '-']);
   const at = '2026-01-01T00:00:00.000Z';
   assert.equal(ticking({ state: 'running', startedAt: at }), true);
-  assert.equal(ticking({ state: 'running', phase: 'parked', startedAt: at }), false, 'a parked babysitter does not count up');
+  assert.equal(ticking({ state: 'running', phase: 'parked', startedAt: at }), false, 'a parked task does not count up');
   assert.equal(ticking({ state: 'completed', startedAt: at }), false);
   assert.equal(ticking({ state: 'running' }), false, 'no start time, nothing to count from');
 });
@@ -581,7 +581,7 @@ test('a row awaiting review is tinted purple and its dot pulses', () => {
   vm.runInContext(`${snippet('const outcome=', 'const exitedLabel=')}${snippet('const reviewing=', '\n')};${snippet('const dotClass=', '\n')};this.reviewing=reviewing;this.dotClass=dotClass;`, context);
   const waiting = { state: 'completed', phase: 'awaiting-review', attention: { kind: 'awaiting-review' } };
   assert.equal(context.dotClass(waiting), 'd-review');
-  // Accepted, or a babysitter the board does not list for review: green as before.
+  // Accepted, or any completed task the board does not list for review: green as before.
   assert.equal(context.dotClass({ state: 'completed', phase: 'accepted', attention: null }), 'd-ok');
   assert.equal(context.dotClass({ state: 'needs-decision', attention: { kind: 'needs-decision' } }), 'd-ask');
   assert.ok(app.includes('(reviewing(t)?" reviewing":"")'), 'the row carries the reviewing class');

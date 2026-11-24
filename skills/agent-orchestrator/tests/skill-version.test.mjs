@@ -96,14 +96,14 @@ test('a changed file gives a notice on stderr at every command until skill --loa
 
   skill.edit('SKILL.md');
   fs.writeFileSync(path.join(skill.dir, 'references', 'new-note.md'), 'A new note.\n');
-  fs.rmSync(path.join(skill.dir, 'references', 'babysit-brief.md'));
+  fs.rmSync(path.join(skill.dir, 'references', 'patterns.md'));
   for (let i = 0; i < 3; i++) {
     const r = skill.run(['runs', '--json'], SESSION);
     assert.deepEqual(JSON.parse(r.stdout), [], 'stdout holds only the command output, as valid JSON');
     assert.ok(r.stderr.startsWith(`orch: ${NOTICE}.`), r.stderr);
     assert.match(r.stderr, /changed SKILL\.md/);
     assert.match(r.stderr, /added references\/new-note\.md/);
-    assert.match(r.stderr, /removed references\/babysit-brief\.md/);
+    assert.match(r.stderr, /removed references\/patterns\.md/);
     assert.ok(r.stderr.includes(path.join(skill.dir, 'SKILL.md')), 'it names the file to read again');
     assert.ok(r.stderr.includes(`${skill.cli} skill --loaded`), 'it names the command that ends it');
     assert.doesNotMatch(r.stderr, /Commits since/, 'no commits outside a git checkout');
@@ -116,7 +116,7 @@ test('a changed file gives a notice on stderr at every command until skill --loa
   assert.equal(state.changed, true);
   assert.equal(state.recorded.fingerprint, before);
   assert.notEqual(state.current.fingerprint, before);
-  assert.deepEqual(state.files, { changed: ['SKILL.md'], added: ['references/new-note.md'], removed: ['references/babysit-brief.md'] });
+  assert.deepEqual(state.files, { changed: ['SKILL.md'], added: ['references/new-note.md'], removed: ['references/patterns.md'] });
   assert.match(skill.run(['skill'], SESSION).stdout, /changed: yes/);
 
   const loaded = JSON.parse(skill.run(['skill', '--loaded', '--json'], SESSION).stdout);

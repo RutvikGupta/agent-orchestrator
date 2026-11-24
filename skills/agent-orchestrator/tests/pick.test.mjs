@@ -77,11 +77,6 @@ test('pick --needs filters abilities, supports repetition, and exits 2 when none
   assert.deepEqual(web.candidates.map((c) => c.agent), ['codex']);
   assert.ok(web.excluded.some((e) => e.agent === 'gemini' && /web/.test(e.reason)));
 
-  const babysit = await f.json(['pick', '--type', 'babysit', '--tier', 'standard', '--needs', 'babysit']);
-  assert.equal(babysit.agent, 'claude');
-  assert.deepEqual(babysit.candidates.map((c) => c.agent), ['claude']);
-  assert.deepEqual(babysit.excluded.map((e) => e.agent).sort(), ['codex', 'gemini']);
-
   const offline = await f.json(['pick', '--type', 'implement', '--tier', 'complex', '--needs', 'offline']);
   assert.deepEqual(offline.candidates.map((c) => c.agent), ['claude', 'codex']);
   assert.ok(offline.excluded.some((e) => e.agent === 'gemini' && /offline/.test(e.reason)));
@@ -92,12 +87,6 @@ test('pick --needs filters abilities, supports repetition, and exits 2 when none
   const webOffline = await f.json(['pick', '--type', 'research', '--tier', 'complex', '--needs', 'web', '--needs', 'offline']);
   assert.equal(webOffline.agent, 'codex');
   assert.deepEqual(webOffline.candidates.map((c) => c.agent), ['codex']);
-
-  // Conflicting --needs leave no candidate -> exit 2 with explanation.
-  const conflict = await f.command(['pick', '--type', 'implement', '--tier', 'standard', '--needs', 'web', '--needs', 'babysit'], { code: 2 });
-  assert.match(conflict.stderr, /no candidate left/);
-  assert.match(conflict.stderr, /web/);
-  assert.match(conflict.stderr, /babysit/);
 
   // Frontier + --needs web leaves no candidate -> exit 2.
   const frontierWeb = await f.command(['pick', '--type', 'research', '--tier', 'frontier', '--needs', 'web'], { code: 2 });

@@ -146,7 +146,7 @@ for (const agent of ['claude', 'codex', 'gemini']) {
     const { stuck } = streams(t);
     const cli = 'node /skills/agent-orchestrator/scripts/orch.mjs';
     for (const command of [
-      `${cli} pr-watch 12 --repo example-org/example-repo`, `${cli} wait run-1 --timeout 5m`, 'timeout 900 node scripts/orch.mjs wait run-1',
+      `${cli} nap 30s`, `${cli} wait run-1 --timeout 5m`, 'timeout 900 node scripts/orch.mjs wait run-1',
       'gh pr checks 12', 'gh run watch 99', 'sleep 30 && gh pr checks 12', 'while ! gh pr checks 12; do sleep 30; done',
     ]) {
       assert.equal(stuck(agent, times(4, () => a.fail(command, 3, 'checks pending'))), null, command);
