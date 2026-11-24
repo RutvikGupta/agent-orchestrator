@@ -19,7 +19,20 @@ Cursor's original output. When the relay exits, read `result.json` for status, s
 paths and token counts, `final.txt` for the report, and `stderr.txt` for diagnostics. Cursor's
 `inputTokens` excludes cache reads. In one live session the initial turn reported 15,254 fresh and
 17,710 cache-read tokens, and the resumed turn reported 4,417 fresh and 18,322 cache-read tokens.
-Cursor supplies token counts without dollar cost.
+Cursor supplies token counts without dollar cost, and only in its final event.
+
+**The running estimate.** Until that final event, the relay estimates each model call and puts the
+estimate on that call's assistant events in `events.jsonl` (`message.id` is Cursor's
+`model_call_id`; `message.usage` uses Claude's field names), so a reader shows a running total marked
+as an estimate. A call reads the whole context so far: a fixed base for Cursor's own prompt and the
+project's rules, the brief, and every tool call and the part of each result the model sees (not an
+edit's full file before and after); most of it from the cache the previous call wrote. It writes its
+thinking, tool calls and text. Cursor's final totals then replace the estimate in the reader and in
+`result.json` (`usage`), which also keeps what the estimate came to (`usageEstimate`). Each run with
+at least three model calls also corrects the estimate for its model: the relay keeps a factor per
+base model in `usage-calibration.json` under `$CURSOR_DELEGATE_STATE`, else
+`$XDG_STATE_HOME/cursor-delegate`, else `~/.local/state/cursor-delegate`. A run that ends without
+Cursor's totals keeps its estimate and corrects nothing.
 `result.json` keeps the supplied base ID in `model` and the selected effort in `effort`.
 `cursorModel` holds the ID passed to Cursor, including the effort suffix when supplied. If Cursor
 selects its default, the relay records the model name from its init event when available.

@@ -5,6 +5,7 @@ import { constants, homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { readOnlyVerdict, snapshotReadOnly } from "./tripwire.mjs";
+import { createUsageEstimator } from "./usage-estimate.mjs";
 
 const HELP = `Usage: node relay.mjs [options]
 
@@ -316,12 +317,14 @@ async function relay(opts, brief) {
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const cursorModel = opts.model && opts.effort ? `${opts.model}-${opts.effort}` : opts.model;
+  // Cursor reports usage only in its final event: estimate it per model call until then.
+  const estimator = createUsageEstimator({ model: opts.model ?? null, briefChars: brief.length });
   let eventModel = cursorModel ?? null;
   const result = {
     schema: "delegate-relay.result.v1",
     tool: "cursor", workdir: opts.cd, startedAt, model: opts.model ?? null, cursorModel: cursorModel ?? null, effort: opts.effort ?? null,
     session: opts.session ?? null, resumed: Boolean(opts.session), sessionId: opts.session ?? null,
-    agentVersion: null, finalMessage: "", usage: null, projectConfigPaths: [], ...files,
+    agentVersion: null, finalMessage: "", usage: null, usageEstimate: null, projectConfigPaths: [], ...files,
   };
   const appendEvent = (event) => fs.appendFileSync(files.eventsPath, JSON.stringify(event) + "\n");
   let vendorResult;
@@ -357,14 +360,22 @@ async function relay(opts, brief) {
       eventModel = cursorModel || event.model || null;
       result.cursorModel ??= eventModel;
       appendEvent({ type: "system", subtype: "init", session_id: result.sessionId, model: eventModel });
+    } else if (event.type === "thinking" && event.subtype === "delta") {
+      estimator.thinking(event.text);
     } else if (event.type === "assistant" && Array.isArray(event.message?.content)) {
       const content = event.message.content.filter((block) => block.type === "text");
       if (content.length) {
         result.finalMessage = content.map((block) => block.text).join("\n");
-        appendEvent({ type: "assistant", session_id: result.sessionId, message: { role: "assistant", model: eventModel, content } });
+        const { id, usage } = estimator.text(result.finalMessage);
+        appendEvent({ type: "assistant", session_id: result.sessionId, message: { id, role: "assistant", model: eventModel, content, usage } });
       }
     } else if (event.type === "tool_call") {
+      const tools = Object.entries(event.tool_call || {});
+      const [, tool] = tools.find(([key]) => key.endsWith("ToolCall")) || tools[0] || [];
+      const { id, usage } = estimator.toolCall(event, tool);
       const mapped = toolEvent(event);
+      // A started call is the model's message: it carries the running estimate of that model call.
+      if (mapped?.type === "assistant") Object.assign(mapped.message, { id, model: eventModel, usage });
       if (mapped) appendEvent(mapped);
     } else if (event.type === "result") {
       vendorResult = event;
@@ -436,8 +447,11 @@ async function relay(opts, brief) {
     if (vendorResult.usage) {
       const { inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0 } = vendorResult.usage;
       result.usage = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+      estimator.calibrate(result.usage);
     }
   }
+  // What the running estimate came to, kept beside the exact usage (null when Cursor gave none).
+  result.usageEstimate = estimator.totals();
   if (interruption) {
     status = interruption.status;
     error = interruption.error;

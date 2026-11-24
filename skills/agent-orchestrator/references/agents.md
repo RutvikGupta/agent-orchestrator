@@ -32,7 +32,7 @@ These are hard limits of the relays on this machine:
 | `--read-only` | `plan` mode with Read, Glob, and Grep across home and the agent's `$TMPDIR` (no shell), including with `--offline` or `--sandbox`; reports `readOnlyViolation` | `read-only` sandbox, enforced by Codex; shell commands such as `git diff` and tests still run | Cursor plan mode, with `Write(**)` denied and a tripwire that reports `readOnlyViolation` |
 | Session id (for `-- --session`; a follow-up's tier: `references/review.md`, "Escalate a tier") | `sessionId` | `threadId` | `sessionId`; `-- --session ID` resumes the Cursor session |
 | Messages from the orchestrator | Context after its next tool call, through the user's `PostToolUse` hook | `$ORCH inbox <run> <task> --ack` at each gate | `$ORCH inbox <run> <task> --ack` at each gate |
-| Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost | Totals at the end of each attempt only; no cost from the CLI, so the orchestrator estimates it (`references/tiers.md`, "Prices") |
+| Token usage | Per message while running; exact totals at the end (also an estimated cost, which the views do not show) | Totals per completed turn; no cost | Cursor reports totals only at the end of an attempt, so the relay estimates each model call while it runs (shown with `~`); the exact totals replace the estimate at the end. No cost from the CLI, so the orchestrator estimates it (`references/tiers.md`, "Prices") |
 | Useful relay flags | `--max-turns N`, `--max-budget-usd N`, `--autocompact 400k` (network and babysitter flags are set by `start`) | `--network-access`, `--web-search live`, `--ignore-user-config` | `--deny RULE` and `--allow RULE` (Cursor permission rules, such as `Shell(git push *)` or `Read(/abs/path/**)`); no budget or turn limit flag is documented |
 | `--confine` | File tools stay in the working directory; shell access is unchanged | Unchanged | Not documented |
 | Credential file tools | Read, Edit and Write deny `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.claude/.credentials*`, `~/.codex/auth.json`, `~/.config/gh`, `~/.config/graphite`, `~/.config/github-copilot`, `~/.boto`, `~/.kube`, `~/.fly`, `~/.gnupg`, `~/.npmrc`, `~/.claude.json`, and the resolved orchestrator dashboard token; configured Claude/Codex paths are also denied. An unsandboxed shell can still read these files | Unchanged | Cursor permission rules deny Read and Write of the same credential files as Claude's file tools. A shell command can still read them |
@@ -371,7 +371,7 @@ so that one stays listed after it exits. Two things record them:
   more than a few minutes: `nap` refuses once its naps in one attempt pass 10 minutes.
 - Claude's `--max-budget-usd` and `--max-turns` cap a runaway session. Codex has no budget flag, and
   none is documented for Gemini; use `--timeout`, and the tier that the task's complexity calls for.
-  A Gemini task's cost is an estimate from the token totals that its attempt reports at the end
-  (`references/tiers.md`, "Prices").
+  A Gemini task's cost is an estimate from its token totals: the relay's running estimate while it
+  runs, then the exact totals Cursor reports at the end (`references/tiers.md`, "Prices").
 - A resumed Codex thread re-reads its whole history on every turn, so long rework loops on Codex
   grow its input tokens quickly.
