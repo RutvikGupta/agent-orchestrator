@@ -84,8 +84,8 @@ caching only, so no cache-write charge is counted, and no long-context price ste
 
 How a task's cost is found. A finished Claude attempt reports its own cost, which is used as is.
 Otherwise it is estimated: a Claude attempt call by call at that call's model and long-context band,
-a Codex or Gemini attempt from its token totals (a Gemini attempt reports its totals only at the end,
-and no cost). `status --json` and `result` give a task's `costUsd`, and `costExact` is false when
+a Codex or Gemini attempt from its token totals (a running Gemini attempt from the relay's estimate,
+until Cursor reports exact totals and no cost at the end). `status --json` and `result` give a task's `costUsd`, and `costExact` is false when
 any part is an estimate.
 
 ## Return on cost

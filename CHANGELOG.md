@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A running Gemini task shows a token estimate instead of "at end". Cursor reports usage only in
+  its final event, so the cursor-delegate relay estimates each model call from the stream (context
+  read, mostly from cache, and what the call wrote) and puts it on the call's events, marked as an
+  estimate; the exact totals replace it at the end and correct the next estimate for that model.
+
 - Pull requests are no longer babysat by default. An orchestrator that opens a pull request reports its
   link and is done: it starts no babysitter, does not watch checks or reviews, and sends the pull
   request to no code-review agent. Babysitter tasks are retired (`references/babysit.md` now says so),

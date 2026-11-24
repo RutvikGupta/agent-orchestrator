@@ -76,6 +76,8 @@ function fixture(t) {
     ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
     CURSOR_CONFIG_DIR: userConfig, AGENT_ORCH_SKILLS_DIR: path.join(root, "unused-fake-skills"),
     FAKE_INVOCATION: invocation, FAKE_FIXTURES: fixtures,
+    // Usage calibration stays in the fixture, never in the user's state folder.
+    CURSOR_DELEGATE_STATE: path.join(root, "state"),
   };
   const args = (...extra) => [relay, "--out-dir", out, "--cd", cwd, ...extra];
   const run = (extra = [], options = {}) => spawnSync(process.execPath, args(...extra), {
@@ -84,7 +86,7 @@ function fixture(t) {
   const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
   const artifact = (file) => fs.readFileSync(path.join(out, file), "utf8");
   return {
-    args, run, agent, bin, briefFile, cwd, env, out, userConfig, invocation, artifact,
+    args, run, agent, bin, briefFile, cwd, env, out, userConfig, invocation, artifact, root,
     result: () => readJson(path.join(out, "result.json")),
     invocationData: () => readJson(invocation),
     events: () => artifact("events.jsonl").trim().split("\n").map(JSON.parse),
@@ -408,4 +410,51 @@ test("missing agent exits 127 and still publishes artifacts", (t) => {
   assert.equal(f.result().exitCode, 127);
   assert.equal(f.result().touchedFiles, null);
   assert.equal(f.events().at(-1).is_error, true);
+});
+
+test("estimates each model call's usage while running, then the exact totals replace it and calibrate the next run", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run(["--model", "gemini-4-neon", "--effort", "low"], { env: { FAKE_FIXTURE: "read-edit-shell" } }).status, 0);
+  const events = f.events();
+  const calls = events.filter((e) => e.type === "assistant" && e.message.usage);
+  // Three model calls made the read, edit and shell calls; one more wrote the final text.
+  assert.equal(new Set(calls.map((e) => e.message.id)).size, 4);
+  for (const e of calls) {
+    assert.equal(e.message.model, "gemini-4-neon-low");
+    for (const key of ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"]) {
+      assert.equal(Number.isInteger(e.message.usage[key]), true, key);
+    }
+  }
+  // Each later call reads the context before it from the cache, and reads more than the call before.
+  const firsts = [...new Map(calls.map((e) => [e.message.id, e.message.usage])).values()];
+  assert.equal(firsts[0].cache_read_input_tokens, 0);
+  for (let i = 1; i < firsts.length; i++) {
+    assert.ok(firsts[i].cache_read_input_tokens > 0);
+    const read = (u) => u.input_tokens + u.cache_read_input_tokens;
+    assert.ok(read(firsts[i]) > read(firsts[i - 1]));
+  }
+  // The final event carries Cursor's exact totals, which replace the estimate.
+  const result = f.result();
+  assert.deepEqual(result.usage, { inputTokens: 17261, outputTokens: 228, cacheReadTokens: 26428, cacheWriteTokens: 0 });
+  assert.ok(result.usageEstimate.inputTokens + result.usageEstimate.cacheReadTokens > 0);
+  // The run taught the next estimate for this model.
+  const file = path.join(f.root, "state", "usage-calibration.json");
+  const learned = JSON.parse(fs.readFileSync(file, "utf8"))["gemini-4-neon"];
+  assert.equal(learned.runs, 1);
+  const actualIn = 17261 + 26428;
+  const first = result.usageEstimate.inputTokens + result.usageEstimate.cacheReadTokens;
+  assert.equal(f.run(["--model", "gemini-4-neon", "--effort", "low"], { env: { FAKE_FIXTURE: "read-edit-shell" } }).status, 0);
+  const second = f.result().usageEstimate.inputTokens + f.result().usageEstimate.cacheReadTokens;
+  assert.ok(Math.abs(second - actualIn) < Math.abs(first - actualIn), `calibrated ${second} is nearer ${actualIn} than ${first}`);
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8"))["gemini-4-neon"].runs, 2);
+});
+
+test("a run that ends without Cursor's totals keeps its estimate and teaches nothing", (t) => {
+  const f = fixture(t);
+  f.run(["--model", "gemini-4-neon"], { env: { FAKE_FIXTURE: "read-edit-shell", FAKE_MODE: "no-result" } });
+  const result = f.result();
+  assert.equal(result.usage, null);
+  assert.ok(result.usageEstimate.cacheReadTokens > 0);
+  assert.ok(f.events().some((e) => e.type === "assistant" && e.message.usage?.input_tokens > 0));
+  assert.equal(fs.existsSync(path.join(f.root, "state", "usage-calibration.json")), false);
 });
