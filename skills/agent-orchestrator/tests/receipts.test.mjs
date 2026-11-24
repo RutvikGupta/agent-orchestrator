@@ -220,6 +220,8 @@ function dom({ browser = false } = {}) {
     matches(selector) { return selector.split(',').some((s) => matchOne(this, s.trim())); }
     contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
     *walk() { for (const k of this.kids) if (k instanceof Node) { yield k; yield* k.walk(); } }
+    // The panel's inner scrolling boxes ([data-sk]; app.js innerScroll, restoreInner), or other selectors.
+    querySelectorAll(selector) { const attr = /^\[([\w-]+)\]$/.exec(selector); return [...this.walk()].filter((n) => (attr ? attr[1] in n.attrs : n.matches(selector))); }
     querySelector(selector) { for (const n of this.walk()) if (n.matches(selector)) return n; return null; }
     focus(options) { doc.activeElement = this; doc.focusCalls.push(JSON.parse(JSON.stringify(options ?? null))); }
   }

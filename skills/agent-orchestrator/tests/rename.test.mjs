@@ -275,7 +275,8 @@ test('the dashboard page shows a name in place of the id, and its id and earlier
     assert.ok(start >= 0 && end > start, `dashboard script must contain ${from}`);
     return app.slice(start, end);
   };
-  const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, replaceChildren(...children) { this.children = children; } };
+  // querySelectorAll: the panel holds no inner scrolling box here (app.js innerScroll, restoreInner).
+  const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, querySelectorAll: () => [], replaceChildren(...children) { this.children = children; } };
   const context = vm.createContext({
     sel: null, state: [], lastDetail: '', holding: () => false,
     document: { getElementById: () => panel },
