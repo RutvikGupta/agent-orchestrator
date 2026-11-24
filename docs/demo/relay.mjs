@@ -62,6 +62,12 @@ function nextUsage() {
   totals.calls += 1;
   return u;
 }
+// The usage field of an assistant message: Claude reports each call's. The gemini relay reports none
+// until its result event, so a gemini call only adds to the totals that event carries.
+const messageUsage = () => {
+  const u = nextUsage();
+  return gemini ? {} : { usage: u };
+};
 
 // ---- Claude Code's stream-json events -------------------------------------------------------
 
@@ -91,7 +97,7 @@ function claudeStep(step) {
     claudeResult(pendingClaude.tool, pendingClaude.step);
     pendingClaude = null;
   }
-  const message = (content, stop) => ({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content, stop_reason: stop, usage: nextUsage() }, session_id: script.session });
+  const message = (content, stop) => ({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content, stop_reason: stop, ...messageUsage() }, session_id: script.session });
   if (step.t === "think") return emit(message([{ type: "thinking", thinking: fill(step.text), signature: "" }], null));
   if (step.t === "say") return emit(message([{ type: "text", text: fill(step.text) }], null));
   const tool = toolUse(step);
@@ -207,7 +213,7 @@ function finish(status) {
   const finalMessage = fill(end.finalMessage || "");
   if (claude) {
     if (pendingClaude) claudeResult(pendingClaude.tool, pendingClaude.step);
-    emit({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content: [{ type: "text", text: finalMessage }], stop_reason: "end_turn", usage: nextUsage() }, session_id: script.session });
+    emit({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content: [{ type: "text", text: finalMessage }], stop_reason: "end_turn", ...messageUsage() }, session_id: script.session });
     emit({ type: "result", subtype: status === "completed" ? "success" : "error_during_execution", is_error: status !== "completed", num_turns: totals.calls, result: end.error || finalMessage,
       session_id: script.session, duration_ms: Date.parse(end.finishedAt) - Date.parse(script.startedAt),
       usage: { input_tokens: totals.input, cache_creation_input_tokens: totals.cacheWrite, cache_read_input_tokens: totals.cacheRead, output_tokens: totals.output },
@@ -269,7 +275,7 @@ function answerInbox() {
   for (const s of script.inbox.before || []) step(s);
   const reply = fill(script.inbox.reply);
   const tool = toolUse({ t: "bash", cmd: `node ~/.agents/skills/agent-orchestrator/scripts/orch.mjs reply {run} {task} "${reply.replace(/"/g, '\\"')}"`, why: "Answer the user's message" });
-  emit({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content: [{ type: "tool_use", ...tool }], stop_reason: "tool_use", usage: nextUsage() }, session_id: script.session });
+  emit({ type: "assistant", message: { id: `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`, type: "message", role: "assistant", model, content: [{ type: "tool_use", ...tool }], stop_reason: "tool_use", ...messageUsage() }, session_id: script.session });
   const said = spawnSync(process.execPath, [cli, "reply", runId, taskId, reply], { env: process.env, encoding: "utf8" });
   claudeResult(tool, { t: "bash", out: (said.stdout || said.stderr || "").trim() });
   for (const s of script.inbox.after || []) step(s);
