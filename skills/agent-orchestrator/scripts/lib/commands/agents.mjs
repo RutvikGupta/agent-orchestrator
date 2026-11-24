@@ -10,7 +10,7 @@ import { codexLimits, limitsText, probeClaudeLimits } from "../limits.mjs";
 import { relayHasNetworkPatch } from "../permissions.mjs";
 import { POLICY_AGENTS, loadPolicy } from "../policy.mjs";
 import { evidenceNote, tierEvidence } from "../stats.mjs";
-import { die, emit, findRelay, readJson, which } from "../util.mjs";
+import { agentLogin, die, emit, findRelay, readJson, which } from "../util.mjs";
 
 export function cmdAgents(args) {
   const badSetting = admissionSettingsError();
@@ -25,11 +25,7 @@ export function cmdAgents(args) {
     if (binPath) {
       const v = spawnSync(binPath, ["--version"], { encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"] });
       version = `${v.stdout || ""}${v.stderr || ""}`.trim().split("\n")[0] || null;
-      if (meta.authCmd) {
-        const r = spawnSync(binPath, meta.authCmd, { encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"] });
-        const text = `${r.stdout || ""}${r.stderr || ""}`;
-        auth = r.status === 0 && !/"loggedIn"\s*:\s*false|not logged in/i.test(text) ? "ok" : "logged-out";
-      }
+      auth = agentLogin(key, binPath);
     }
     const missing = [!binPath && `install ${meta.bin}`, !relay && `install ${relayFolder(key)}`, auth === "logged-out" && "log in"]
       .filter(Boolean)
@@ -52,7 +48,7 @@ export function cmdAgents(args) {
   // numbers are left out when they cannot be read.
   const evidence = tierEvidence(policy);
   // Only Codex keeps a list of the models this account may use.
-  const lines = POLICY_AGENTS.flatMap((agent) => Object.entries(policy[agent].tiers).map(([t, v]) =>
+  const lines = POLICY_AGENTS.flatMap((agent) => Object.entries(policy[agent]?.tiers || {}).map(([t, v]) =>
     `${agent} --tier ${t.padEnd(8)} → ${v.model}, ${effortText(v)}${evidenceNote(evidence, agent, t)}: ${v.use || ""}${agent === "codex" ? flag(v.model) : ""}`));
 
   const installed = new Set(rows.filter((r) => r.bin !== "-").map((r) => r.key));

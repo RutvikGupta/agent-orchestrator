@@ -12,6 +12,7 @@
 //
 // `describe` prices every task, so nothing here reads policy.json unless a caller passes the policy.
 import fs from "node:fs";
+import path from "node:path";
 import { PRICES_PATH } from "./config.mjs";
 
 const PER_MILLION = 1_000_000;
@@ -55,12 +56,25 @@ export function prices(file = process.env.AGENT_ORCH_PRICES || PRICES_PATH) {
   return cached.table;
 }
 
-// The model attempt `n` of `task` ran: with a policy, the model of the tier recorded for that
-// attempt; otherwise, or when none was recorded, the task's own model. For an attempt whose events
-// do not name their model (a Codex relay's).
-export function attemptModel(task, n, agent, policy = null) {
+// The model attempt `n` of `task` ran, for an attempt whose events do not name a model with a price:
+// a Codex relay's name none, and Cursor's name its own id with the effort (gemini-4-neon-high). That
+// is the model the attempt's result.json records, when `dir` (the attempt's folder) has one with a
+// price; else, with a policy, the model of the tier recorded for that attempt; else the task's own,
+// latest model.
+export function attemptModel(task, n, agent, policy = null, dir = null) {
+  const saved = dir ? savedModel(dir) : null;
+  if (priceOf(saved)) return saved;
   const tier = task.attemptTiers?.[n];
   return (policy && tier && policy[agent]?.tiers?.[tier]?.model) || task.model || null;
+}
+
+function savedModel(dir) {
+  try {
+    const model = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"))?.model;
+    return typeof model === "string" ? model : null;
+  } catch {
+    return null;
+  }
 }
 
 // The price of `model`, as { input, cacheWrite, cacheRead, output, longContext? }, or null.

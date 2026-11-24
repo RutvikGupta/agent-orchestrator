@@ -291,7 +291,7 @@ test('a bad policy.json stops start with a message that names the problem', asyn
     [JSON.stringify({ claude: { tiers: { ...policy.claude.tiers, standard: { effort: 'high' } } }, codex: { tiers: { standard: { model: 'gpt-x', effort: 7 } } }, gemini: policy.gemini }),
       /claude\.tiers\.standard\.model must be a model name; codex\.tiers\.standard\.effort must be a level/],
     [JSON.stringify({ claude: policy.claude, codex: { tiers: {} }, gemini: policy.gemini }), /codex\.tiers must be an object with at least one tier/],
-    [JSON.stringify({ claude: policy.claude, codex: policy.codex }), /gemini\.tiers must be an object with at least one tier/],
+    [JSON.stringify({ claude: policy.claude, codex: policy.codex, gemini: { tiers: {} } }), /gemini\.tiers must be an object with at least one tier/],
   ]) {
     fs.writeFileSync(path.join(copy, 'policy.json'), content);
     const result = spawnSync(process.execPath, [cli, 'start', run.id, 'bad', '--agent', 'claude', '--why', 'Policy regression',

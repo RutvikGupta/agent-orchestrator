@@ -41,9 +41,11 @@ real relay arguments, records its invocation, emits agent-specific JSONL events,
 and writes `result.json` and `final.txt`. SIGTERM writes a stopped result.
 Its folder decides the agent it plays: `claude-delegate`, `codex-delegate`, or
 `cursor-delegate` for gemini (`RELAY_FOLDERS` in `helpers.mjs`). The gemini fake writes
-Claude's event shape with no cost and its usage only in the final `result` event, puts
-`sessionId`, `usage` and `cursorModel` in `result.json`, and, like the real relay, exits 2
-on a flag outside the relay's contract, after recording its invocation.
+Claude's event shape with no cost and its usage only in the final `result` event (none when
+SIGTERM stops it), names Cursor's model id with the effort in its events, puts `sessionId`,
+`usage`, the base `model` and `cursorModel` in `result.json`, and, like the real relay, exits 2
+on a flag outside the relay's contract, after recording its invocation. `f.json` puts `--json`
+before a `--`, so the words after it reach the relay unchanged.
 
 `f.ready(task)` waits for initial events and the SIGTERM handler to be installed.
 `f.finished(run, id)` waits for both a terminal state and a parsed result. The CLI

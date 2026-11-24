@@ -1005,7 +1005,16 @@ export function describe(run, task) {
     tokens.input += t.input;
     tokens.cached += t.cached;
     tokens.output += t.output;
-    const cost = attemptCost(agent, { ...s, tokens: t }, attemptModel(task, i + 1, agent));
+    // Gemini reports usage only when an attempt ends, and not always then (a stopped Cursor run): an
+    // attempt without that reading has unknown tokens and cost, never an exact zero.
+    if (agent === "gemini" && !s.exact) {
+      exact = false;
+      costExact = false;
+      current = s;
+      seen.push({ dir, agent, summary: s, tokens: t });
+      continue;
+    }
+    const cost = attemptCost(agent, { ...s, tokens: t }, attemptModel(task, i + 1, agent, null, dir));
     if (cost) {
       costUsd = (costUsd || 0) + cost.usd;
       if (!cost.exact) costExact = false;

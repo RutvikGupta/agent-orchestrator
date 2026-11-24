@@ -62,6 +62,7 @@ const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} 
 export function tierProblem(task, policy = loadPolicy()) {
   if (!POLICY_AGENTS.includes(task?.agent)) return null; // the agent is reported on its own
   const label = agentName(task.agent);
+  if (!policy[task.agent]) return `policy.json has no ${task.agent} tiers, so ${label} tasks cannot start`;
   const names = Object.keys(policy[task.agent].tiers);
   if (task.agent === "claude" && task.type === "babysit") {
     if (task.tier == null || task.tier === "") return null;

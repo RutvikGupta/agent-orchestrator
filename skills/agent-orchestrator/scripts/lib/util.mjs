@@ -46,15 +46,33 @@ export function findRelay(key) {
   return null;
 }
 
+// Whether an agent's CLI (at `binPath`) is logged in: "ok", "logged-out", or "unknown" for an agent
+// with no login check. A CLI whose check gives JSON (authJson: Cursor's) is logged in only when it
+// says isAuthenticated; output that is not that JSON, as from a CLI too old for the option, counts as
+// logged out. `agents`, and the usage-limit hand-over of `result` and `wait`, all ask this.
+export function agentLogin(key, binPath) {
+  const meta = AGENTS[key];
+  if (!meta?.authCmd) return "unknown";
+  const r = spawnSync(binPath, meta.authCmd, { encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"] });
+  if (meta.authJson) {
+    try { return JSON.parse(r.stdout).isAuthenticated === true ? "ok" : "logged-out"; } catch { return "logged-out"; }
+  }
+  const text = `${r.stdout || ""}${r.stderr || ""}`;
+  return r.status === 0 && !/"loggedIn"\s*:\s*false|not logged in/i.test(text) ? "ok" : "logged-out";
+}
+
 // Where a task stopped by a usage limit of `limited` (one agent key or several) can go on: "resume it
-// on another agent that is ready: codex or gemini". An agent counts as ready here when its CLI and
-// its relay are installed; `agents` also checks its login.
+// on another agent that is ready: codex or gemini". An agent is ready when its CLI and its relay are
+// installed and its CLI is logged in, as `agents` reports.
 export function handOverText(limited) {
   const skip = new Set([limited].flat());
   const others = Object.keys(AGENTS).filter((key) => !skip.has(key));
-  const ready = others.filter((key) => which(AGENTS[key].bin) && findRelay(key));
+  const ready = others.filter((key) => {
+    const bin = which(AGENTS[key].bin);
+    return bin && findRelay(key) && agentLogin(key, bin) !== "logged-out";
+  });
   if (ready.length) return `resume it on another agent that is ready: ${ready.join(" or ")}`;
-  return others.length ? `resume it on another agent once one is ready (${others.join(", ")}: none is installed)` : "resume it once its usage window resets";
+  return others.length ? `resume it on another agent once one is ready (${others.join(", ")}: none is installed and logged in)` : "resume it once its usage window resets";
 }
 
 export function parseDuration(text) {

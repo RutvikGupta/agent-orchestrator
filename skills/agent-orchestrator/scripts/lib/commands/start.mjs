@@ -348,9 +348,8 @@ function prepareStart(args, extra = {}) {
   // A write task publishes (commits, pushes, writes to GitHub) unless the user said to review its
   // work first: --no-publish, which carries over to follow-up attempts.
   const noPublish = Boolean(args["no-publish"] || (prev.attempt && prev.noPublish));
-  const unsupported = unsupportedMode({ key, offline, confine });
+  const unsupported = unsupportedMode({ key, offline, confine, passthrough: args.passthrough });
   if (unsupported) refuse(unsupported, 2);
-  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish });
   const why =
     String(args.why ?? "").replace(/\s+/g, " ").trim() ||
     (automatic?.tier ? `${prev.why || "Follow-up"}; ${escalation}` : keepsChoice ? prev.why : null) ||
@@ -385,6 +384,9 @@ function prepareStart(args, extra = {}) {
       }
     }
   }
+  // The relay's rules protect the credential folders of the environment it runs in, which
+  // agent-env.json can change, as well as the orchestrator's own.
+  const net = relaySafetyArgs({ key, relay, cd, readOnly: Boolean(args["read-only"]), offline, sandbox, confine, babysit, publish: !noPublish, env: { ...process.env, ...agentEnv } });
 
   // The context window at which Claude Code compacts the session (compactWindow).
   const compact = key === "claude" ? compactWindow({ ...process.env, ...agentEnv }) : null;
@@ -442,7 +444,8 @@ function prepareStart(args, extra = {}) {
       if (!args["read-only"] && !offline && !sandbox && childDepth < MAX_NEST_DEPTH) {
         fs.appendFileSync(brief, nestingNote(childDepth));
       }
-      if (noPublish && !args["read-only"]) fs.appendFileSync(brief, publishHoldNote());
+      // Gemini's relay enforces --no-publish with deny rules, so its brief needs no note about it.
+      if (noPublish && !args["read-only"] && key !== "gemini") fs.appendFileSync(brief, publishHoldNote());
       if (babysit) {
         fs.appendFileSync(brief, handoffNote(path.join(taskDir(run, id), HANDOFF_FILE)));
         // A large implementer session kept without a current note: it writes one before it parks.

@@ -50,7 +50,7 @@ function outcome(run, task, dir, results) {
     const summary = summarizeEvents(agent, path.join(dir, `attempt-${n}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
     tokensOut += summary.tokens.output;
-    costUsd += attemptCost(agent, summary, attemptModel(task, n, agent, tierPolicy()))?.usd || 0;
+    costUsd += attemptCost(agent, summary, attemptModel(task, n, agent, tierPolicy(), path.join(dir, `attempt-${n}`)))?.usd || 0;
   }
   const state = decisionsIn(result.finalMessage) ? "needs-decision" : "completed";
   const row = { state, result, tokensIn, tokensOut, costUsd, limitHit: false, phase: phaseOf(task, state) };
@@ -275,7 +275,7 @@ function tierItem(dir, cutoff) {
     const agent = attemptAgent(task, i + 1);
     const summary = summarizeEvents(agent, path.join(dir, `attempt-${i + 1}`, "events.jsonl"), task.cd);
     tokensIn += summary.tokens.input;
-    costUsd += attemptCost(agent, summary, attemptModel(task, i + 1, agent, tierPolicy()))?.usd || 0;
+    costUsd += attemptCost(agent, summary, attemptModel(task, i + 1, agent, tierPolicy(), path.join(dir, `attempt-${i + 1}`)))?.usd || 0;
     if (i === 0) firstSummary = summary;
   });
   return { settled: true, at,

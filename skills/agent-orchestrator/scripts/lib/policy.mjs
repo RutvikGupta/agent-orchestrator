@@ -21,8 +21,13 @@ export const CLAUDE_DEFAULT_TIER = "complex";
 // a substantive reply goes to a fix attempt at BABYSIT_FIX_TIER, in the same session.
 export const BABYSIT_WATCH_TIER = "standard";
 export const BABYSIT_FIX_TIER = CLAUDE_DEFAULT_TIER;
-// Every supported agent has a block of tiers in policy.json: claude, codex, gemini.
+// Every supported agent: claude, codex, gemini. Claude and Codex need a block of tiers in
+// policy.json; Gemini's is optional, so that a policy written before Gemini keeps working, and a
+// gemini task is refused until its policy has one.
 export const POLICY_AGENTS = Object.keys(AGENTS);
+const REQUIRED_AGENTS = ["claude", "codex"];
+// The agents `policy` has tiers for: the required ones, and each other one with a block.
+export const policyAgents = (policy) => POLICY_AGENTS.filter((key) => REQUIRED_AGENTS.includes(key) || policy?.[key] !== undefined);
 // A command task (`start --agent command -- COMMAND...`, scripts/command-relay.mjs) runs a command
 // with no model. Its ceiling applies to the agents its command starts.
 export const COMMAND_AGENT = "command";
@@ -35,7 +40,7 @@ const isObject = (value) => Boolean(value) && typeof value === "object" && !Arra
 export function policyProblems(policy) {
   if (!isObject(policy)) return ["it must be a JSON object"];
   const problems = [];
-  for (const key of POLICY_AGENTS) {
+  for (const key of policyAgents(policy)) {
     const tiers = policy[key]?.tiers;
     if (!isObject(tiers) || !Object.keys(tiers).length) {
       problems.push(`${key}.tiers must be an object with at least one tier`);
@@ -85,10 +90,15 @@ export function loadPolicy() {
   catch (error) { die(error.message); }
 }
 
-// An agent's tier names, lightest first.
+// An agent's tier names, lightest first; none for an agent the policy has no block for.
 export function tierOrder(key) {
   if (key === COMMAND_AGENT) return [];
-  return Object.keys(loadPolicy()[key].tiers);
+  return Object.keys(loadPolicy()[key]?.tiers || {});
+}
+
+// The refusal for an agent whose block policy.json lacks (only an optional agent's can be missing).
+function noPolicy(key) {
+  refuse(`${POLICY_PATH} has no ${key} tiers, so ${key} tasks cannot start: add a "${key}" block with its tiers`, 2);
 }
 
 function passthroughValue(argv, flag) {
@@ -141,7 +151,8 @@ function effortFor(key, name, tier, wanted) {
 
 // The tier, model and effort (null: the CLI's default) a task runs. `previousTier` is the tier of
 // the task's earlier attempt by the same agent: a Claude follow-up keeps it unless --tier is given.
-// A new task needs --tier, for every agent; Codex and Gemini tasks name it on every attempt. A choice it cannot accept throws ModelRefused, which
+// A new task needs --tier, for every agent; a follow-up by the same agent keeps its tier (start passes
+// it as args.tier for Codex and Gemini). A choice it cannot accept throws ModelRefused, which
 // `start` turns into its own refusal: `dispatch` skips that one task and starts the others.
 export function modelFor(key, args, previousTier = null) {
   // The words after `--` are the command itself, so a `--model` there is the command's own.
@@ -151,6 +162,7 @@ export function modelFor(key, args, previousTier = null) {
     return { tier: null, model: null, effort: null };
   }
   const policy = loadPolicy();
+  if (!policy[key]) noPolicy(key);
   const { tiers } = policy[key];
   const override = args.model ?? passthroughValue(args.passthrough, "--model") ?? passthroughValue(args.passthrough, "--effort");
   if (key === "claude") {
@@ -164,7 +176,7 @@ export function modelFor(key, args, previousTier = null) {
     const tier = tierOf(tiers, name) || refuse(`unknown --tier "${args.tier}" for Claude (choose: ${tierList(tiers)})`, 2);
     return { tier: name, model: tier.model, effort: effortFor(key, name, tier, args.effort) };
   }
-  // Codex and Gemini: --tier on every attempt.
+  // Codex and Gemini: --tier, or the follow-up's previous tier, which start passes as args.tier.
   const names = Object.keys(tiers);
   const name = agentName(key);
   if (override !== null) refuse(`choose the ${name} model with --tier (${names.join(" | ")}), not --model/--effort`, 2);
@@ -213,7 +225,7 @@ export function ceilingFor(name, policy = loadPolicy()) {
   if (!ceiling) refuse(`unknown --max-tier "${name}" (choose: ${Object.keys(policy.claude.tiers).join(", ")})`);
   const rank = rankOf(policy, "claude", name);
   const choices = {};
-  for (const agent of POLICY_AGENTS) {
+  for (const agent of policyAgents(policy)) {
     const eligible = Object.keys(policy[agent].tiers)
       .filter((tier) => rankOf(policy, agent, tier) <= rank)
       .sort((a, b) => rankOf(policy, agent, b) - rankOf(policy, agent, a));
@@ -255,7 +267,7 @@ export const lowerEffort = (wanted, cap) => {
 export function boundedModel(key, name, env = process.env) {
   if (!POLICY_AGENTS.includes(key)) refuse(`--agent must be ${POLICY_AGENTS.slice(0, -1).join(", ")} or ${POLICY_AGENTS.at(-1)}`);
   const cap = env.AGENT_ORCH_MAX_TIER ? ceilingFor(env.AGENT_ORCH_MAX_TIER) : null;
-  const choice = modelFor(key, { tier: name || cap?.[key].tier || "standard", passthrough: [] });
+  const choice = modelFor(key, { tier: name || cap?.[key]?.tier || "standard", passthrough: [] });
   const policy = loadPolicy();
   if (cap && rankOf(policy, key, choice.tier) > cap.rank) {
     Object.assign(choice, { tier: cap[key].tier, model: cap[key].model, effort: cap[key].effort || null });
@@ -302,7 +314,7 @@ export function ceilingEnv(name, env = process.env) {
     ...aliases,
     AGENT_ORCH_MAX_TIER: name,
     // AGENT_ORCH_MAX_MODEL_CLAUDE, _CODEX, _GEMINI: each agent's strongest model under the ceiling.
-    ...Object.fromEntries(POLICY_AGENTS.map((agent) => [`AGENT_ORCH_MAX_MODEL_${agent.toUpperCase()}`, cap[agent].model])),
+    ...Object.fromEntries(policyAgents(policy).map((agent) => [`AGENT_ORCH_MAX_MODEL_${agent.toUpperCase()}`, cap[agent].model])),
     AGENT_ORCH_MAX_EFFORT: effort || "",
     ...lowered,
   };
@@ -317,6 +329,7 @@ export const peerAgent = (key) => (Object.hasOwn(PEERS, key) ? PEERS[key] : POLI
 // the closest lower tier.
 export function peerTier(key, name, agent = peerAgent(key)) {
   const policy = loadPolicy();
+  if (!policy[agent]) noPolicy(agent);
   const rank = rankOf(policy, key, name);
   const tiers = Object.keys(policy[agent].tiers);
   const tier = tiers.find((t) => rankOf(policy, agent, t) === rank)

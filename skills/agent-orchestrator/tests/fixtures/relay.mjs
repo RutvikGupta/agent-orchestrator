@@ -21,6 +21,10 @@ const session = argv.includes('--session') ? value('--session') : `fixture-${ven
 const startedAt = new Date().toISOString();
 const model = value('--model');
 const effort = value('--effort');
+// As the real gemini relay does: its events name the id Cursor ran, which carries the effort
+// (gemini-4-neon-high), and result.json's `model` is the base id given with --model.
+const cursorModel = effort ? `${model}-${effort}` : model;
+const eventModel = gemini ? cursorModel : model;
 const event = (entry) => fs.appendFileSync(path.join(out, 'events.jsonl'), `${JSON.stringify(entry)}\n`);
 fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'invocation.json'), JSON.stringify({
@@ -41,7 +45,7 @@ if (gemini) {
 // A larger last model call, for tests of the handoff limits: `contextTokens` input tokens.
 const usage = { input_tokens: config.contextTokens ? config.contextTokens - 20 : 100, cache_read_input_tokens: 20, output_tokens: 30 };
 event(claude
-  ? { type: 'system', subtype: 'init', session_id: session, model }
+  ? { type: 'system', subtype: 'init', session_id: session, model: eventModel }
   : { type: 'thread.started', thread_id: session });
 for (const extra of config.extraEvents || []) event(extra);
 // A shell command running under the relay, as an agent's pending tool call would be; its pid is in
@@ -55,16 +59,18 @@ if (config.shell) {
 function finish(status = config.status || 'completed', signal = null) {
   const finalMessage = config.finalMessage ?? 'Fixture task finished.';
   const exitCode = status === 'completed' ? 0 : 1;
+  // The gemini relay reports usage once, in its result event, and no cost; a stopped Cursor run
+  // reports none, so neither does its result.
+  const resultUsage = gemini && signal ? null : { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 30 };
   if (claude) {
-    // The gemini relay reports usage once, in its result event, and no cost.
     event({ type: 'assistant', effort, message: {
-      id: 'message-1', model, stop_reason: 'end_turn',
+      id: 'message-1', model: eventModel, stop_reason: 'end_turn',
       content: [{ type: 'text', text: finalMessage }],
       ...(gemini ? {} : { usage }),
     } });
     event({ type: 'result', subtype: exitCode ? 'error_during_execution' : 'success',
       is_error: Boolean(exitCode), result: config.error || finalMessage, session_id: session,
-      usage: { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 30 },
+      ...(resultUsage ? { usage: resultUsage } : {}),
       ...(gemini ? {} : { total_cost_usd: 0.01 }) });
   } else {
     event({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: finalMessage } });
@@ -75,10 +81,8 @@ function finish(status = config.status || 'completed', signal = null) {
   const result = {
     schema: 'delegate-relay.result.v1', status, exitCode, signal, finalMessage,
     ...(claude ? { sessionId: session } : { threadId: session }),
-    // As the real gemini relay does: `model` is the base id given with --model, and `cursorModel` the
-    // id Cursor ran, which carries the effort (gemini-4-neon-high).
-    ...(gemini ? { agentVersion: 'fixture-cursor 1.0', cursorModel: effort ? `${model}-${effort}` : model,
-      usage: { inputTokens: 100, outputTokens: 30, cacheReadTokens: 20, cacheWriteTokens: 0 }, stderrTail: '' } : {}),
+    ...(gemini ? { agentVersion: 'fixture-cursor 1.0', cursorModel,
+      usage: resultUsage && { inputTokens: 100, outputTokens: 30, cacheReadTokens: 20, cacheWriteTokens: 0 }, stderrTail: '' } : {}),
     model, effort, touchedFiles: config.touchedFiles || [], finishedAt: new Date().toISOString(),
     startedAt, readOnlyViolation: config.readOnlyViolation ?? false, error: config.error || null,
   };

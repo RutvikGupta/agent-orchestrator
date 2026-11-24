@@ -48,7 +48,9 @@ export function napBudgetMs(value = process.env.AGENT_ORCH_NAP_BUDGET) {
 export const AGENTS = {
   claude: { bin: "claude", vendor: "Anthropic", authCmd: ["auth", "status"] },
   codex: { bin: "codex", vendor: "OpenAI", authCmd: ["login", "status"] },
-  gemini: { bin: "agent", relay: "cursor", vendor: "Google via Cursor", authCmd: ["status"] },
+  // Cursor's status in JSON says isAuthenticated, which is false for a partial login (a missing
+  // refresh token) although the command exits 0 (util.mjs, agentLogin).
+  gemini: { bin: "agent", relay: "cursor", vendor: "Google via Cursor", authCmd: ["status", "--format", "json"], authJson: true },
 };
 
 // The delegate skill folder whose scripts/relay.mjs runs an agent: claude-delegate, cursor-delegate.

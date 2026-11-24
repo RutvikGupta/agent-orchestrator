@@ -101,7 +101,13 @@ export async function fixture(t) {
       assert.equal(result.code, code, `node orch.mjs ${args.join(' ')}\n${result.stdout}\n${result.stderr}\nsignal: ${result.signal}`);
       return result;
     },
-    async json(args, opts) { return JSON.parse((await f.command([...args, '--json'], opts)).stdout); },
+    // --json goes before `--`: the words after it are the relay's, or a command task's, own.
+    async json(args, opts) {
+      const at = args.indexOf('--');
+      const head = at < 0 ? args : args.slice(0, at);
+      const withJson = head.includes('--json') ? args : [...head, '--json', ...(at < 0 ? [] : args.slice(at))];
+      return JSON.parse((await f.command(withJson, opts)).stdout);
+    },
     async git(args) {
       const result = await execute('git', args, options());
       assert.equal(result.code, 0, result.stderr);

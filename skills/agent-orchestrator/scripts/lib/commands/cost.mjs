@@ -40,7 +40,7 @@ function tierTable(args) {
   const table = prices();
   const rows = [];
   for (const agent of POLICY_AGENTS) {
-    for (const [tier, spec] of Object.entries(policy[agent].tiers)) {
+    for (const [tier, spec] of Object.entries(policy[agent]?.tiers || {})) {
       const entry = evidence?.find((e) => e.agent === agent && e.tier === tier);
       const enough = entry && entry.tasks >= EVIDENCE_MIN_TASKS;
       const price = priceOf(spec.model, table);

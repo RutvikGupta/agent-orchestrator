@@ -116,11 +116,12 @@ Usage: node orch.mjs <command> [args] [--json]
                                   required for a new task: Claude light|standard|complex|frontier, Codex
                                   light|standard|strong|complex, Gemini light|standard|strong|complex
                                   (Gemini 4 Hydrogen and Neon, run through Cursor's agent CLI).
-                                  Codex and Gemini name it on every attempt.
                                   Only frontier takes --effort (medium or high).
-                                  Follow-ups keep their tier until two counted failures: start moves
-                                  one tier up in the same session, then refuses after two more failures
-                                  or at the top tier. --tier, a changed --agent, or --no-escalate overrides.
+                                  A follow-up by the same agent needs no --tier: it keeps its tier until
+                                  two counted failures, then start moves it one tier up in the same
+                                  session, and refuses after two more failures or at the top tier.
+                                  --tier (even the same one), a changed --agent, or --no-escalate
+                                  turns that escalation off.
                                   Counted failures are failed, timeout or aborted attempts and review
                                   changes/reject; owner stops and usage-limit stops do not count.
                                   Legacy Claude tasks resume at complex, and --babysit
