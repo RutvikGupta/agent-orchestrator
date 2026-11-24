@@ -180,6 +180,34 @@ const TOOL_NAMES = {
   listDirToolCall: "LS", listDirectoryToolCall: "LS",
 };
 
+// Cursor joins a model's consecutive messages with no separator, also inside one assistant event:
+// a model that wrote a report ending in a fenced block and then a short note (after a background
+// command it started finished) leaves the note glued to the closing fence, as in
+// "```PARKED: waits for ...". The final message is the last message, so split at each closing fence
+// that has text after it and keep the text from the last such point on. A fence line opens a block
+// when none is open, so an opening fence's language tag (```orch-result) is never a split point.
+function lastMessage(text) {
+  const lines = String(text ?? "").split("\n");
+  let open = false;
+  let start = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const fence = /^[\t ]*```(.*)$/.exec(lines[i]);
+    if (!fence) continue;
+    if (!open) {
+      open = true;
+      continue;
+    }
+    open = false;
+    if (fence[1].trim()) {
+      lines[i] = fence[1];
+      start = i;
+      // The glued text may open a block of its own on that same line.
+      open = /^[\t ]*```/.test(lines[i]);
+    }
+  }
+  return lines.slice(start).join("\n");
+}
+
 function toolEvent(event) {
   const tools = Object.entries(event.tool_call || {});
   const [key, tool] = tools.find(([key]) => key.endsWith("ToolCall")) || tools[0] || [];
@@ -369,7 +397,7 @@ async function relay(opts, brief) {
     } else if (event.type === "assistant" && Array.isArray(event.message?.content)) {
       const content = event.message.content.filter((block) => block.type === "text");
       if (content.length) {
-        result.finalMessage = content.map((block) => block.text).join("\n");
+        result.finalMessage = lastMessage(content.map((block) => block.text).join("\n"));
         sawMessage = true;
         const { id, usage } = estimator.text(result.finalMessage);
         appendEvent({ type: "assistant", session_id: result.sessionId, message: { id, role: "assistant", model: eventModel, content, usage } });
@@ -452,7 +480,9 @@ async function relay(opts, brief) {
     // model that wrote two closing messages leaves its report and its PARKED: line in the middle of
     // one run-on text. The final message is the last message, as Claude's is. The result text is
     // used when no message came, and for an error result, whose text is the error.
-    if (typeof vendorResult.result === "string" && (!sawMessage || vendorResult.is_error)) result.finalMessage = vendorResult.result;
+    if (typeof vendorResult.result === "string" && (!sawMessage || vendorResult.is_error)) {
+      result.finalMessage = vendorResult.is_error ? vendorResult.result : lastMessage(vendorResult.result);
+    }
     if (vendorResult.usage) {
       const { inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0 } = vendorResult.usage;
       result.usage = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
