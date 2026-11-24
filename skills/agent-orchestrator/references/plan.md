@@ -32,7 +32,7 @@ the user's choices, and when to ask before dispatching.
   `standard` task of its own, so that you and the later tasks read its summary, not the raw output.
 - Waiting is no plan entry. A command task runs with no model, and `start --unplanned` starts it
   (`references/dispatch.md`, "Plan checks"). A task that waits for something outside it parks
-  (`references/messages.md`). A pull-request babysitter is a `babysit` task (`SKILL.md`, step 8).
+  (`references/messages.md`). Never plan a `babysit` task: babysitters are retired (`SKILL.md`, step 8).
 
 ## Disjoint files are not enough
 

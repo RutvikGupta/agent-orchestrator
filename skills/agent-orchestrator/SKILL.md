@@ -5,8 +5,8 @@ description: >-
   plan the work as data, run up to 8 tasks at once as background agent sessions, review and accept
   every result, integrate it in dependency order, and verify the whole request. Chooses Claude, Codex or
   Gemini and the lightest model tier per task by assessing it and comparing their measured records,
-  never by remaining usage, and records why. Opens a live dashboard and babysits every pull request
-  it opens until it lands. Use when the user asks to orchestrate, fan out, parallelize, or
+  never by remaining usage, and records why. Opens a live dashboard, and reports each pull request
+  it opens. Use when the user asks to orchestrate, fan out, parallelize, or
   coordinate work across agents, run background agents, split a job among Claude, Codex and Gemini, get a
   second opinion or a cross-model review, or watch what launched sessions are doing. Delegates only
   where it pays for its cost, and weighs each model's cost against the task's complexity. For one
@@ -218,29 +218,12 @@ dependency order (a branch merged by hand: `--already-merged`, which `status` na
 full gates on the integrated tree, verify every `acceptance` item with evidence, and publish only as
 the repository's rules and the user's request allow.
 
-## 8. Babysit every pull request you open
+## 8. Pull requests you open
 
-A pull request you open, or push the run's work to, is part of the job until it leaves `OPEN`: never
-report done while nobody watches it. Skip babysitting only when the user says not to, or when the
-repository's rules hand pull requests to someone else. Once it is ready for review (not a draft,
-every planned change pushed, your gates passing on the pushed head), start a babysitter without
-asking; before then, neither start one nor ask about one. A Claude task babysits, never Codex, Gemini
-or your host's sub-agents. **Before you start one, and when it
-finishes, read `references/babysit.md`.**
-
-```bash
-$ORCH brief <run> babysit-<pr> --type babysit
-$ORCH start <run> babysit-<pr> --agent claude --babysit --pr <n> --why "babysits PR #<n>; watching needs no strong model" --brief <brief> --cd <checkout>
-```
-
-A babysitter runs `standard` by default (`--tier light` or `complex`; `frontier` is refused). Work that
-needs a code change, a reply that explains or defends code, or a conflicting rebase ends its attempt
-with a last line `NEEDS FIX: PR #<n> <one line>`; the orchestrator then resumes the same session at
-once on `complex` to fix, push, reply and park, and the next wake resumes at the watch tier.
-
-Whichever agent implemented a pull request, a babysitter takes it: the Claude implementer's own session,
-or a new one that starts from a Codex or Gemini implementer's handoff note (`references/babysit.md`, "Keep it
-with its implementer").
+Open a pull request when the user's request or the repository's rules call for one, and report its
+link. Then the task is done: never start a babysitter (`--babysit`, a `babysit` task), watch its
+checks or reviews, or send it to a code-review agent. Its review belongs to the user and the
+repository's own reviewers.
 
 ## 9. Close what you no longer need, clean up, and report
 
@@ -293,7 +276,7 @@ with its implementer").
 | `references/dashboard.md` | When the user asks about the dashboard, or it escalates an item |
 | `references/review.md` | Before you review, accept, rework or escalate a result (step 6) |
 | `references/integrate.md` | Before you integrate (step 7) |
-| `references/babysit.md` | Before you start a babysitter, and when one finishes (step 8); it fills in the template `references/babysit-brief.md` |
+| `references/babysit.md` | Never: babysitters are retired (step 8). It and its template `references/babysit-brief.md` describe code kept until it is removed |
 | `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers; when `start` exits 7 (the machine is full or short of memory: `wait`, or `start --wait`) |
 | `references/ownership.md` | Before you act on a run you did not launch, after an exit 4, or when you changed another session's task |
 | `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, a long sequential queue, best of N on a cheap tier, or a team of reviewers for a large or risky diff |
