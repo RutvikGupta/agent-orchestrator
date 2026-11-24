@@ -37,7 +37,7 @@ export const DASHBOARD_CALLER = Object.freeze({ kind: "user", via: "dashboard", 
 // wake condition) or on no run. `result` closes a task
 // and `status` and `wait` revive parked watchers and retry tasks only for the owner.
 export const OPEN_COMMANDS = new Set([
-  "status", "wait", "result", "log", "recover", "agents", "stats", "cost", "lesson", "runs", "watch", "nap",
+  "status", "wait", "result", "log", "recover", "agents", "stats", "cost", "pick", "lesson", "runs", "watch", "nap",
   "new", "ask", "tell", "heavy", "reclaim", "dashboard", "pr-watch", "skill", "model", "questions",
   "park-until",
 ]);
@@ -592,7 +592,7 @@ export function gateCommand(command, args) {
       if (run && !ownTask) g = guard(run, `run \`${command}\` on run ${run.id}${rule.ownTask && args._[1] ? ` for task ${args._[1]}` : ""}`, { adopt: args.adopt });
     }
   }
-  const run = !["nap", "park-until", "ask", "tell", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs"].includes(command) ? runNamed(args._[0]) : null;
+  const run = !["nap", "park-until", "ask", "tell", "heavy", "pr-watch", "reclaim", "dashboard", "agents", "new", "runs", "pick"].includes(command) ? runNamed(args._[0]) : null;
   if (run) {
     process.once("exit", () => {
       try {
