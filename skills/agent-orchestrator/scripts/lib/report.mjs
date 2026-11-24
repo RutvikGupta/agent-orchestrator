@@ -22,7 +22,10 @@ const STOP_RE = /\b(?:SIGTERM|SIGINT|SIGKILL|SIGHUP|cancelled|canceled|interrupt
 const PR_WATCH_RE = /(?:^|[\s/"'])orch\.mjs["']?\s+pr-watch(?:\s|$)/;
 
 function parseReport(message) {
-  const blocks = String(message || "").matchAll(/^[\t ]*```orch-result[\t ]*\r?\n([\s\S]*?)^[\t ]*```[\t ]*(?=\r?$)/gm);
+  // A block ends at the first line that starts with a fence, even when text follows it on that line:
+  // Cursor joins a model's consecutive messages without a line break, so a closing fence can run
+  // into the next message (```That earlier ...), and the JSON never holds a line that starts so.
+  const blocks = String(message || "").matchAll(/^[\t ]*```orch-result[\t ]*\r?\n([\s\S]*?)^[\t ]*```/gm);
   let last;
   for (const block of blocks) last = block[1];
   if (last === undefined) return null;
