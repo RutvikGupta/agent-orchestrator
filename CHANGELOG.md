@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A structured report whose closing fence runs into the next sentence still parses. Cursor joins a
+  model's consecutive messages without a line break, so a Gemini report that repeated its
+  `orch-result` block read as invalid; a block now ends at the first line that starts with a fence.
+
 - `orch.mjs pick --type <type> --tier <tier> [--needs web|babysit|offline] [--since 30d] [--json]`
   applies the agent-choice rule from `SKILL.md` (alternation under 5 finished tasks with Gemini
   first for coding at `strong`/`complex`, else lowest default budget; then first-try acceptance and

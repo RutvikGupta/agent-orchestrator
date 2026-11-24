@@ -19,6 +19,16 @@ test('report parsing selects the last block, accepts EOF/whitespace/CRLF, and no
   for (const outcome of ['done', 'partial', 'blocked']) assert.equal(fields(block({ outcome })).report.outcome, outcome);
 });
 
+test('a closing fence glued to the next message still ends its block, so the last block is read', () => {
+  // Cursor joins a model's consecutive messages with no line break: the first report's closing fence
+  // runs into the next message, which repeats the block.
+  const first = { outcome: 'partial', changed: [], checks: [], decisions: [], unresolved: ['first'] };
+  const last = { outcome: 'done', changed: ['a.js'], checks: [], decisions: [], unresolved: [] };
+  const message = `Report\n${block(first)}That earlier run was handled.\n\n${block(last)}`;
+  assert.deepEqual(fields(message).report, last);
+  assert.deepEqual(fields(`${block(last)}Trailing words`).report, last);
+});
+
 test('missing, unfinished and malformed reports do not crash or fall back to an older report', () => {
   for (const message of [undefined, '', 'All done.', '```json\n{}\n```', '```orch-result\n{}']) assert.equal(fields(message).report, null);
   for (const message of ['```orch-result\n{nope}\n```', block(null), block([]), block(12)]) {
