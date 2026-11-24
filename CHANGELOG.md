@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Gemini commits carry no Cursor co-author trailer. Cursor's CLI attributes commits and pull requests
+  to its agent by default, so every commit a Gemini task made ended with `Co-authored-by: Cursor`.
+  The relay's per-run config now turns both off, whatever the user's own Cursor config says.
+
 - A Gemini task's final message is its last message. Cursor's result text joins every closing
   message with no separator, so a task that wrote two closing messages had its `PARKED:` line in
   the middle of the text and did not park. The relay now keeps the last message as the final

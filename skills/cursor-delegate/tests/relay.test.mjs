@@ -199,7 +199,8 @@ test("normalizes read, edit, shell and denied calls plus Cursor's separate cache
 test("continues via --resume and merges only permissions into a private config with a shared chats link", (t) => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.userConfig, "cli-config.json"), JSON.stringify({
-    version: 1, editor: { vimMode: true }, permissions: { allow: ["Read(docs/**)"], deny: ["Write(outside.txt)"] },
+    version: 1, editor: { vimMode: true }, attribution: { attributeCommitsToAgent: true, attributePRsToAgent: true },
+    permissions: { allow: ["Read(docs/**)"], deny: ["Write(outside.txt)"] },
   }));
   const session = "c78bd7fd-0026-4ae5-9ecd-4c97615042fc";
   const run = f.run(["--session", session, "--model", "model[effort=high]", "--read-only",
@@ -218,6 +219,8 @@ test("continues via --resume and merges only permissions into a private config w
     version: 1,
     permissions: { allow: ["Read(docs/**)", "Shell(git diff *)", "Read(test.txt)"],
       deny: ["Write(outside.txt)", "Read(private/**)", "Shell(git push *)", "Write(**)", "Write(**/*)"] },
+    // Delegated commits and pull requests carry no Cursor attribution, whatever the user's config says.
+    attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
   });
   assert.equal(fs.readlinkSync(path.join(invoked.config, "chats")), path.join(f.userConfig, "chats"));
 });
@@ -272,6 +275,7 @@ test("preserves both project and relay rules when Cursor is launched from a proj
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(invocation.config, "cli-config.json"), "utf8")), {
     version: 1,
     permissions: { allow: ["Shell(git status)"], deny: ["Read(root-private.txt)", "Write(parent-private.txt)", "Shell(git push *)"] },
+    attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
   });
 });
 

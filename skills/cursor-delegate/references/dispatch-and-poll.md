@@ -21,6 +21,10 @@ paths and token counts, `final.txt` for the report, and `stderr.txt` for diagnos
 17,710 cache-read tokens, and the resumed turn reported 4,417 fresh and 18,322 cache-read tokens.
 Cursor supplies token counts without dollar cost, and only in its final event.
 
+**No attribution.** The per-run config turns off Cursor's commit and pull-request attribution
+(`attributeCommitsToAgent`, `attributePRsToAgent`), which Cursor turns on by default: a delegated
+commit gets no `Co-authored-by: Cursor` trailer.
+
 **The running estimate.** Until that final event, the relay estimates each model call and puts the
 estimate on that call's assistant events in `events.jsonl` (`message.id` is Cursor's
 `model_call_id`; `message.usage` uses Claude's field names), so a reader shows a running total marked
