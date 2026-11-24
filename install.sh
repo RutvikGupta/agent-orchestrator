@@ -22,7 +22,7 @@ link() { # link <target in repo> <path to create>
   echo "linked $path -> $target"
 }
 
-for skill in agent-orchestrator claude-delegate codex-delegate; do
+for skill in agent-orchestrator claude-delegate codex-delegate cursor-delegate; do
   link "$repo/skills/$skill" "$HOME/.agents/skills/$skill"
   [[ -L "$HOME/.claude/skills/$skill" ]] || link "$HOME/.agents/skills/$skill" "$HOME/.claude/skills/$skill"
 done
