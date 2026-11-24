@@ -32,8 +32,8 @@
 
 - Pull requests are no longer babysat by default. An orchestrator that opens a pull request reports its
   link and is done: it starts no babysitter, does not watch checks or reviews, and sends the pull
-  request to no code-review agent. Babysitter tasks are retired (`references/babysit.md` now says so),
-  and the implement brief no longer asks for a handoff note.
+  request to no code-review agent. The implement brief no longer asks for a handoff note
+  (and the babysitter itself is removed, above).
 
 - A structured report whose closing fence runs into the next sentence still parses. Cursor joins a
   model's consecutive messages without a line break, so a Gemini report that repeated its
