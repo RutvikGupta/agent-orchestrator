@@ -30,56 +30,6 @@ Each agent's brief keeps every constraint of this brief (the agents you start ne
 `;
 }
 
-// What a babysitter's handoff note holds. A parked babysitter whose context has grown large is
-// resumed in a fresh session from this note (park.mjs), so it must say what the session knows.
-export const HANDOFF_RULES = "At most 60 lines: the pull request, branch and worktree; what each review round asked and the commit that answered it; each open thread and its state; each reviewer and where their review was requested; decisions taken and why; what is pending; and what was tried and failed.";
-
-// Appended to a babysitter's brief: where its handoff note lives, and why it keeps it current.
-export function handoffNote(file) {
-  return `
-
----
-
-## Handoff note
-
-Keep a handoff note current at \`${file}\`, and update it before every park. Every call you make re-sends your whole context, so once it has grown large your watcher resumes you in a fresh session that knows only your brief, this note, and what changed on the pull request. Without a note updated in the attempt that parks, it has to keep the large session. ${HANDOFF_RULES}
-`;
-}
-
-// Appended to the brief of a babysitter's attempt at its watch tier, when that is below the tier
-// of its fix attempts: what it does itself, and how it hands a fix on (finish-notice.mjs).
-export function watchTierNote(tier, fixTier) {
-  return `
-
----
-
-## Watch tier: hand fixes to a fix attempt
-
-This attempt runs at your watch tier (\`${tier}\`). Watch, and do the routine upkeep yourself: re-run a flaky check after reading its log, re-add a label, re-request a review, send the repository's Slack pings, rebase or restack when there is no conflict, post a one-line skip note on a bot's nit, and verify a merge.
-
-Do not change code, and do not write substantive review replies, at this tier. When a wake needs a code change, a reply that explains or defends code, or a rebase with conflicts:
-
-1. Gather the facts: the failing checks' names and the relevant log excerpts (with the repository's CI-log tool), each thread's URL with its comment text, and what you ruled out.
-2. Update your handoff note.
-3. End your turn with a final message whose first line is \`NEEDS FIX: PR #<n> <what needs fixing, in one line>\`, then those facts, then the \`orch-result\` block with outcome \`partial\`. Do not park in the same message.
-
-This same session then resumes at once at the \`${fixTier}\` tier as the fix attempt, with your message. It fixes, pushes, replies and parks, and your next wake resumes at this tier again. Do everything that needs no fix before you end.
-`;
-}
-
-// The brief of a babysitter's fix attempt, which finish-notice.mjs starts at `fixTier` when a watch
-// attempt ends with NEEDS FIX. The watch attempt's message follows it as data.
-export function fixBrief({ reason, watchTier, fixTier, model, handoffFile }) {
-  return `## Fix attempt
-
-You are now this babysitter's fix attempt, at the \`${fixTier}\` tier (${model}). Your watch attempt, at the \`${watchTier}\` tier, ended with \`NEEDS FIX: ${reason}\`. Its whole message is quoted at the end of this brief.
-
-Make the fix it asks for. Check each fact it gathered before you act on it. Change the code, run the gates, commit and push, and reply on each thread as your brief's rules say. Then update your handoff note at \`${handoffFile}\`, and park: end your turn with a final message whose first line is \`PARKED: PR #<n> waits for <what>\`, and an \`orch-result\` block with outcome \`parked\`. Your next wake resumes at the \`${watchTier}\` tier.
-
-Do not end this attempt with \`NEEDS FIX:\`: a fix you cannot make goes to your orchestrator as a decision. Stop as your brief's stop rules say when one applies.
-`;
-}
-
 // Appended when the user asked to review a task's work before it lands (start --no-publish).
 export function publishHoldNote() {
   return `
@@ -95,7 +45,7 @@ The user asked to review this work before it lands: do not commit, push, or open
 // Appended to every brief: a question an agent leaves open stalls the work. It decides what its
 // brief covers, asks about the rest with `ask` while it keeps working, and hands back what is still
 // open at the end in a form `orch.mjs` detects.
-export function decisionNote(babysit) {
+export function decisionNote() {
   return `
 
 ---
@@ -105,9 +55,9 @@ export function decisionNote(babysit) {
 Questions reach whoever started you while you work, so never stop to wait for an answer, and never leave a point open as "pending a decision" (in a reply on GitHub or anywhere else). When you finish, the agent that started you is told at once.
 
 - When you are blocked (a gate cannot run here, a credential or service is missing, or the same failure has survived two fix attempts), stop and report it right away in your final message, with the exact command and error. Do not keep retrying or work around it silently.
-- Decide yourself whatever this brief's goal and scope cover, choosing what the brief, the repository's rules, and the existing code point to. List those choices in your final message.${babysit ? " For a reviewer's request: make it when it is within the pull request's scope; otherwise reply that it is a follow-up and list it in the pull request description." : ""}
-- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it${babysit ? ", and keep your loop going" : ""}; when only that is left, ${babysit ? "park as your brief says (the answer is a message, which wakes you) rather than waiting with \`nap\`: a parked wait spends no tokens, and a session held open pays for its whole context again when the wait returns" : `wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives (an attempt's naps may add up to ${napBudgetText()}; past that, \`nap\` refuses and you finish as below)`}.
-- If nothing else is left and no answer has come (or you cannot run \`ask\`), finish${babysit ? " and push" : ""} what you can, then end your session${babysit ? " (stop watching)" : ""} with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer${babysit ? ", and you go back to your loop" : ""}.
+- Decide yourself whatever this brief's goal and scope cover, choosing what the brief, the repository's rules, and the existing code point to. List those choices in your final message.
+- Hand back only a decision beyond this brief: one that changes its scope, the security posture, or the cost, or that needs something only the user has (an approval, a credential, a login). Ask it at once, and keep working: \`node ${CLI_PATH} ask "<question>" --options "a|b" --recommend a\`. The answer arrives as a message. Meanwhile do everything that does not depend on it; when only that is left, wait with \`node ${CLI_PATH} nap 5m\`, which returns as soon as a message arrives (an attempt's naps may add up to ${napBudgetText()}; past that, \`nap\` refuses and you finish as below).
+- If nothing else is left and no answer has come (or you cannot run \`ask\`), finish what you can, then end your session with a final message whose first line is \`NEEDS DECISION:\`, followed by one line per question with the options and your recommendation. The agent that started you decides and resumes this same session with the answer.
 
 ## Keep the final message short
 

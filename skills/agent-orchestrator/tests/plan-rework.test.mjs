@@ -52,31 +52,19 @@ global.setTimeout = (fn, ms, ...args) => {
   return pending;
 }
 
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  fs.mkdirSync(bin);
-  const data = path.join(f.root, 'pr.json');
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR', state: 'OPEN',
-    isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: '',
-    headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main', baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-const fs = require('node:fs');
-if (process.argv[2] === 'pr') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  return (fields) => writeJson(data, { ...readJson(data), ...fields });
-}
-const PARKED = 'PARKED: PR #42 waits for review\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```';
+const PARKED = 'PARKED: waits for the deploy\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```';
 
 // A finished attempt with no watcher record models a process restart, as in park.test.mjs.
 function seedPark(f, run, record, resources = []) {
   const result = path.join(record.outDir, 'result.json');
   writeJson(result, { ...readJson(result), finalMessage: PARKED });
-  writeJson(f.taskFile(run, record.id), { ...task(f, run, record.id), babysit: true,
-    pr: { number: 42, url: 'https://github.com/example/repo/pull/42' },
-    plan: { id: record.id, type: 'babysit', owns: ['.'], resources } });
+  writeJson(path.join(record.outDir, 'park-until.json'), {
+    attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 3600000,
+    why: 'the deploy', at: new Date().toISOString(), until: new Date(Date.now() + 3600000).toISOString(),
+  });
+  if (resources.length) {
+    writeJson(f.taskFile(run, record.id), { ...task(f, run, record.id), plan: { id: record.id, type: 'implement', owns: ['.'], resources } });
+  }
 }
 
 test('later attempts bypass plan membership and dependency checks while first starts still refuse', async (t) => {
@@ -98,29 +86,23 @@ test('later attempts bypass plan membership and dependency checks while first st
   assert.match((await f.command(args('outside'), { code: 1 })).stderr, /not in the plan/);
 });
 
-test('unplanned babysitters and command tasks do not reserve paths against planned writers', async (t) => {
+test('unplanned command tasks do not reserve paths against planned writers', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
   await plan(f, run, [entry(f, 'first'), entry(f, 'second')]);
   await f.command(['dispatch', run.id, '--max', '1']);
   await f.ready(task(f, run, 'first'));
-  const sitter = await f.json(['start', run.id, 'sitter', '--agent', 'claude', '--babysit', '--pr', '42',
-    '--why', 'Fixture PR', '--brief', f.brief('sitter', { hold: true }), '--unplanned']);
-  await f.ready(sitter);
   const command = JSON.parse((await f.command(['start', run.id, 'check', '--agent', 'command', '--why', 'Fixture command', '--unplanned', '--json', '--', process.execPath, '-e', 'process.exit(0)'])).stdout);
   assert.equal(command.readOnly, true);
   await f.finished(run, 'check');
   const second = await f.json(['dispatch', run.id]);
   assert.deepEqual(second.started.map((x) => x.id), ['second']);
-  f.release(sitter);
   f.release(task(f, run, 'first'));
   f.release(task(f, run, 'second'));
 });
 
 test('parked tasks hold no plan reservations in start or dispatch', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
   const sitter = await f.start(run, 'sitter');
   await f.finished(run, 'sitter');
@@ -170,22 +152,6 @@ test('follow retries a transient failure from a task started before its plan, an
   assert.equal(JSON.parse(second.stdout).attention.find((x) => x.id === 'retry-late').phase, 'awaiting-review');
 });
 
-test('follow lists a ready babysitter while following running work', async (t) => {
-  const f = await fixture(t);
-  const run = await f.newRun();
-  await plan(f, run, [entry(f, 'writer'), entry(f, 'watch', { type: 'babysit', owns: [] })]);
-  const out = await follow(f, run, [async () => {
-    const writer = task(f, run, 'writer');
-    await f.ready(writer);
-    f.release(writer);
-    await f.finished(run, 'writer');
-  }]);
-  assert.deepEqual(JSON.parse(out.stdout).manual, ['watch']);
-  assert.equal(JSON.parse(out.stdout).attention[0].id, 'writer');
-  const idle = await f.json(['dispatch', run.id, '--follow']);
-  assert.deepEqual(idle.manual, ['watch']);
-});
-
 test('follow --max caps concurrently running planned tasks across polls', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();
@@ -204,7 +170,6 @@ test('follow --max caps concurrently running planned tasks across polls', async 
 
 test('follow revives a parked watcher appearing during a poll', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const run = await f.newRun();
   const sitter = await f.start(run, 'sitter');
   await f.finished(run, 'sitter');
@@ -218,34 +183,37 @@ test('follow revives a parked watcher appearing during a poll', async (t) => {
   }]);
 });
 
-test('a park watcher resumes a babysitter that started before the run acquired a plan', async (t) => {
+test('a park watcher resumes a parked task that started before the run acquired a plan', async (t) => {
   const f = await fixture(t);
-  await github(f);
-  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true });
   const run = await f.newRun();
-  await f.json(['start', run.id, 'sitter', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture PR',
-    '--brief', f.brief('sitter', { finalMessage: PARKED })]);
+  const sitter = await f.start(run, 'sitter', { config: { hold: true, finalMessage: PARKED } });
+  await f.ready(sitter);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'sitter' },
+  });
+  const condFile = path.join(sitter.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
+  f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true });
+  f.release(sitter);
   await eventually(async () => {
     const row = (await f.json(['status', run.id])).tasks.find((x) => x.id === 'sitter');
     return row?.phase === 'parked' && row.parked.watcher === 'alive';
-  }, 'babysitter did not park');
+  }, 'task did not park');
   await plan(f, run, [entry(f, 'writer')]);
   await f.command(['dispatch', run.id]);
   await f.ready(task(f, run, 'writer'));
-  await f.command(['send', run.id, 'sitter', 'Check the latest review']);
+  await f.command(['send', run.id, 'sitter', 'Check the latest update']);
   await eventually(() => task(f, run, 'sitter').attempt === 2, 'watcher did not resume the previously started task', 12_000);
   const resumed = task(f, run, 'sitter');
   await f.ready(resumed);
-  assert.equal(resumed.babysit, true);
   f.release(resumed);
   f.release(task(f, run, 'writer'));
 });
 
 // Commands may inherit a plan reservation from an earlier agent attempt of the same task.
-test('command reservations discard inherited resources and babysitters discard inherited paths', () => {
+test('command reservations discard inherited resources', () => {
   const writer = { id: 'writer', owns: ['src/'], resources: ['port:8080'] };
   assert.deepEqual(runningConflicts(writer, [{ id: 'command', agent: 'command', readOnly: true, owns: ['.'], resources: ['port:8080'] }]), []);
-  assert.deepEqual(runningConflicts(writer, [{ id: 'sitter', type: 'babysit', owns: ['.'], resources: [] }]), []);
 });
 
 test('follow --max includes planned automatic retries in its running cap', async (t) => {

@@ -12,7 +12,7 @@ import { die, emit, git } from "../util.mjs";
 import { recipeFor, readLessons } from "../lessons.mjs";
 
 const TEMPLATES = path.join(SKILL_DIR, "references", "briefs");
-const TYPES = ["implement", "review", "research", "debug", "babysit"];
+const TYPES = ["implement", "review", "research", "debug"];
 // Reviews and research change nothing unless the plan or the flag says otherwise.
 const READ_ONLY_TYPES = ["review", "research"];
 const WHO = { implement: "implementer", review: "reviewer", research: "researcher", debug: "investigator" };
@@ -51,9 +51,7 @@ export function cmdBrief(args) {
   const entry = plan?.tasks.find((t) => t?.id === id) || null;
   const type = args.type || (TYPES.includes(entry?.type) ? entry.type : null) || die(`--type is required: ${TYPES.join(", ")}`, 2);
   if (!TYPES.includes(type)) die(`unknown --type "${type}" (choose: ${TYPES.join(", ")})`, 2);
-  if (type === "babysit" && args["read-only"]) die("a babysitter needs write mode: it commits, pushes, and replies on GitHub", 2);
-  const readOnly =
-    type !== "babysit" && Boolean(args["read-only"] || (typeof entry?.readOnly === "boolean" ? entry.readOnly : READ_ONLY_TYPES.includes(type)));
+  const readOnly = Boolean(args["read-only"] || (typeof entry?.readOnly === "boolean" ? entry.readOnly : READ_ONLY_TYPES.includes(type)));
 
   const file = path.resolve(args.out || (entry?.brief ? path.resolve(run.dir, entry.brief) : path.join(run.dir, "briefs", `${id}.md`)));
   if (fs.existsSync(file) && !args.force) die(`brief already exists: ${file} (pass --force to overwrite it)`);
@@ -92,8 +90,8 @@ export function cmdBrief(args) {
     },
     [
       `wrote ${file}`,
-      `  ${type}, ${type === "babysit" ? "babysitter" : readOnly ? "read-only" : "write"}; ${source}`,
-      `  ${markers} "${MARKER} ...>" marker${markers === 1 ? "" : "s"} to replace${type === "babysit" ? ", plus the <...> placeholders from references/babysit-brief.md" : ""}`,
+      `  ${type}, ${readOnly ? "read-only" : "write"}; ${source}`,
+      `  ${markers} "${MARKER} ...>" marker${markers === 1 ? "" : "s"} to replace`,
       `  suggested tier: ${suggestedTier} (a suggestion; SKILL.md, "Choose the agent and model")`,
       `  house rules: ${rules.length ? rules.join(", ") : "no AGENTS.md or CLAUDE.md found"}`,
       ...(TESTING_TYPES.includes(type)
@@ -148,12 +146,10 @@ function render(type, values) {
 function included(file) {
   const text = fs.readFileSync(file, "utf8");
   const rule = /^---\s*$/m.exec(text);
-  // The one placeholder of babysit-brief.md that this command knows the answer to.
   return (rule ? text.slice(rule.index + rule[0].length) : text).trim().replaceAll("<orch-path>", CLI_PATH);
 }
 
 function roleLine(type, readOnly) {
-  if (type === "babysit") return "";
   const who = `You are a delegated ${WHO[type]} working in this directory.`;
   return readOnly
     ? `${who} Do not modify any file, commit, push, open pull requests, or start other agents. Report your findings in your final message.`

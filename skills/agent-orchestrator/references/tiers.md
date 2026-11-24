@@ -23,8 +23,8 @@ Measured on one machine from 2026-11-13 to 2026-11-16, as API-equivalent cost at
 effective 2026-11-09, not as the subscription bill:
 
 - **By role.** Main (orchestrator) sessions were about 45% of the cost, and about 70% of that was
-  main sessions on Fable. Opus babysitters were about 25%, and every other Opus task about 21%. Many
-  of those tasks were investigation, triage, query drafting and permission requests: `standard` work.
+  main sessions on Fable. Opus tasks accounted for most of the rest; many of those tasks were
+  investigation, triage, query drafting and permission requests: `standard` work.
 - **By kind of token.** Cache writes were about half of all cost, more than cache reads. Input
   tokens outnumber output tokens about 450 to 1 (a colleague saw about 5B against 11M). So agents
   re-reading their context, not writing code, is what costs. One orchestrator session had a median
@@ -45,8 +45,8 @@ Prices, as ratios of the input price:
 
 What follows:
 
-- **Resume a large session only while its cache is warm.** Otherwise continue from a short handoff
-  note in a fresh session (a babysitter's note: `references/babysit.md`).
+- **Resume a large session only while its cache is warm.** Otherwise start a fresh session with a
+  short summary of the current state.
 - **Keep large output out of long sessions.** Every token a session reads is written to the cache
   once and read on each later call. `SKILL.md` ("Delegate well") hands large logs, diffs and query
   output to a lighter task, and the session reads its short result.
@@ -150,7 +150,7 @@ The figures in `agents` and in that error:
 
 - **Window.** The last 30 days, over every run. A task falls in the window by when it finished.
 - **Tasks.** The finished tasks: Claude, Codex and Gemini tasks whose last attempt has ended. A task still
-  running, a command task and a babysitter are not counted. A task counts toward the tier its first
+  running or a command task is not counted. A task counts toward the tier its first
   attempt ran at, even when it was redone one tier up.
 - **Accepted first try.** The share of the tier's reviewed tasks that were accepted on attempt 1.
   A task is reviewed once it was accepted or rejected, needed another attempt, or its first attempt
@@ -174,7 +174,7 @@ $ORCH stats [<run>] [--since DUR]   # default: the last 30 days
 ```
 
 `stats` measures outcomes, never usage limits: limit hits are no reason to avoid an agent. It prints
-"By agent and model" and "By task type" (the plan's type, or `babysit`, `read-only` or `write`), with
+"By agent and model" and "By task type" (the plan's type, or `read-only` or `write`), with
 the columns `tasks`, `attempts`, `first accepted`, `accepted`, `integrated`, `failed`, `limit hits`,
 `transient`, `first elapsed`, `review wait`, `tokens in`, `tokens out`, `tokens in per accepted`,
 `cost` and `cost per accepted` (dollars, "Prices" above).
@@ -182,8 +182,8 @@ They do not show tier names: find a tier by its model. "By agent, tier and task 
 and is the table for choosing an agent ("Choosing between the agents", below).
 
 - It reads the runs created in the window; with a run named, only that run, whatever `--since` says.
-- `tasks` counts every Claude, Codex and Gemini task of those runs that started, running ones and
-  babysitters too. Command tasks are not counted.
+- `tasks` counts every Claude, Codex and Gemini task of those runs that started, running ones too.
+  Command tasks are not counted.
 - `first accepted` is `N/M`: of the M accepted tasks, N were accepted on attempt 1. It differs from
   the share in `agents`, which divides by the reviewed tasks.
 - `first elapsed` is the median first attempt, and `review wait` the median time from a result to
@@ -209,9 +209,8 @@ task type":
 Codex astra. While Gemini has fewer than 5 finished tasks of a coding kind, its turn in the
 alternation comes first: start the next task of that kind on Gemini. After that, the records decide,
 as for every agent. Hydrogen (`light`, `standard`) has no such first turn: it competes on the records
-like the other light tiers. Gemini is not offered a babysitter (Claude only), live web research
-(Codex only), `frontier` work (Claude Fable) or a task that needs `--offline`. Why Neon, with its
-sources: "Why Gemini 4 Neon for coding", below.
+like the other light tiers. Gemini is not offered live web research (Codex only), `frontier` work
+(Claude Fable) or a task that needs `--offline`. Why Neon, with its sources: "Why Gemini 4 Neon for coding", below.
 
 Why the rule has no default agent. Since 2026-11-01 on this machine, 36 planned implementation tasks
 ran on Claude and 5 on Codex, while Codex did 260 reviews, 127 read-only tasks and 45 debug tasks.

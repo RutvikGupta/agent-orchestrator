@@ -79,7 +79,6 @@ test('a task parked on a wake condition shows as parked, holds no slot, and resu
   assert.equal(row.state, 'running');
   assert.equal(row.parked.waitsFor, 'waits for the deploy');
   assert.equal(row.parked.condition.why, 'the deploy');
-  assert.equal(row.parked.pr, null);
   assert.match((await f.command(['status', run.id])).stdout, /^deployer .*parked.*parked · waits for the deploy/m);
   await f.command(['wait', run.id, 'deployer', '--timeout', '1ms'], { code: 3 });
   // It holds no parallel slot: a task starts beside it with a limit of one.

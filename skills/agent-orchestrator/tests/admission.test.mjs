@@ -190,15 +190,16 @@ test('interrupt resumes at the count limit and counts only its replacement relay
 
 test('park watcher resumes at a full machine; the parked watcher itself holds no place', async (t) => {
   const f = await fixture(t), a = await f.newRun('a'), b = await f.newRun('b');
-  const data = path.join(f.root, 'github.json');
-  const pr = { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture', state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main', baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] };
-  writeJson(data, pr);
-  fs.writeFileSync(path.join(f.root, 'bin', 'gh'), `#!${process.execPath}
-const fs=require('fs');if(process.argv[2]==='pr')console.log(fs.readFileSync(${JSON.stringify(data)},'utf8'));
-else console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]},comments:{totalCount:0,nodes:[]},reviews:{totalCount:0,nodes:[]}}}}}));`, { mode: 0o755 });
-  f.env.AGENT_ORCH_MAX_TOTAL = '1'; f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
+  f.env.AGENT_ORCH_MAX_TOTAL = '1';
+  const sit = await f.start(a, 'sit', { config: { hold: true, finalMessage: 'PARKED: waits for the deploy\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```' } });
+  await f.ready(sit);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: a.id, AGENT_ORCH_TASK: 'sit' },
+  });
+  const condFile = path.join(sit.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
   f.env.FAKE_RELAY_CONFIG = JSON.stringify({ hold: true });
-  await f.json(['start', a.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture babysitter', '--brief', f.brief('sit', { finalMessage: 'PARKED: PR #42 waits for human review\n```orch-result\n{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}\n```' })]);
+  f.release(sit);
   await eventually(async () => (await f.json(['status', a.id])).tasks.find((task) => task.id === 'sit')?.phase === 'parked', 'did not park');
   assert.equal((await f.json(['agents'])).machine.running, 0);
   const held = await f.start(b, 'held', { config: { hold: true } }); await f.ready(held);
@@ -450,39 +451,6 @@ test('review: a malformed admission setting is a usage error in start, dispatch 
   assert.equal(replacement.attempt, 2);
 });
 
-test('review: start --babysit --wait reads the pull request once while it waits for room', async (t) => {
-  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
-  const calls = path.join(f.root, 'gh-calls');
-  fs.writeFileSync(path.join(f.root, 'bin/gh'), `#!${process.execPath}\nrequire('fs').appendFileSync(${JSON.stringify(calls)},'call\\n');console.log(JSON.stringify({number:42,url:'https://github.com/example/repo/pull/42',state:'OPEN',isDraft:false}));`, { mode: 0o755 });
-  const held = await f.start(b, 'held', { config: { hold: true } }); await f.ready(held);
-  // Let start's first two polls pass at once, then hold the third until the test releases it.
-  const polled = path.join(f.root, 'polled'), release = `${polled}.release`;
-  const env = preload(f, 'fast-polls', `if(process.argv[2]==='start'){const fs=require('fs'),original=setTimeout;let n=0;global.setTimeout=(fn,ms,...args)=>{if(++n<3)return original(fn,0,...args);fs.writeFileSync(${JSON.stringify(polled)},'');return original(function check(){if(!fs.existsSync(${JSON.stringify(release)}))return original(check,10);fn(...args)},10)}}`);
-  const sitter = child(t, f, ['start', a.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture babysitter', '--brief', f.brief('sit', { hold: true }), '--wait', '10m', '--json'], env);
-  await eventually(() => fs.existsSync(polled), 'start did not poll three times');
-  try {
-    assert.match(sitter.output(), /waiting:.*limit is 1/);
-    assert.equal(fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).length, 1);
-    f.release(held); await f.finished(b, 'held');
-  } finally { fs.writeFileSync(release, ''); }
-  const result = await sitter.done; assert.equal(result.code, 0, result.stderr);
-  const task = JSON.parse(result.stdout); await f.ready(task);
-  assert.equal(task.pr.number, 42);
-});
-
-test('review: slow pull-request validation holds no machine lock', async (t) => {
-  const f = await fixture(t), a = await f.newRun(), b = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1';
-  const entered = path.join(f.root, 'gh-entered'), release = `${entered}.release`;
-  fs.writeFileSync(path.join(f.root, 'bin/gh'), `#!${process.execPath}\nconst fs=require('fs');fs.writeFileSync(${JSON.stringify(entered)},'');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);console.log(JSON.stringify({number:42,url:'https://github.com/example/repo/pull/42',state:'OPEN',isDraft:false}));`, { mode: 0o755 });
-  const sitter = child(t, f, ['start', a.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'fixture', '--brief', f.brief('sit')]);
-  await eventually(() => fs.existsSync(entered));
-  try {
-    assert.equal(fs.existsSync(path.join(f.state, 'admission/locks')), false);
-    await f.json(argsFor(f, b, 'other'));
-  } finally { fs.writeFileSync(release, ''); }
-  assert.equal((await sitter.done).code, 7);
-});
-
 test('review: dispatch follow reports limit kinds rather than every memory fluctuation', async (t) => {
   const f = await fixture(t), run = await f.newRun(); f.env.AGENT_ORCH_MAX_TOTAL = '1'; await planned(f, run);
   const marker = path.join(f.root, 'polls'), release = path.join(f.root, 'allow');
@@ -495,24 +463,22 @@ test('review: dispatch follow reports limit kinds rather than every memory fluct
   assert.equal((await following.done).code, 0);
 });
 
-test('review: a waiting start checks the plan again before each try, and reads the pull request once', async (t) => {
+test('review: a waiting start checks the plan again before each try', async (t) => {
   const f = await fixture(t), run = await f.newRun();
-  const calls = path.join(f.root, 'gh-calls');
-  fs.writeFileSync(path.join(f.root, 'bin/gh'), `#!${process.execPath}\nrequire('fs').appendFileSync(${JSON.stringify(calls)},'call\\n');console.log(JSON.stringify({number:42,url:'https://github.com/example/repo/pull/42',state:'OPEN',isDraft:false}));`, { mode: 0o755 });
   const file = path.join(f.root, 'plan.json');
   writeJson(file, { goal: 'Plan recheck', tasks: [
     { id: 'dep', goal: 'Inspect', type: 'research', owns: [], dependsOn: [], agent: 'codex', tier: 'standard', why: 'Fixture', readOnly: true, brief: f.brief('dep') },
-    { id: 'sit', goal: 'Babysit', type: 'implement', owns: ['src/sit'], dependsOn: ['dep'], agent: 'claude', tier: 'complex', why: 'Fixture', brief: f.brief('sit', { hold: true }) },
+    { id: 'sit', goal: 'Build', type: 'implement', owns: ['src/sit'], dependsOn: ['dep'], agent: 'claude', tier: 'complex', why: 'Fixture', brief: f.brief('sit', { hold: true }) },
   ] });
   await f.command(['plan', run.id, file]);
   // A read-only dependency counts as integrated once it has finished and is closed.
   await f.start(run, 'dep', { agent: 'codex', flags: ['--read-only'] }); await f.finished(run, 'dep');
   await f.command(['close', run.id, 'dep']);
-  // The babysitter waits for memory, read from a file the test changes; its first poll is held.
+  // The task waits for memory, read from a file the test changes; its first poll is held.
   const gate = pollGate(f, 'start'), free = path.join(f.root, 'free');
   fs.writeFileSync(free, '1');
   const memory = preload(f, 'memory-file', `const fs=require('fs'),read=fs.readdirSync;fs.readdirSync=function(...args){process.env.AGENT_ORCH_HEAVY_FREE_BYTES=fs.readFileSync(${JSON.stringify(free)},'utf8');return read.apply(this,args)};`);
-  const sitter = child(t, f, ['start', run.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Fixture babysitter', '--brief', f.brief('sit', { hold: true }), '--wait', '10m', '--json'],
+  const sitter = child(t, f, ['start', run.id, 'sit', '--agent', 'claude', '--tier', 'complex', '--why', 'Fixture task', '--brief', f.brief('sit', { hold: true }), '--wait', '10m', '--json'],
     { AGENT_ORCH_MIN_FREE_AGENT: '1.5GB', NODE_OPTIONS: `${gate.env.NODE_OPTIONS} ${memory.NODE_OPTIONS}` });
   await gate.ready();
   try {
@@ -525,7 +491,6 @@ test('review: a waiting start checks the plan again before each try, and reads t
   const result = await sitter.done; assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /cannot start sit: waits on dep \(not integrated\)/);
   assert.equal(fs.existsSync(f.taskFile(run, 'sit')), false);
-  assert.equal(fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).length, 1);
 });
 
 test('review: dispatch waits for a busy machine lock once per wave, and --follow ends at its timeout', async (t) => {

@@ -84,15 +84,13 @@ a task becoming silent, is checked at that maximum interval.
 Inside a Claude, Codex or Gemini task, `nap` also keeps a budget. Each nap adds its duration to a total for
 the attempt (`naps.json` in the attempt's folder). Once the total would pass `AGENT_ORCH_NAP_BUDGET`
 (default `10m`), `nap` refuses with exit 2 and a message that says to park with `park-until`
-(below). Outside a task, and in a command task, `nap` is unchanged, and so is a babysitter's
-`pr-watch` (`references/messages.md`).
+(below). Outside a task, and in a command task, `nap` is unchanged (`references/messages.md`).
 
 ## Parked tasks
 
 A task that has only a wait left can **park**: it ends its turn, its agent exits and frees its
 memory, and a small watcher wakes the same session later. The watcher is a shell loop with no model.
-A babysitter parks this way (`references/babysit.md`). So can any Claude, Codex or Gemini task, for a wait of
-more than a few minutes.
+Any Claude, Codex or Gemini task can park for a wait of more than a few minutes.
 
 - **Record the wait.** `$ORCH park-until [--every DUR] [--for DUR] [--why TEXT] -- COMMAND [ARGS...]`
   runs inside a task's shell: it finds the task from `AGENT_ORCH_RUN` and `AGENT_ORCH_TASK`. It
@@ -103,9 +101,9 @@ more than a few minutes.
     `COMMAND` is neither a file nor a program on `PATH`.
   - It prints what the agent must do next: end its turn with `PARKED: waits for <what>` and an
     `orch-result` outcome `parked`.
-- **Who parks.** A babysitter, as before. And any Claude, Codex or Gemini task whose attempt ends with
-  `PARKED:`, when either it recorded a wake condition in that attempt, or a task it started (with
-  `start`, in any attempt) had not ended for it when the attempt ended: it still ran or was parked,
+- **Who parks.** Any Claude, Codex or Gemini task whose attempt ends with `PARKED:`, when either it
+  recorded a wake condition in that attempt, or a task it started (with `start`, in any attempt) had
+  not ended for it when the attempt ended: it still ran or was parked,
   or its finish notice was not read yet. A child that ends just before the parent's result is
   written so still wakes the parent. When a child's notice has not come 2 minutes after it ended
   (its finish watcher is gone), the parent's watcher writes it. A `PARKED:` with neither does not park: the task ends
@@ -131,10 +129,10 @@ more than a few minutes.
   matter, with obvious secrets replaced by `[redacted]`, and says not to run the condition again to
   check. A sandboxed Codex task with the network on resumes with its sandbox named
   (`--sandbox workspace-write`), which the Codex relay needs to resume it.
-- **How it shows.** As for a parked babysitter: `status` and the dashboard show the task as
-  `parked`, with what it waits for. `wait` treats it as running. It takes no parallel slot and keeps
-  its checkout. `stop` and `close` end the watcher. `status`, `start`, `wait`, `dispatch` and the
-  dashboard restart a watcher that died.
+- **How it shows.** `status` and the dashboard show the task as `parked`, with what it waits for.
+  `wait` treats it as running. It takes no parallel slot and keeps its checkout. `stop` and `close`
+  end the watcher. `status`, `start`, `wait`, `dispatch` and the dashboard restart a watcher that
+  died.
 - **A resume that is refused.** The watcher's resume goes through `start`'s checks, so another task
   writing in the same checkout refuses it. The watcher releases its claim and tries again at the
   next check; `status` shows `resume waits: <reason>`, and `send` says the message is stored and the
@@ -142,10 +140,6 @@ more than a few minutes.
   `resume blocked` attention item: `wait` exits 5, and the dashboard and escalation list it. Give the
   task its own worktree, pass `--force` to `start`, or wait for the other writer. A `start` that
   finds the watcher mid-try waits up to 20 seconds (`AGENT_ORCH_PARK_CLAIM_WAIT`) for it to let go.
-- **A babysitter's fix.** When a babysitter's watch attempt ends with `NEEDS FIX:`, the task shows as
-  running while the fix attempt starts, with `needs a fix · <reason> · starting its fix attempt at
-  the complex tier`. When no fix starts, it shows as `needs-decision` and `wait` exits 5
-  (`references/babysit.md`, "Watching and fixing").
 
 ## Context cap of Claude agents
 
@@ -223,8 +217,7 @@ timeout and a usage limit are never retried.
   - `accepted`, `integrated`.
 - Its **health** is one of:
   - `ok`;
-  - `silent`: running with no events for longer than its expected quiet time (a babysitter's
-    `pr-watch` wait is expected);
+  - `silent`: running with no events for longer than its expected quiet time;
   - `dead`: its process is gone without a result;
   - `transient-error`: a provider overload or a network failure.
 - A running task is **stuck** when one shell command failed its last 3 runs
@@ -242,8 +235,7 @@ In a run with a plan, `status` also shows:
 
 - every planned task, started or not: `waiting` (with the tasks it waits on), `ready`, or the phase
   of a started one (`running`, `needs-decision`, `awaiting-review`, `accepted`, `integrated`,
-  `failed`). A `ready` task notes when its brief is not ready, or when it is a babysitter to start
-  by hand;
+  `failed`). A `ready` task notes when its brief is not ready;
 - the tasks recorded outside the plan;
 - a warning for each task whose branch was merged by hand without `integrate`, with the command
   that records it (`references/integrate.md`, "A branch merged by hand"). `recover` flags the same.

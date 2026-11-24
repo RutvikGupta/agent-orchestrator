@@ -410,35 +410,18 @@ test('a gate rerun by anyone but the owner leaves the owner a notice', async (t)
   assert.equal((await f.json(['status', run.id], { env: A })).changedByOthers.length, 1);
 });
 
-// A fake gh on PATH serving pull request #42 (as park.test.mjs does), for a revived park watcher.
-function github(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR', state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: '', headRefOid: 'abc', headRefName: 'main', baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
 test('another session\'s status and wait revive and retry nothing; the owner\'s do', async (t) => {
   const f = await fixture(t);
-  github(f);
   const run = await f.newRun('maintained', A);
   const sit = await f.start(run, 'sit', { flags: ['--read-only'], env: A });
   await f.finished(run, 'sit');
   // A task that failed on a transient error, which `wait` retries.
   await f.start(run, 'flaky', { flags: ['--read-only'], env: A, config: { status: 'failed', error: 'HTTP 503 provider unavailable' } });
   await f.finished(run, 'flaky');
-  // Make `sit` a babysitter's attempt that ended parked, with no watcher (as after a reboot). Last,
-  // since the owner's own `start` revives parked tasks.
-  writeJson(path.join(sit.outDir, 'result.json'), { ...readJson(path.join(sit.outDir, 'result.json')), finalMessage: 'PARKED: waits for review' });
-  writeJson(f.taskFile(run, 'sit'), { ...task(run, 'sit'), babysit: true, pr: { number: 42, url: 'https://github.com/example/repo/pull/42' } });
+  // Make `sit` a parked attempt with no watcher (as after a reboot). Last, since the owner's own
+  // `start` revives parked tasks.
+  writeJson(path.join(sit.outDir, 'result.json'), { ...readJson(path.join(sit.outDir, 'result.json')), finalMessage: 'PARKED: waits for the deploy' });
+  writeJson(path.join(sit.outDir, 'park-until.json'), { attempt: 1, command: [process.execPath, '-e', 'process.exit(1)'], every: 60000, for: 3600000, why: 'the deploy', at: new Date().toISOString(), until: new Date(Date.now() + 3600000).toISOString() });
   const watchers = () => fs.readdirSync(sit.outDir).filter((n) => n.startsWith('park-watcher-'));
   const before = snapshot(run.dir);
 

@@ -11,7 +11,7 @@ const argv = process.argv.slice(2);
 const value = (flag) => argv[argv.indexOf(flag) + 1];
 const out = value('--out-dir');
 const brief = fs.readFileSync(value('--brief'), 'utf8');
-// A brief without a fake-relay comment, such as one a parked babysitter's watcher writes, uses
+// A brief without a fake-relay comment, such as one a parked task's watcher writes, uses
 // FAKE_RELAY_CONFIG from the environment.
 const config = JSON.parse(/<!-- fake-relay (.*?) -->/.exec(brief)?.[1] || process.env.FAKE_RELAY_CONFIG || '{}');
 const vendor = process.argv[1].includes('claude-delegate') ? 'claude' : process.argv[1].includes('cursor-delegate') ? 'gemini' : 'codex';
@@ -42,7 +42,7 @@ if (gemini) {
   }
   if (argv.includes('--sandbox') && !['enabled', 'disabled'].includes(value('--sandbox'))) process.exit(2);
 }
-// A larger last model call, for tests of the handoff limits: `contextTokens` input tokens.
+// A larger last model call: `contextTokens` input tokens.
 const usage = { input_tokens: config.contextTokens ? config.contextTokens - 20 : 100, cache_read_input_tokens: 20, output_tokens: 30 };
 event(claude
   ? { type: 'system', subtype: 'init', session_id: session, model: eventModel }

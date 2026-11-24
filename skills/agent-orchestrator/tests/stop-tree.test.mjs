@@ -101,28 +101,8 @@ test('stop reaches every task below the stopped one, a level at a time, and each
   await f.finished(side, 's');
 });
 
-// The pull request a parked babysitter's watcher checks: a fake gh on PATH, as park.test.mjs serves.
-async function github(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }));
-else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
 const PARKED = [
-  'PARKED: PR #42 waits for a human review',
+  'PARKED: waits for the fixture gate',
   '```orch-result',
   '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}',
   '```',
@@ -130,14 +110,19 @@ const PARKED = [
 const watchers = (run, id, n) => spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout.split('\n')
   .filter((line) => line.includes(' park-watch ') && line.includes(` ${attemptDir(run, id, n)} `));
 
-test('stop ends the park of a babysitter below the stopped task', async (t) => {
+test('stop ends the park of a parked task below the stopped task', async (t) => {
   const f = await fixture(t);
-  await github(f);
   const top = await f.newRun('top');
   const lead = await held(f, top, 'lead');
   const kids = await f.newRun('kids', as(top, 'lead'));
-  await f.json(['start', kids.id, 'sit', '--agent', 'claude', '--babysit', '--pr', '42', '--why', 'Babysits the fixture PR',
-    '--brief', f.brief('sit', { finalMessage: PARKED })], { env: as(top, 'lead') });
+  const sit = await f.start(kids, 'sit', { config: { hold: true, finalMessage: PARKED }, env: as(top, 'lead') });
+  await f.ready(sit);
+  await f.command(['park-until', '--every', '30s', '--why', 'the fixture gate', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: as(kids, 'sit'),
+  });
+  const condFile = path.join(sit.outDir, 'park-until.json');
+  writeJson(condFile, { ...readJson(condFile), every: 1000 });
+  f.release(sit);
   await eventually(async () => {
     const row = await rowOf(f, kids, 'sit');
     return row?.phase === 'parked' && row.parked.watcher === 'alive';

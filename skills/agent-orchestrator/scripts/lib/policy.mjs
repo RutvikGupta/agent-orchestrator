@@ -2,9 +2,8 @@
 // tier runs. The orchestrating agent picks a task's tier from its own assessment of the task
 // (SKILL.md, "Choose the agent and model"). Every new task, whichever its agent,
 // names its tier with --tier, so that the choice is explicit and leans to the lightest tier that
-// does the task as well as the top one. A pull-request babysitter needs none: it watches at
-// `standard` (BABYSIT_WATCH_TIER) and hands each code fix to a fix attempt at `complex`. A Claude
-// task recorded before Claude had tiers runs `complex` when it gets a follow-up attempt.
+// does the task as well as the top one. A Claude task recorded before Claude had tiers runs
+// `complex` when it gets a follow-up attempt.
 // start escalates repeated follow-up failures unless --tier or --no-escalate overrides it.
 
 import { AGENTS, POLICY_PATH, agentName } from "./config.mjs";
@@ -13,14 +12,9 @@ import { AGENTS, POLICY_PATH, agentName } from "./config.mjs";
 import { evidenceNote, tierEvidence } from "./stats.mjs";
 import { die, readJson } from "./util.mjs";
 
-// Not a default for new tasks: the tier of a babysitter's fix attempts, and of a Claude task
-// recorded before Claude had tiers (which ran `complex`, then Opus).
+// Not a default for new tasks: the tier of a Claude task recorded before Claude had tiers (which
+// ran `complex`, then Opus).
 export const CLAUDE_DEFAULT_TIER = "complex";
-// A babysitter watches its pull request at this tier unless `start --tier` names light or complex:
-// waiting on checks and fetching results needs no frontier model. A wake that needs a code change or
-// a substantive reply goes to a fix attempt at BABYSIT_FIX_TIER, in the same session.
-export const BABYSIT_WATCH_TIER = "standard";
-export const BABYSIT_FIX_TIER = CLAUDE_DEFAULT_TIER;
 // Every supported agent: claude, codex, gemini. Claude and Codex need a block of tiers in
 // policy.json; Gemini's is optional, so that a policy written before Gemini keeps working, and a
 // gemini task is refused until its policy has one.
@@ -70,7 +64,7 @@ export function policyProblems(policy) {
       if (tier.budget !== undefined && !(typeof tier.budget === "number" && tier.budget > 0)) problems.push(`${at}.budget must be a positive number of US dollars`);
     }
     if (key === "claude" && !tiers[CLAUDE_DEFAULT_TIER]) {
-      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: every babysitter's fix attempts, and that of tasks recorded before tiers`);
+      problems.push(`claude.tiers needs a "${CLAUDE_DEFAULT_TIER}" tier: that of tasks recorded before tiers`);
     }
   }
   return problems;

@@ -26,7 +26,6 @@ import { cmdLesson } from "./lib/commands/lessons.mjs";
 import { cmdDashboard } from "./lib/commands/dashboard.mjs";
 import { cmdAccept, cmdDispatch, cmdIntegrate, cmdPlan, cmdRecover, cmdResolve } from "./lib/commands/lifecycle.mjs";
 import { cmdStatus, cmdWait, cmdWatch } from "./lib/commands/monitor.mjs";
-import { cmdPrWatch } from "./lib/commands/pr-watch.mjs";
 import { cmdQuestions } from "./lib/commands/questions.mjs";
 import { cmdCleanup, cmdNew, cmdRuns, cmdWorktree } from "./lib/commands/run.mjs";
 import { cmdSkill } from "./lib/commands/skill.mjs";
@@ -71,7 +70,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   requires a new --branch when restoring a retained branch.
                                   A restored folder stays until a fresh explicit close, or fresh
                                   acceptance and integration.
-  brief RUN TASK [--type implement|review|research|debug|babysit] [--read-only]
+  brief RUN TASK [--type implement|review|research|debug] [--read-only]
         [--out FILE] [--force]
                                   Write a draft brief for TASK from references/briefs/<type>.md,
                                   filled in from the run's plan.json, with the repository's
@@ -83,7 +82,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   overwrite it without --force
   start RUN TASK --agent claude|codex|gemini --why TEXT --brief FILE --tier TIER [--effort medium|high] [--cd DIR]
         [--read-only] [--sandbox] [--confine] [--offline] [--no-publish] [--timeout DUR] [--title TEXT]
-        [--max-parallel N] [--force] [--unplanned] [--babysit --pr N] [--wait [DUR]] [-- RELAY_ARGS...]
+        [--max-parallel N] [--force] [--unplanned] [--wait [DUR]] [-- RELAY_ARGS...]
                                   Launch the agent's relay in the background; returns at once.
                                   Machine agent count or critical memory refuses with exit 7.
                                   --wait [DUR] waits for room (default 10m), then starts or exits 7.
@@ -95,17 +94,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   wants to review first) denies commits, pushes and gh writes.
                                   --sandbox confines a task; --offline confines it and blocks the
                                   network (not for gemini, whose Cursor sandbox is not shown to
-                                  block it; --confine is Claude only). --babysit --pr N (Claude only) makes the task the
-                                  babysitter of pull request N, which must be open and ready for
-                                  review (not a draft): it may commit, push without force, and
-                                  reply on GitHub; its timeout defaults to 24h. It watches at
-                                  standard (--tier light or complex if asked; frontier is
-                                  refused). A watch attempt that needs a code fix or a substantive
-                                  reply ends with NEEDS FIX:, and its fix attempt starts at once at
-                                  complex, in the same session; the next wake watches again.
-                                  Kept as its implementer's babysitter (-- --session ID), a session
-                                  above the handoff limit with a current handoff note starts fresh
-                                  from the babysit brief and the note.
+                                  block it; --confine is Claude only).
                                   Every Claude agent's session compacts at
                                   AGENT_ORCH_CLAUDE_COMPACT_WINDOW tokens (default 300k, 100k..1M;
                                   off: Claude Code's default; a CLAUDE_CODE_AUTO_COMPACT_WINDOW
@@ -125,16 +114,16 @@ Usage: node orch.mjs <command> [args] [--json]
                                   turns that escalation off.
                                   Counted failures are failed, timeout or aborted attempts and review
                                   changes/reject; owner stops and usage-limit stops do not count.
-                                  Legacy Claude tasks resume at complex, and --babysit
-                                  implies standard, so it needs none. "agents" lists each tier's model and results.
+                                  Legacy Claude tasks resume at complex.
+                                  "agents" lists each tier's model and results.
                                   Run by a delegated agent, its own task gets an inbox message
                                   when this attempt ends: ready for review, needs decision, or failed
                                   In a run with a plan, the first start refuses a task whose prerequisites are
                                   not integrated yet, or that shares an owned path or resource with
                                   a running task: --force bypasses those checks. A task the plan
                                   does not name needs --unplanned, which --force does not imply.
-                                  Later attempts skip plan checks; babysitters reserve no owned paths,
-                                  parked tasks and command tasks hold no plan reservation.
+                                  Later attempts skip plan checks; parked tasks and command tasks
+                                  hold no plan reservation.
   start RUN TASK --agent command --why TEXT [--max-tier TIER] [--done MARKER] [--timeout DUR] [--cd DIR] [--title TEXT]
         [--max-parallel N] [--force] [--unplanned] -- COMMAND [ARG...]
                                   --max-tier uses a Claude policy tier; defaults to the delegated
@@ -212,7 +201,6 @@ Usage: node orch.mjs <command> [args] [--json]
                                   Existing problems are listed without interrupting running work;
                                   transient failures retry and parked watchers revive as in wait.
                                   With --follow, --max N caps planned tasks running at once.
-                                  A ready babysitter is listed but does not interrupt running tasks.
   verify RUN TASK [--timeout DUR] -- COMMAND...
                                   Rerun a gate in a finished task's working directory (default
                                   timeout 30m) and record it in the task's verifications.jsonl,
@@ -278,7 +266,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   command (never a commit, push, rebase, merge or other publishing
                                   command), or, when the agent is not in one, stops its session and
                                   resumes the same session with the message (a new attempt; refused
-                                  for a babysitter, a parked or command task, an unknown session, or
+                                  for a parked or command task, an unknown session, or
                                   a sandboxed Codex task with the network on)
   steer RUN TASK                  Deliver a task's queued messages now, as send --steer does
   heavy [--label TEXT] -- COMMAND [ARG...]
@@ -348,9 +336,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   the name. The run's owner may rename any of its tasks, and a task's
                                   own agent itself, which the owner is told of as of a change by the
                                   user. One rename at a time checks and saves a name in a run (a
-                                  lock in its folder). For example, an implementer kept as its pull
-                                  request's babysitter (start RUN TASK --babysit --pr N -- --session
-                                  ID) is renamed babysit-N
+                                  lock in its folder)
   cleanup RUN                    Remove only explicitly closed (or accepted and integrated),
                                   clean worktrees; only untracked gate caches are ignored.
                                   Commits stay on kept branches; running or parked users protect
@@ -372,7 +358,7 @@ Usage: node orch.mjs <command> [args] [--json]
   stats [RUN] [--since DUR]        Task outcomes by agent/model, type and agent/tier/type (default: last 30d),
                                   with input tokens and dollars per accepted task (all the group's
                                   input and cost over its accepted tasks)
-  pick --type TYPE --tier TIER [--needs web|babysit|offline] [--since DUR]
+  pick --type TYPE --tier TIER [--needs web|offline] [--since DUR]
                                   Choose the agent for a task type and tier by the rule in
                                   SKILL.md (alternation below 5 tasks, then first-try
                                   acceptance and cost per accepted over --since, default 30d),
@@ -386,24 +372,6 @@ Usage: node orch.mjs <command> [args] [--json]
                                   files and commits that differ. --loaded records the current one,
                                   after you have read the skill again, and prints it. Every other
                                   command prints a notice on stderr until then (see Skill changes)
-  pr-watch PR... [--repo DIR] [--timeout DUR] [--interval DUR] [--once]
-                                  Watch pull requests (number, URL, or branch) with gh until one
-                                  needs you: a check failed, all checks finished, a new review or
-                                  comment, a changed review decision, a conflict, a moved base,
-                                  removal from the merge queue, or it left OPEN. Run by a
-                                  babysitter it polls once and returns: its parked watcher waits,
-                                  with no model, and absorbs checks that pass with nothing else open.
-                                  A parked babysitter whose last call sent more than
-                                  AGENT_ORCH_BABYSIT_HANDOFF_TOKENS (default 150000) resumes in a
-                                  fresh session from its handoff note, when that note is current;
-                                  above AGENT_ORCH_COLD_HANDOFF_TOKENS (default 60000) when the
-                                  resume reads no prompt cache: another model, or parked longer
-                                  than AGENT_ORCH_CACHE_TTL (default 1h) less 5 minutes.
-                                  Exit 0 = needs you, 3 = timed out (default 9m; 0 waits forever),
-                                  4 = the checkout has commits the pull request lacks: push first.
-                                  Exit 6 = a new unread message for this agent; read it, then watch again.
-                                  Polls every --interval (default 60s); uses no model tokens.
-                                  --once prints the current state and marks nothing as seen
 
 RUN may be a run id, a run directory, or "latest". State lives in ${STATE_ROOT}.
 Text after "--" is passed to the relay unchanged (for example: -- --session <id>); for
@@ -432,7 +400,7 @@ const specs = {
   agents: { bool: ["refresh"] },
   new: { value: ["repo", "name", "goal"] },
   worktree: { value: ["from", "branch", "path"], bool: ["no-prep", "adopt"] },
-  start: { value: ["wait", "agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "pr", "done", "max-tier"], bool: ["read-only", "offline", "sandbox", "confine", "babysit", "github", "force", "allow-nested", "no-publish", "no-escalate", "unplanned", "adopt"] },
+  start: { value: ["wait", "agent", "why", "brief", "tier", "effort", "cd", "timeout", "model", "title", "max-parallel", "done", "max-tier"], bool: ["read-only", "offline", "sandbox", "confine", "github", "force", "allow-nested", "no-publish", "no-escalate", "unplanned", "adopt"] },
   status: {},
   watch: { value: ["interval"], bool: ["all", "once"] },
   dashboard: { value: ["port", "host", "idle-exit"], bool: ["open", "new-tab", "detach", "stop"] },
@@ -449,7 +417,6 @@ const specs = {
   pick: { value: ["type", "tier", "since"], multi: ["needs"] },
   cost: {},
   skill: { bool: ["loaded"] },
-  "pr-watch": { value: ["repo", "timeout", "interval"], bool: ["once"] },
   brief: { value: ["type", "out"], bool: ["force", "read-only", "adopt"] },
   send: { value: ["file"], bool: ["steer", "adopt"] },
   nap: {},
@@ -496,7 +463,6 @@ const handlers = {
   pick: cmdPick,
   cost: cmdCost,
   skill: cmdSkill,
-  "pr-watch": cmdPrWatch,
   brief: cmdBrief,
   send: cmdSend,
   inbox: cmdInbox,

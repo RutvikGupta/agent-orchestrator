@@ -106,8 +106,8 @@ with `result <run> review-<task-id>`, and verify each defect it reports before y
 - **`--focus TEXT`** adds a section telling the reviewer what to look at hardest. The usual checks
   still apply.
 - **Refusals.** `review` starts nothing when the task still runs, has no changes since its work
-  started, or already has a reviewer running. It also refuses a read-only task, a command task, a
-  babysitter, and a task that is itself a review.
+  started, or already has a reviewer running. It also refuses a read-only task, a command task,
+  and a task that is itself a review.
 
 The reviewer ends with `VERDICT: changes` (it reports at least one defect) or `VERDICT: clean` on a
 line of its own, then its `orch-result` block with one defect per line under `unresolved`.
@@ -186,8 +186,7 @@ A follow-up is any later attempt of a task: a rework, a resume, or a new attempt
   fresh brief and a new `--why`.
 - **Overrides.** `--tier` picks the tier itself, with no automatic move. A changed `--agent` starts
   a new count for that agent, and needs `--tier` and `--why`. `--no-escalate` keeps the tier and
-  skips the refusal. A babysitter never escalates: it watches on `standard` and fixes on `complex`
-  (`SKILL.md`, step 8).
+  skips the refusal.
 - **What counts as a failure:** an attempt that ended `failed`, `timeout` or `aborted`, and an
   attempt whose review round is `changes` or `reject`, whether `review` or `verdict` recorded it.
   Each attempt counts once.

@@ -151,7 +151,7 @@ test('attentionOf follows phase and health when the contract fields are present'
   // Silent comes from health only: a quiet running task with health ok, or no health, is fine.
   const silent = kind({ state: 'running', phase: 'running', health: 'silent', quietMs: 963_000, now: 'quiet 16m03s · $ npm test' });
   assert.deepEqual([silent.kind, silent.rank, silent.reason], ['silent', 4, 'no events for 16m03s · $ npm test']);
-  assert.equal(kind({ state: 'running', health: 'ok', quietMs: 3_600_000, now: 'quiet 1h00m · pr-watch' }), null);
+  assert.equal(kind({ state: 'running', health: 'ok', quietMs: 3_600_000, now: 'quiet 1h00m · waiting' }), null);
   assert.equal(kind({ state: 'running', quietMs: 3_600_000 }), null);
 
   // A closed session, the main session, and a prepared one never need attention.

@@ -1,39 +1,22 @@
 // Parking: a task with nothing to do but wait ends its turn "parked" (its final message starts with
 // `PARKED:`; runs.mjs, parkedOf), so its relay and agent exit and free their memory. A small
 // detached watcher then keeps an eye on what it waits for and on the task's inbox, and resumes the
-// same session with a short brief on the first actionable event. A pull-request babysitter waits
-// for its pull request. Any other Claude or Codex task waits for the wake condition it recorded with
-// `park-until` (park-until.json in the attempt's folder: a command the watcher runs every interval,
-// in the task's folder and environment, until it exits 0, cannot run, or the longest wait passes),
-// or for the tasks it started, whose finish notices reach its inbox.
+// same session with a short brief on the first actionable event. An agent task waits for the wake
+// condition it recorded with `park-until` (park-until.json in the attempt's folder: a command the
+// watcher runs every interval, in the task's folder and environment, until it exits 0, cannot run,
+// or the longest wait passes), or for the tasks it started, whose finish notices reach its inbox.
 //
 // The watcher is a /bin/sh loop (PARK_SCRIPT): it costs a shell and a `sleep`, about 3 MB. Every few
 // seconds it compares the size of the task's inbox with the last size it saw; when the inbox grows,
 // and otherwise once per interval (AGENT_ORCH_PARK_INTERVAL, default 60s), it runs this file's
-// `check`, a short Node process (about 50 MB for a second or two) that reads the pull request with
-// the same snapshot and comparison as `pr-watch`, reads the unread messages, and resumes the task
-// when either has something. All the waiting is done here, with no model: the babysitter's own
-// `pr-watch` returns at once, and a change that needs no judgment (the checks went green and nothing
-// else is open; pr-watch.mjs, quietItems) is recorded as seen without waking anyone. A resume's
-// brief states what changed and the pull request's state now, and the watcher records that state as
-// seen, so the resumed session acts on the items without reading the pull request again. The
-// A session's whole context is sent again on every call, so a babysitter that has fixed several
-// review rounds pays for all of them on each later call. When the parked session's latest call was
-// larger than AGENT_ORCH_BABYSIT_HANDOFF_TOKENS (default 150000) and the babysitter updated its
-// handoff note (handoff.md in the task's folder) in the attempt that parked, the resume starts a
-// fresh session instead: the brief the babysitter first got, then the note, then what changed.
-// When the resume's first call cannot read the prompt cache, the lower AGENT_ORCH_COLD_HANDOFF_TOKENS
-// (default 60000) applies: the parked attempt ended longer ago than the cache lives
-// (AGENT_ORCH_CACHE_TTL, default 1h, less 5 minutes), or the resume runs another model (a
-// babysitter watches at its watch tier and fixes at complex, and each model has its own cache), so
-// the whole context would be written to the cache again. Without a current note the same session
-// resumes, told to write one: memory is never dropped without a note. The
-// messages go, whole, into park-messages.md in the new attempt's folder (the brief quotes short
-// ones), and only those are marked read.
+// `check`, a short Node process (about 50 MB for a second or two) that checks the wake condition,
+// reads the unread messages, and resumes the task when either has something. The messages go, whole,
+// into park-messages.md in the new attempt's folder (the brief quotes short ones), and only those
+// are marked read.
 //
-// The finish watcher that runs beside a babysitter's relay, a delegated task's, and the relay of a
-// task that recorded a wake condition or started tasks (finish-notice.mjs) starts the first
-// watcher once the relay ends parked. Each parked attempt's folder keeps its watchers'
+// The finish watcher that runs beside a delegated task's relay, and beside the relay of a task that
+// recorded a wake condition or started tasks (finish-notice.mjs), starts the first watcher once the
+// relay ends parked. Each parked attempt's folder keeps its watchers'
 // records, park-watcher-<k>.json: the highest k is the current watcher, a new one is created only
 // with an exclusive create, and a watcher that finds a newer one exits, so two watchers never act
 // for one task. A park ends with a claim, park-claim-<k>.json, created whole and exclusively with
@@ -55,24 +38,19 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { HANDOFF_RULES } from "./briefs.mjs";
 import { CLI_PATH, NODE_FALLBACK, nodeBin } from "./config.mjs";
 import { startDetached } from "./detach.mjs";
 import { durationText, shortText } from "./format.mjs";
 import { INBOX_FILE, fromAgent, markRead, readInbox, replyHint, senderLabel } from "./inbox.mjs";
 import { sendFinishNotice, watchForFinish } from "./finish-notice.mjs";
-import { BABYSIT_WATCH_TIER, lowerCeiling, lowerEffort, readPolicy } from "./policy.mjs";
-import { PARK_CHECK_FILE, PARK_UNTIL_FILE, attemptAgent, commandText, exists, isBabysitter, isParked, lateNotices, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
+import { lowerCeiling, lowerEffort } from "./policy.mjs";
+import { CHILDREN_FILE, PARK_CHECK_FILE, PARK_UNTIL_FILE, attemptAgent, commandText, exists, isParked, lateNotices, loadTask, parkClaim, parkClaimFile, parkProcessTable, parkWatcher, parkWatcherAlive, parkWatcherFile, parkedOf, processStarted, relayAlive, saveTask, taskDir } from "./runs.mjs";
 import { readJson, writeJson } from "./util.mjs";
-import { aheadOfPr, quietItems, readSeen, recordSeen, rememberQueue, stateLine, watchAttention, watchSnapshot } from "./commands/pr-watch.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const LOG = "park-watcher.log";
 // The messages a resume delivers, in full, in the new attempt's folder.
 export const PARK_MESSAGES_FILE = "park-messages.md";
-// A babysitter's handoff note, and the brief its first session was given, both in the task's folder.
-export const HANDOFF_FILE = "handoff.md";
-export const BABYSIT_BRIEF_FILE = "babysit-brief.md";
 // Messages up to this long are also quoted in the resume brief.
 const INLINE_CHARS = 1500;
 // What `check` exits with to end the watcher's loop: the park is over (resumed, stopped, closed,
@@ -93,163 +71,6 @@ export function parkInterval(value = process.env.AGENT_ORCH_PARK_INTERVAL) {
   return Math.max(1, Math.round(ms / 1000));
 }
 
-// The context size above which a parked babysitter resumes in a fresh session:
-// AGENT_ORCH_BABYSIT_HANDOFF_TOKENS, a whole number of tokens, default 150000.
-export function handoffLimit(value = process.env.AGENT_ORCH_BABYSIT_HANDOFF_TOKENS) {
-  const n = Number(String(value ?? "").trim());
-  return Number.isInteger(n) && n > 0 ? n : 150000;
-}
-
-// The same limit when the resume's first call cannot read the prompt cache (coldResume):
-// AGENT_ORCH_COLD_HANDOFF_TOKENS, default 60000. That call writes the whole context to the cache
-// again, which costs more than reading it, so a smaller session is worth handing off.
-export function coldHandoffLimit(value = process.env.AGENT_ORCH_COLD_HANDOFF_TOKENS) {
-  const n = Number(String(value ?? "").trim());
-  return Number.isInteger(n) && n > 0 ? n : 60000;
-}
-
-// How long a session's prompt cache lives, less a margin: AGENT_ORCH_CACHE_TTL (90m, 1h, ...),
-// default 1h, less 5 minutes. A bad value falls back to the default.
-export function cacheWarmMs(value = process.env.AGENT_ORCH_CACHE_TTL) {
-  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value ?? "").trim());
-  const ttl = m ? Number(m[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000 }[m[2] || "s"] : 3600000;
-  return Math.max(0, ttl - 5 * 60000);
-}
-
-// Whether resuming a session whose attempt ended at `endedAt` (ISO time), on `fromModel`, with
-// `toModel` reads no prompt cache: { cold, why }, where why is "idle" (it ended longer ago than the
-// cache lives), "model" (another model, which has its own cache), or null for a warm resume.
-export function coldResume(endedAt, fromModel, toModel, now = Date.now()) {
-  if (fromModel && toModel && fromModel !== toModel) return { cold: true, why: "model" };
-  if (now - (Date.parse(endedAt) || now) > cacheWarmMs()) return { cold: true, why: "idle" };
-  return { cold: false, why: null };
-}
-
-// The size of the latest model call of the session whose events are in `dir`: its input tokens,
-// cached ones included, which is the context every further call would send again. Calls of
-// sub-agents are not the session's. Null when the events show none.
-export function lastCallTokens(dir) {
-  let text;
-  try {
-    const file = path.join(dir, "events.jsonl");
-    const size = fs.statSync(file).size;
-    const tail = Math.min(size, 4 * 1024 * 1024); // the latest call is near the end
-    const buffer = Buffer.alloc(tail);
-    const fd = fs.openSync(file, "r");
-    try {
-      fs.readSync(fd, buffer, 0, tail, size - tail);
-    } finally {
-      fs.closeSync(fd);
-    }
-    text = buffer.toString("utf8");
-  } catch {
-    return null;
-  }
-  const lines = text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].includes('"usage"')) continue;
-    let event;
-    try {
-      event = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
-    const usage = event.type === "assistant" && !event.parent_tool_use_id ? event.message?.usage : null;
-    if (usage) return (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
-  }
-  return null;
-}
-
-// The brief a babysitter's first session was given: the copy `start` kept, or, for a task started
-// before `start` kept one, its first attempt's whole brief. That one ends with the notes `start`
-// appended, which the fresh session's brief then holds twice: a repeated note costs little, and
-// cutting them off could cut an instruction of the brief itself.
-export function originalBrief(dir) {
-  for (const file of [path.join(dir, BABYSIT_BRIEF_FILE), path.join(dir, "attempt-1", "orch-brief.md")]) {
-    try {
-      return fs.readFileSync(file, "utf8");
-    } catch {}
-  }
-  return "";
-}
-
-// A task's handoff note: { file, text, note: "current" | "stale" | "missing" }. Current when it
-// was written or updated since `since` (the start of the attempt that ended), and nonempty.
-export function handoffNoteOf(run, task, since = task.startedAt) {
-  const file = path.join(taskDir(run, task.id), HANDOFF_FILE);
-  let text = "", note = "missing";
-  try {
-    text = fs.readFileSync(file, "utf8");
-    if (text.trim()) note = fs.statSync(file).mtimeMs >= Date.parse(since) ? "current" : "stale";
-  } catch {}
-  return { file, text, note };
-}
-
-// Whether a parked attempt (folder `dir`) should resume in a fresh session: { file, tokens, limit,
-// cold, coldWhy, note: "current" | "stale" | "missing", fresh, original, text }. Fresh only when
-// the session's latest call was above the limit (the cold one when `cold`, coldResume), the note
-// was written or updated since the parked attempt started, and the brief the babysitter first got
-// was kept (or `original` is given); `original` and `text` hold that brief and the note then.
-export function handoffOf(run, task, dir, { cold = false, coldWhy = null, original: given = null } = {}) {
-  const { file, text, note } = handoffNoteOf(run, task);
-  const tokens = lastCallTokens(dir);
-  const limit = cold ? coldHandoffLimit() : handoffLimit();
-  const original = given ?? originalBrief(taskDir(run, task.id));
-  // A note that holds an unfilled brief marker would make `start` refuse the brief.
-  const fresh = tokens !== null && tokens > limit && note === "current" && Boolean(original.trim()) && !/<fill in:/.test(text);
-  return { file, tokens, limit, cold, coldWhy: cold ? coldWhy : null, note, fresh, original: fresh ? original : null, text: fresh ? text : null };
-}
-
-// What a task's record keeps about an attempt that began a fresh session from a handoff note:
-// which attempt it took over from, the context size and the limit that applied (warm or cold, and
-// why it was cold), and when.
-export const handoffRecord = (handoff, fromAttempt, at, extra = {}) => ({
-  fromAttempt, contextTokens: handoff.tokens, limit: handoff.limit, limitKind: handoff.cold ? "cold" : "warm",
-  ...(handoff.coldWhy ? { coldWhy: handoff.coldWhy } : {}), at, ...extra,
-});
-
-// What a task's record keeps about every handoff decision (handoffChecks), fresh or not: the size of
-// the session's latest call, the limit that applied (warm or cold, and why cold), the note's state,
-// and whether a fresh session started.
-export const handoffCheck = (handoff) => ({
-  contextTokens: handoff.tokens, limit: handoff.limit, limitKind: handoff.cold ? "cold" : "warm",
-  ...(handoff.coldWhy ? { coldWhy: handoff.coldWhy } : {}), note: handoff.note, fresh: Boolean(handoff.fresh),
-});
-
-// Why a fresh session started, in a few words, for its brief and for `result`.
-export function handoffWhy(handoff) {
-  const size = `its context had grown to ${handoff.tokens} tokens`;
-  if (!handoff.cold) return `${size}, which every further call would have sent again`;
-  return `${size}, and ${handoff.coldWhy === "model" ? "it would have resumed on another model, whose prompt cache holds none of it" : "it had waited longer than its prompt cache lives"}, so its first call would have written all of it to the cache again`;
-}
-
-// The brief of a fresh session that takes over from a parked one: the brief the babysitter first
-// got, then its handoff note, then what changed (resumeBrief's text for a fresh session). `from`
-// says whose session it takes over: an earlier babysitter session (`babysitter`, it parked), or the
-// task's implementer that becomes the babysitter (`implementer`).
-export function handoffBrief(handoff, changed, { from = "babysitter" } = {}) {
-  const who = from === "implementer"
-    ? "You take over this pull request, as its babysitter, from the session that implemented it:"
-    : from === "watch"
-      ? "You are the fix attempt of this babysitter, and take over from its watch session:"
-      : "You take over from an earlier session of this babysitter. It parked;";
-  return [
-    handoff.original.trimEnd(),
-    "",
-    "---",
-    "",
-    "## Handoff note from your previous session",
-    "",
-    `${who} ${handoffWhy(handoff)}, so you start fresh. It left the note below: trust it for everything that happened so far, and keep it current at \`${handoff.file}\` as your brief says.`,
-    "",
-    handoff.text.trim(),
-    "",
-    "---",
-    "",
-    changed,
-  ].join("\n");
-}
-
 const attemptDir = (run, id, n) => path.join(taskDir(run, id), `attempt-${n}`);
 
 // The environment the watcher, and the attempt it resumes, run in: the caller's, with the nesting
@@ -268,7 +89,7 @@ export function parkEnv(task, base = process.env) {
 
 // `env` with the model ceiling the task's attempt was started under (`start` records it as
 // inheritedCeiling), so that whoever starts its watcher, the dashboard included, starts nothing
-// above it: a fix attempt or a resume. A ceiling `env` holds already stays when it is lower.
+// above it. A ceiling `env` holds already stays when it is lower.
 export function withCeiling(task, env) {
   const kept = task?.inheritedCeiling;
   if (!kept?.maxTier && !kept?.maxEffort) return env;
@@ -306,9 +127,9 @@ export function spawnParkWatcher(run, task, { by = "park", table = null } = {}) 
     throw error;
   }
   try {
-    // Every interval (AGENT_ORCH_PARK_INTERVAL) the check reads the pull request and the wake
-    // condition's deadline; it runs the condition itself only every --every (checkPark), and more
-    // often when --every is shorter than the interval.
+    // Every interval (AGENT_ORCH_PARK_INTERVAL) the check reads the wake condition's deadline; it
+    // runs the condition itself only every --every (checkPark), and more often when --every is
+    // shorter than the interval.
     const condition = readJson(path.join(dir, PARK_UNTIL_FILE));
     const every = Number(condition?.every) > 0 ? Math.max(1, Math.round(condition.every / 1000)) : null;
     const seconds = Math.min(parkInterval(), every || Infinity);
@@ -450,7 +271,7 @@ function adoptRelay(run, dir, current, by, table = null) {
   const task = { ...planned, pid: current.record.relay.pid, ...keptEnd(loadTask(run, planned.id)) };
   saveTask(run, task);
   writeJson(file, { ...record, attempt: task.attempt, pid: task.pid, resumedAt: task.startedAt, adopted: true });
-  if (task.startedBy || task.babysit) watchForFinish(run, task);
+  if (task.startedBy || fs.existsSync(path.join(taskDir(run, task.id), CHILDREN_FILE))) watchForFinish(run, task);
   return task;
 }
 
@@ -500,6 +321,19 @@ function refusalFor(task, dir, holder) {
   return `task ${task.id} is parked, and its watcher is resuming it right now; run \`status\` to see its new attempt`;
 }
 
+// Whether `task`'s current attempt is parked, or still has an in-progress park claim, an adopted
+// relay in a park claim, or a live park watcher (for example, a retired park whose resume or
+// watcher was already running before upgrade).
+export function hasActivePark(run, task) {
+  if (isParked(run, task)) return true;
+  if (!task?.attempt) return false;
+  const dir = attemptDir(run, task.id, task.attempt);
+  const claim = parkClaim(dir);
+  if (claim.state === "live" || relayRunning(claim.record?.relay)) return true;
+  const watcher = parkWatcher(dir);
+  return Boolean(watcher?.pid && parkWatcherAlive(dir, watcher.generation, watcher.pid) === true);
+}
+
 // For `start` and the watcher: claim a parked task's park before writing anything of the next
 // attempt, so that exactly one resume ends it and a resume that loses changes nothing. A `start`
 // that finds the watcher holding the claim waits up to claimWaitMs() for it to end (its try at a
@@ -512,7 +346,7 @@ function refusalFor(task, dir, holder) {
 // done(task) once the new attempt is saved, which records it and stops the watcher (unless the
 // watcher is the one resuming).
 export function claimParked(run, task, by = "start") {
-  if (!isParked(run, task)) return null;
+  if (by === "watcher" ? !isParked(run, task) : !hasActivePark(run, task)) return null;
   const dir = attemptDir(run, task.id, task.attempt);
   const since = { closedAt: task.closedAt || null, stoppedAt: task.stoppedAt || null };
   let won = takeClaim(run, dir, by, since);
@@ -537,28 +371,30 @@ export function claimParked(run, task, by = "start") {
 }
 
 // For `stop` and `close`, which mark the task stopped or closed first: end a parked task's park and
-// stop its watcher. Never throws. Null when the task is not parked; { stopped: [pids], ended() } once
-// this call holds the park (ended() records that the caller is done); { resumed: attempt } when a
-// resume saved its attempt (or its relay was adopted), which the caller then stops; { busy: holder,
-// relayStopped } when a resume holds the claim, after stopping the relay it started, if any, which
-// it waits up to 10 seconds for; { error } when something failed.
+// stop its watcher. Never throws. Null when the task is not parked and has no active park claim or
+// watcher; { stopped: [pids], ended() } once this call holds the park (ended() records that the
+// caller is done); { resumed: attempt } when a resume saved its attempt (or its relay was adopted),
+// which the caller then stops; { busy: holder, relayStopped } when a resume holds the claim, after
+// stopping the relay it started, if any, which it waits up to 10 seconds for; { error } when
+// something failed.
 export function endPark(run, task, by) {
   try {
-    if (!isParked(run, task)) return null;
+    if (!hasActivePark(run, task)) return null;
     const dir = attemptDir(run, task.id, task.attempt);
-    const until = Date.now() + 10000;
+    const waitMs = process.env.AGENT_ORCH_PARK_CLAIM_WAIT !== undefined ? claimWaitMs() : 10000;
+    const until = Date.now() + waitMs;
     for (;;) {
       const won = takeClaim(run, dir, by);
-      if (won.adopted) return { resumed: won.adopted.attempt, stopped: [] };
+      if (won.adopted) return { resumed: won.adopted.attempt, stopped: stopWatchers(dir) };
       if (won.generation) {
         return { stopped: stopWatchers(dir), ended: () => writeJson(won.file, { ...won.record, ended: true, endedAt: new Date().toISOString() }) };
       }
       const claim = parkClaim(dir);
-      if (claim.record?.attempt) return { resumed: claim.record.attempt, stopped: [] };
+      if (claim.record?.attempt) return { resumed: claim.record.attempt, stopped: stopWatchers(dir) };
       // A resume that started its relay and has not saved it yet: its save keeps the close or stop,
       // so stopping that relay is all that is left.
-      if (relayRunning(claim.record?.relay)) return { busy: won.holder, relayStopped: stopRelay(claim.record.relay.pid), stopped: [] };
-      if (claim.state === "done" || Date.now() >= until) return { busy: won.holder, stopped: [] };
+      if (relayRunning(claim.record?.relay)) return { busy: won.holder, relayStopped: stopRelay(claim.record.relay.pid), stopped: stopWatchers(dir) };
+      if (claim.state === "done" || Date.now() >= until) return { busy: won.holder, stopped: stopWatchers(dir) };
       if (claim.state === "live") spawnSync("sleep", ["0.2"]);
     }
   } catch (error) {
@@ -720,42 +556,22 @@ export function messagesText(messages) {
   ].join("\n");
 }
 
-// The brief that resumes a parked task: what its watcher saw, and what to do next. Every message is
-// in full in `messagesFile`; short ones are quoted here too. `wake` is the wake condition's record
-// when the task parked on one (checkPark), with what woke it.
-// `handoff` (handoffOf) says whether the brief opens a fresh session, and whether the session's note
-// is missing or stale, which the same session is then told to put right. With `quote` false the
-// brief holds no text of a message or of the condition's output: the watcher passes the quotes to
-// `start` as data (messageQuotes, conditionQuote), so that nothing they say is ever read as part of
-// the brief.
-export function resumeBrief(run, task, parked, pr, messages, messagesFile = null, handoff = null, { quote = true, wake = null } = {}) {
-  if (!isBabysitter(task)) return taskResumeBrief(run, task, parked, messages, messagesFile, { quote, wake });
-  const fresh = Boolean(handoff?.fresh);
-  const ref = task.pr?.url || (parked.pr ? `#${parked.pr}` : "its pull request");
-  const watch = `node ${CLI_PATH} pr-watch ${task.pr?.number ?? task.pr?.url ?? "<PR>"} --repo .`;
-  const lines = fresh
-    ? ["## What changed while the previous session was parked", "", `The previous session parked on pull request ${ref} (${parked.waitsFor}). Since then:`, ""]
-    : ["## Your parked watcher woke you", "", `You parked on pull request ${ref} (${parked.waitsFor}). Since then:`, ""];
-  if (pr?.attention?.length) lines.push(`- On the pull request: ${pr.attention.join("; ")}.`);
-  // The state the watcher read, so the session need not read the pull request again to find it.
-  if (pr?.now) lines.push(`- The pull request now (read ${pr.at}): ${stateLine(pr.now)}.`);
-  if (pr?.before) lines.push(`- When you last looked: ${stateLine(pr.before)}.`);
+// The brief that resumes a parked task: what woke it (its wake condition, the tasks it started, a
+// message), and that the watcher has just checked the condition. Every message is in full in
+// `messagesFile`; short ones are quoted here too. With `quote` false the brief holds no text of a
+// message or of the condition's output: the watcher passes the quotes to `start` as data
+// (messageQuotes, conditionQuote), so that nothing they say is ever read as part of the brief.
+export function resumeBrief(run, task, parked, messages, messagesFile = null, { quote = true, wake = null } = {}) {
+  const lines = ["## Your parked watcher woke you", "", `You parked (${parked.waitsFor}). Since then:`, ""];
   if (wake) lines.push(...conditionLines(wake, quote));
+  const finished = messages.filter((m) => fromAgent(m) && m.kind === "finished").length;
+  if (finished) lines.push(`- ${finished === 1 ? "A task you started has finished" : `${finished} tasks you started have finished`}: ${finished === 1 ? "its notice is" : "their notices are"} among the messages below.`);
   lines.push(...messageLines(run, task, messages, messagesFile, quote));
-  const acts = pr?.attention?.length
-    ? `The items above are everything that changed on the pull request, and they are recorded as seen: do not run a watch or read the pull request's state again to find them. ${fresh ? 'Do the start checks of your brief, then go straight to step 2 of its loop' : 'Go straight to step 2 of your loop ("Loop" in the babysitter brief you started with)'} and handle each one, reading only what an item needs (a failed check's log, the new comments).`
-    : `Nothing changed on the pull request, so do not read its state again.`;
+  const checked = wake ? "Your watcher has just run your wake condition, so do not run it again to check. " : "";
   lines.push(
     "",
-    `${acts} Handle every ${messages.length ? "item and every message" : "item"}, push, and reply as your rules say. ${messages.length ? "The messages are marked read once this brief starts. " : ""}Then run \`${watch}\`, which returns at once, and park again when it finds nothing new, nothing is unpushed, and every item is handled.`,
+    `${checked}Act on what woke you${messages.length ? ", and handle every message (they are marked read once this brief starts)" : ""}. To wait again, record a wake condition with \`node ${CLI_PATH} park-until ...\` (or rely on the tasks you started that still run), then end your turn with \`PARKED: waits for <what>\`. Never wait in your session with sleep, nap or a polling loop.`,
   );
-  // Memory is never dropped without a note: a session that left none, or an old one, is kept.
-  if (handoff && !fresh && handoff.note !== "current") {
-    lines.push(
-      "",
-      `Your handoff note at \`${handoff.file}\` ${handoff.note === "missing" ? "does not exist" : "was not updated in your last attempt"}. Write it before you park again, and update it before every park. Every call you make re-sends your whole context${handoff.tokens ? ` (${handoff.tokens} tokens at your last call)` : ""}; once that is above ${handoff.limit} tokens your watcher resumes you in a fresh session that knows only your brief, that note and what changed, but only when the note was updated in the attempt that parked. ${HANDOFF_RULES}`,
-    );
-  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -772,22 +588,6 @@ function messageLines(run, task, messages, messagesFile, quote) {
   return lines;
 }
 
-// The brief that resumes a parked task that is not a babysitter: what woke it (its wake condition,
-// the tasks it started, a message), and that the watcher has just checked the condition.
-function taskResumeBrief(run, task, parked, messages, messagesFile, { quote, wake }) {
-  const lines = ["## Your parked watcher woke you", "", `You parked (${parked.waitsFor}). Since then:`, ""];
-  if (wake) lines.push(...conditionLines(wake, quote));
-  const finished = messages.filter((m) => fromAgent(m) && m.kind === "finished").length;
-  if (finished) lines.push(`- ${finished === 1 ? "A task you started has finished" : `${finished} tasks you started have finished`}: ${finished === 1 ? "its notice is" : "their notices are"} among the messages below.`);
-  lines.push(...messageLines(run, task, messages, messagesFile, quote));
-  const checked = wake ? "Your watcher has just run your wake condition, so do not run it again to check. " : "";
-  lines.push(
-    "",
-    `${checked}Act on what woke you${messages.length ? ", and handle every message (they are marked read once this brief starts)" : ""}. To wait again, record a wake condition with \`node ${CLI_PATH} park-until ...\` (or rely on the tasks you started that still run), then end your turn with \`PARKED: waits for <what>\`. Never wait in your session with sleep, nap or a polling loop.`,
-  );
-  return `${lines.join("\n")}\n`;
-}
-
 // The short messages of a resume, quoted: the data that follows a brief written with `quote` false.
 export function messageQuotes(messages) {
   const short = messages.filter((m) => m.text.length <= INLINE_CHARS);
@@ -796,7 +596,7 @@ export function messageQuotes(messages) {
 }
 
 // One check of a parked attempt's folder `dir` by watcher `generation`: resume the task when its
-// pull request or its inbox has something. Returns the exit code: 0 to keep watching, DONE to stop.
+// wake condition or its inbox has something. Returns the exit code: 0 to keep watching, DONE to stop.
 export async function checkPark(dir, generation) {
   const n = Number(/attempt-(\d+)$/.exec(dir)?.[1]);
   const id = path.basename(path.dirname(dir));
@@ -814,7 +614,6 @@ export async function checkPark(dir, generation) {
   const parked = parkedOf(run, task, result);
   if (!parked) return DONE;
 
-  const babysit = isBabysitter(task);
   const file = path.join(dir, PARK_CHECK_FILE);
   const previous = readJson(file);
   const record = { at: new Date().toISOString(), generation };
@@ -823,39 +622,15 @@ export async function checkPark(dir, generation) {
   if (parked.children?.length) {
     const late = lateNotices(run, task);
     if (late.length) {
-      const start = await import("./commands/start.mjs");
       for (const child of late) {
         try {
-          sendFinishNotice(child.runDir, child.task, child.attempt, { start });
+          sendFinishNotice(child.runDir, child.task, child.attempt);
         } catch {}
       }
       record.lateNotices = late.map((c) => `${path.basename(c.runDir)}/${c.task}`);
     }
   }
   const messages = readInbox(taskDir(run, id)).filter((m) => !m.read);
-  let pr = null;
-  const ref = babysit ? task.pr?.url || (task.pr?.number ? String(task.pr.number) : null) : null;
-  if (ref) {
-    const cwd = task.cd && fs.existsSync(task.cd) ? task.cd : run.repo;
-    const s = watchSnapshot(cwd, ref);
-    if (s.error) record.error = s.error;
-    else {
-      const seen = readSeen(s);
-      let attention = watchAttention(s, seen);
-      if (!seen && !attention.length) recordSeen(s);
-      // Entering the merge queue is no event, but it is remembered, so that leaving it is one.
-      if (!attention.length) rememberQueue(s, seen);
-      // A change that needs no judgment wakes no model: record it as seen and keep waiting. With a
-      // message to deliver the babysitter wakes anyway, and is told about it.
-      if (!messages.length && quietItems(s, attention)) {
-        recordSeen(s);
-        record.quiet = attention;
-        attention = [];
-      }
-      if (aheadOfPr(cwd, s)) attention.push("this checkout has commits the pull request lacks: push them");
-      pr = { number: s.number, state: s.state, attention, now: s, before: seen, at: record.at };
-    }
-  }
   // The wake condition: run it when its interval has passed since its last run (at once on the
   // first check), and wake the task when it exits 0, cannot run, or its longest wait has passed.
   // Every check looks at the deadline, whatever the interval. A run that exited 0, or could not
@@ -893,22 +668,13 @@ export async function checkPark(dir, generation) {
     const { output: shown, ...kept } = latest;
     record.condition = { ...kept, ...(wake.met ? { met: true } : {}), ...(wake.error ? { error: wake.error } : {}) };
   }
-  record.events = [...(pr?.attention || []), ...conditionEvents, ...messages.map((m) => `message ${m.id}`)];
+  record.events = [...conditionEvents, ...messages.map((m) => `message ${m.id}`)];
   if (!record.events.length) {
     writeJson(file, record);
     return 0;
   }
-  // A babysitter resumes at its watch tier. Its first call reads no prompt cache when it switches
-  // model or waited past the cache's life, and then a smaller session is worth handing off.
-  let handoff = null;
-  if (babysit) {
-    const toModel = tierModel("claude", task.watchTier || BABYSIT_WATCH_TIER);
-    const { cold, why } = coldResume(result.finishedAt, task.model, toModel);
-    handoff = handoffOf(run, task, dir, { cold, coldWhy: why });
-  }
-  const fresh = Boolean(handoff?.fresh);
   const session = result.sessionId || result.threadId;
-  if (!session && !fresh) {
+  if (!session) {
     writeJson(file, { ...record, error: "its result has no session id to resume" });
     return 0;
   }
@@ -920,20 +686,15 @@ export async function checkPark(dir, generation) {
   const brief = path.join(dir, "park-resume.md");
   let started;
   try {
-    const changed = resumeBrief(run, task, parked, pr, messages, messagesFile, handoff, { quote: false, wake });
-    fs.writeFileSync(brief, fresh ? handoffBrief(handoff, changed) : changed);
+    fs.writeFileSync(brief, resumeBrief(run, task, parked, messages, messagesFile, { quote: false, wake }));
     const data = [messageQuotes(messages), conditionQuote(wake)].filter(Boolean).join("\n\n") || null;
-    // A task that is not a babysitter keeps its relay's options (model, effort, sandbox, network,
-    // read-only) and its tier, as an interrupt does; a babysitter's start sets its own.
-    const keep = babysit ? {} : { relayFrom: Array.isArray(task.argv) ? task.argv : [], "no-escalate": true, ...(task.readOnly ? { "read-only": true } : {}) };
+    // Keep the relay's options (model, effort, sandbox, network, read-only) and its tier, as an
+    // interrupt does.
+    const keep = { relayFrom: Array.isArray(task.argv) ? task.argv : [], "no-escalate": true, ...(task.readOnly ? { "read-only": true } : {}) };
     ({ task: started } = startTask({
-      _: [run.dir, id], agent: task.agent, brief, briefData: data, passthrough: fresh ? [] : [...resumeSandbox(task), "--session", session], parkClaim: claim,
-      fromHandoff: fresh, ...keep,
+      _: [run.dir, id], agent: task.agent, brief, briefData: data, passthrough: [...resumeSandbox(task), "--session", session], parkClaim: claim,
+      ...keep,
       attemptFiles: messages.length ? { [PARK_MESSAGES_FILE]: messagesText(messages) } : {},
-      // The record that this attempt began a fresh session from a handoff, and at what context size.
-    }, {
-      ...(fresh ? { handoffs: { ...(task.handoffs || {}), [n + 1]: handoffRecord(handoff, n, record.at) } } : {}),
-      ...(handoff ? { handoffChecks: { ...(task.handoffChecks || {}), [n + 1]: handoffCheck(handoff) } } : {}),
     }));
   } catch (error) {
     claim.release();
@@ -944,11 +705,9 @@ export async function checkPark(dir, generation) {
     writeJson(file, { ...record, waiting: error.message, waitingSince: since });
     return 0;
   }
-  // The brief told the session what changed, so that state is now the last one reported.
-  if (pr?.attention.length) recordSeen(pr.now);
   // Only the messages written in full into the new attempt's folder were delivered.
   markRead(taskDir(run, id), messages.map((m) => m.id), { attempt: started.attempt });
-  writeJson(file, { ...record, resumed: started.attempt, ...(fresh ? { freshSession: true, contextTokens: handoff.tokens, limitKind: handoff.cold ? "cold" : "warm" } : {}) });
+  writeJson(file, { ...record, resumed: started.attempt });
   return DONE;
 }
 
@@ -960,15 +719,6 @@ export function resumeSandbox(task) {
   const argv = Array.isArray(task.argv) ? task.argv : [];
   if (attemptAgent(task, task.attempt) !== "codex" || !argv.includes("--network-access")) return [];
   return argv.some((a) => a === "--sandbox" || a.startsWith("--sandbox=") || a === "--read-only" || a === "--lane" || a.startsWith("--lane=")) ? [] : ["--sandbox", "workspace-write"];
-}
-
-// The model of an agent's tier, from the policy, or null when it cannot be read.
-export function tierModel(agent, tier) {
-  try {
-    return readPolicy()[agent]?.tiers?.[tier]?.model || null;
-  } catch {
-    return null;
-  }
 }
 
 const real = (file) => {

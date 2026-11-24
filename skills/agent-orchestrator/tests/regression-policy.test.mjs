@@ -135,22 +135,6 @@ test('the start line names the tier, for each Claude tier', async (t) => {
   }
 });
 
-test('a babysitter refuses a watch tier above complex before reading the pull request, and takes light to complex', async (t) => {
-  const f = await fixture(t);
-  const run = await f.newRun();
-  const result = await f.command(['start', run.id, 'babysit-1', '--agent', 'claude', '--babysit', '--pr', '1', '--tier', 'frontier',
-    '--why', 'Babysits PR #1', '--brief', f.brief('babysit')], { code: 2 });
-  assert.match(result.stderr, /a babysitter watches at the light, standard \(the default\) or complex tier, and its fix attempts run complex; drop --tier frontier$/m);
-  // A lighter or the fix tier passes the tier check: the start goes on to read the pull request,
-  // which this fixture cannot.
-  for (const tier of ['light', 'standard', 'complex']) {
-    const read = await f.command(['start', run.id, 'babysit-1', '--agent', 'claude', '--babysit', '--pr', '1', '--tier', tier,
-      '--why', 'Babysits PR #1', '--brief', f.brief('babysit')], { code: 1 });
-    assert.match(read.stderr, /cannot read pull request 1/);
-  }
-  assert.deepEqual(fs.readdirSync(path.join(run.dir, 'tasks')), []);
-});
-
 test('a same-tier follow-up keeps its choice until two failures, then escalates in the same session', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun();

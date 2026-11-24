@@ -62,7 +62,7 @@ success). These rules hold at every level, main or delegated:
   coupled edit yourself too. (A main session may hand a whole task to one agent.)
 - **Never hand your task to a stronger model,** directly or through a script; say so with `$ORCH
   ask` or `NEEDS DECISION:`. `start` refuses a tier above your task's `rank` in `policy.json`, on
-  any agent, except for a babysitter (step 8). (A main session starts any tier.)
+  any agent. (A main session starts any tier.)
 - Review, integrate and close your agents' work before you finish, and cover it in your report.
 
 ## Setup
@@ -110,8 +110,8 @@ prefer an agent because it is the CLI you run in, and none is the default.
 - **Gemini Neon for coding.** For implementation, debugging and code review at `strong` or `complex`
   (Claude `complex`), Gemini 4 Neon is a candidate beside Opus and astra: it leads public agentic
   coding indexes at a lower price per token. While Gemini has under 5 finished tasks of that coding
-  kind, its turn comes first. Then the records decide. Never Gemini for a babysitter (Claude only),
-  live web research (Codex only), `frontier` work, or `--offline` (`references/tiers.md`).
+  kind, its turn comes first. Then the records decide. Never Gemini for live web research (Codex
+  only), `frontier` work, or `--offline` (`references/tiers.md`).
 - `$ORCH pick --type <type> --tier <tier>` applies this rule and prints the `--why`.
 - **Weigh cost against complexity.** The table sets the lowest tier the task's complexity allows
   (costly or subtle mistakes need `complex`). At or above it, take the tier and agent with the lowest
@@ -126,8 +126,8 @@ prefer an agent because it is the CLI you run in, and none is the default.
 | The task | Tier |
 | --- | --- |
 | Mechanical steps with nothing to judge: run tests or gates and report, fetch CI results or logs, spot-checks, review requests, Slack posts, routine reviewer replies, merge or enqueue; inventories, summaries, reproducing a bug from given steps, mechanical edits | `light` (Gemini: Hydrogen) |
-| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff; watching a pull request (a babysitter, step 8) | `standard` (Gemini: Hydrogen); Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area); Gemini `strong` (Neon) for coding |
-| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; fixing a babysitter's code or review findings; an independent review of a large or risky diff; a failed `standard` attempt | `complex` (Gemini: Neon) |
+| Small judgment calls: a change or test from a clear spec in 1 to 5 files, follow-on fixes, lint or type fixes, docs and config edits; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; status reports; a first review of a small diff | `standard` (Gemini: Hydrogen); Codex `strong` for bounded work that needs more judgment (live web research, reviews of medium diffs, debugging in a known area); Gemini `strong` (Neon) for coding |
+| **Any** of: implementation across several modules or more than about 5 files, or an interface other code depends on; costly or subtle mistakes (concurrency, security or authentication, data migrations or schemas, billing, performance-critical paths, integration between systems); a large, unfamiliar subsystem; an independent review of a large or risky diff; a failed `standard` attempt | `complex` (Gemini: Neon) |
 | Design and difficult work: complicated or long development, an unsettled design across modules, hard investigation or root-cause analysis, verification of complicated work, a failed `complex` attempt. Never routine or mechanical work, small reviews or waiting. Read `references/tiers.md` before you choose it | Claude `frontier` (`--effort medium` for less hard work) |
 | A review, verification or second opinion of another agent's work | An agent other than the author: `standard` for a small diff, `complex` for a large or risky one, `frontier` when the review itself is difficult |
 
@@ -221,9 +221,8 @@ the repository's rules and the user's request allow.
 ## 8. Pull requests you open
 
 Open a pull request when the user's request or the repository's rules call for one, and report its
-link. Then the task is done: never start a babysitter (`--babysit`, a `babysit` task), watch its
-checks or reviews, or send it to a code-review agent. Its review belongs to the user and the
-repository's own reviewers.
+link. Then the task is done: never watch its checks or reviews, or send it to a code-review agent.
+Its review belongs to the user and the repository's own reviewers.
 
 ## 9. Close what you no longer need, clean up, and report
 
@@ -244,8 +243,8 @@ repository's own reviewers.
   session's or the user's (one launched from a terminal). Commands that change a run refuse
   another's (exit 4). Before you act on a run you did not launch, after an exit 4, or when you find
   you changed another session's task, read `references/ownership.md`.
-- **Stopping processes.** Stop a task with `$ORCH stop` or `close`, and a background `wait`,
-  `pr-watch` or host sub-agent by the host's means: the task-stop tool in Claude Code; in Codex, an
+- **Stopping processes.** Stop a task with `$ORCH stop` or `close`, and a background `wait` or
+  host sub-agent by the host's means: the task-stop tool in Claude Code; in Codex, an
   interrupt or `interrupt_agent` (then no `followup_task`). Never run `pkill`, `killall` or `kill
   $(pgrep ...)`: a pattern reaches processes you did not start, and macOS `pkill` reads every later
   word as another pattern. Otherwise kill one PID, confirmed first with `ps -p <pid> -o command=`.
@@ -276,7 +275,6 @@ repository's own reviewers.
 | `references/dashboard.md` | When the user asks about the dashboard, or it escalates an item |
 | `references/review.md` | Before you review, accept, rework or escalate a result (step 6) |
 | `references/integrate.md` | Before you integrate (step 7) |
-| `references/babysit.md` | Never: babysitters are retired (step 8). It and its template `references/babysit-brief.md` describe code kept until it is removed |
 | `references/memory.md` | Before you run, or brief an agent to run, test suites, builds or containers; when `start` exits 7 (the machine is full or short of memory: `wait`, or `start --wait`) |
 | `references/ownership.md` | Before you act on a run you did not launch, after an exit 4, or when you changed another session's task |
 | `references/patterns.md` | When you plan a parallel build, a second opinion, an implement-review-fix loop, competing debugging hypotheses, a research fan-out, a long sequential queue, best of N on a cheap tier, or a team of reviewers for a large or risky diff |

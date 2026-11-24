@@ -96,14 +96,13 @@ test('brief refuses to overwrite without --force and writes to --out', async (t)
   await f.command(['brief', run.id, 'adhoc', '--type', 'research', '--out', custom], { code: 1 });
 });
 
-test('brief rejects bad types, task ids, read-only babysitters, unknown runs, and malformed plans', async (t) => {
+test('brief rejects bad types, task ids, unknown runs, and malformed plans', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('errors');
   const cases = [
-    [['brief', run.id, 'adhoc'], 2, /--type is required: implement, review, research, debug, babysit/],
+    [['brief', run.id, 'adhoc'], 2, /--type is required: implement, review, research, debug/],
     [['brief', run.id, 'adhoc', '--type', 'nope'], 2, /unknown --type "nope"/],
     [['brief', run.id, 'Bad_ID', '--type', 'implement'], 2, /task id "Bad_ID" must match/],
-    [['brief', run.id, 'babysit-1', '--type', 'babysit', '--read-only'], 2, /a babysitter needs write mode/],
     [['brief', 'no-such-run', 'adhoc', '--type', 'implement'], 1, /unknown run "no-such-run"/],
   ];
   for (const [args, code, message] of cases) assert.match((await f.command(args, { code })).stderr, message);
@@ -161,25 +160,10 @@ test('brief role lines and sections follow the type and read-only mode', async (
   assert.equal((await draft('debug-w', ['--type', 'implement', '--force'])).text.split('\n')[0], WRITE_ROLE);
 });
 
-test('babysit draft inlines the babysitter template with the CLI path and the report block', async (t) => {
-  const f = await fixture(t);
-  const run = await f.newRun('babysit');
-  const shown = await f.command(['brief', run.id, 'babysit-12', '--type', 'babysit']);
-  assert.match(shown.stdout, /babysit, babysitter; not in a plan/);
-  assert.match(shown.stdout, /plus the <\.\.\.> placeholders from references\/babysit-brief\.md/);
-  const text = fs.readFileSync(path.join(run.dir, 'briefs', 'babysit-12.md'), 'utf8');
-  assert.match(text, /^You are the babysitter for pull request <PR URL>/);
-  assert.doesNotMatch(text, /# Babysitter brief template|<orch-path>/);
-  assert.ok(text.includes(`node ${cli} pr-watch`));
-  assert.match(text, /## Final message[\s\S]*```orch-result\n/);
-  assert.match(text, /## House rules\n\n<fill in: the repository has no AGENTS\.md/);
-  assert.doesNotMatch(text, /\{\{/);
-});
-
 test('every template renders, and a generated brief dispatches through start', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('templates');
-  for (const type of ['implement', 'review', 'research', 'debug', 'babysit']) {
+  for (const type of ['implement', 'review', 'research', 'debug']) {
     const out = await f.json(['brief', run.id, `adhoc-${type}`, '--type', type]);
     const text = fs.readFileSync(out.path, 'utf8');
     assert.doesNotMatch(text, /\{\{|\}\}/, type);
@@ -207,7 +191,6 @@ test('every template suggests a tier in the command output, and the brief itself
     review: [/standard for a small diff, on the agent that did not write it/, /complex for a large or risky diff/],
     research: [/Codex standard \(only Codex has live web search\)/, /a test or gate run that only reports: Claude light .* or Codex standard/],
     debug: [/by the criteria: light or standard to reproduce a bug/, /complex when the cause is unknown across modules/],
-    babysit: [/complex, always: --babysit implies it, so no --tier is needed/],
   };
   for (const [type, patterns] of Object.entries(expected)) {
     const out = await f.json(['brief', run.id, `suggest-${type}`, '--type', type]);

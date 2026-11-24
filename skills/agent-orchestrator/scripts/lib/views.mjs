@@ -27,7 +27,7 @@ export function totalsText(t) {
 }
 
 // A closed session shows its outcome; a sub-agent that went idle and was closed has completed. A
-// parked babysitter (park.mjs) runs as far as `wait` can tell, and shows as parked.
+// parked task (park.mjs) runs as far as `wait` can tell, and shows as parked.
 function stateLabel(t) {
   return t.phase === "parked" ? "parked" : t.closed && t.state === "idle" ? "completed" : t.state;
 }
@@ -35,7 +35,7 @@ function stateLabel(t) {
 // "(2 attempts, 1 rework round)": the attempts, and the review rounds that asked for changes.
 function attemptsLabel(t) {
   const reworks = (t.reviewRounds || []).filter((r) => r.verdict === "changes").length;
-  const parts = [t.attempt > 1 ? `${t.attempt} attempts` : null, t.handoff ? `fresh session from a handoff at ${compact(t.handoff.contextTokens)} tokens` : null, reworks ? `${reworks} rework round${reworks === 1 ? "" : "s"}` : null].filter(Boolean);
+  const parts = [t.attempt > 1 ? `${t.attempt} attempts` : null, reworks ? `${reworks} rework round${reworks === 1 ? "" : "s"}` : null].filter(Boolean);
   return parts.length ? ` (${parts.join(", ")})` : "";
 }
 
@@ -89,7 +89,7 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
       : `${names.get(r.id) || r.id}: parked, and its watcher was not running; started a new one (pid ${r.pid})`)),
     ...nestedLines(run, names),
     ...whyLines(tasks),
-    ...tasks.filter((t) => t.state !== "closed").map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}${a.reason === "fix" ? " (fix)" : ""}`).join(", ") || "none"}`),
+    ...tasks.filter((t) => t.state !== "closed").map((t) => `  ${shownName(t)}: ${t.failureCount || 0} counted failures; attempts: ${(t.attempts || []).slice().reverse().map((a) => `${a.n} ${a.agent} ${a.tier || "no tier"}`).join(", ") || "none"}`),
     ...(changed.length ? ["changed by someone other than you, the owner:", ...changed.map((line) => `  ${line}`)] : []),
   ].join("\n");
 }

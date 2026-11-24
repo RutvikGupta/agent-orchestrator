@@ -42,8 +42,7 @@ const boardRow = ({ result, activeMs, ...t }) => ({
 // limitHit, and whether it is closed do. A closed session never needs attention: `close` retired
 // it, or `result` handed its report over. For an orch.mjs task, `closed` is its own closedAt,
 // because describe() marks every completed task closed; a native sub-agent counts as closed once it
-// stops, since the session that started it receives its result. A babysitter never awaits review:
-// it is done once its pull request lands or is approved. A review left waiting longer than
+// stops, since the session that started it receives its result. A review left waiting longer than
 // AGENT_ORCH_REVIEW_STALE (24h) is stale and leaves the lane; `recover` still lists it. A running
 // task is stuck when it keeps re-running one failing command with no change in between (`stuck`,
 // from report.mjs); its wait counts from the first of those failures when the events carry a time.
@@ -76,7 +75,7 @@ export function attentionOf(t, closed, now = Date.now()) {
       return { ...item("resume-blocked", "resume blocked", reason), sinceMs: since };
     }
   }
-  // A parked babysitter (park.mjs) waits for its pull request: nothing to review, decide or fix. A
+  // A parked task (park.mjs) waits for its wake: nothing to review, decide or fix. A
   // task that a stop ended (`stopped`, runs.mjs) was ended on purpose: it did not fail, and whoever
   // stopped it knows; `start` resumes it.
   if (t.phase === "parked" || (t.state === "stopped" && !t.native)) return null;
@@ -100,7 +99,6 @@ export function attentionOf(t, closed, now = Date.now()) {
     return { ...item("stuck", "stuck", reason), sinceMs: t.stuck.firstMs || t.lastActiveMs || 0 };
   }
   if (t.phase ? t.phase === "awaiting-review" : t.state === "completed") {
-    if (String(t.mode || "").startsWith("babysit")) return null;
     const waited = t.awaitingReviewMs ?? (t.lastActiveMs ? now - t.lastActiveMs : null);
     if (waited != null && waited >= reviewStaleMs()) return null;
     return item("awaiting-review", "awaiting review", `waiting ${formatElapsed(waited)}${t.report?.outcome ? ` · reported ${t.report.outcome}` : ""}`);
@@ -756,7 +754,7 @@ export function buildDashboardState() {
   return shown.sort((a, b) => b.running - a.running || (a.running ? b.startedMs - a.startedMs : b.activeMs - a.activeMs) || b.startedMs - a.startedMs);
 }
 
-// A parked babysitter holds no agent, so it does not keep a detached dashboard open.
+// A parked task holds no agent, so it does not keep a detached dashboard open.
 export function anyTaskRunning() {
   return dashboardState().some((run) => run.tasks.some((t) => !t.main && t.state === "running" && t.phase !== "parked"));
 }

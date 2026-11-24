@@ -74,18 +74,12 @@ test('structured decisions set needs-decision and preserve open/closed semantics
   assert.equal(fields(message, {}, { state: 'needs-decision' }).state, 'needs-decision');
 });
 
-test('health distinguishes prepared, dead, running and quiet threshold; only babysitter pr-watch is exempt', () => {
+test('health distinguishes prepared, dead, running and quiet threshold', () => {
   assert.equal(fields('', {}, { state: 'prepared', result: null }).health, 'ok');
   assert.equal(fields('', { pid: 123 }, { state: 'aborted', result: null }).health, 'dead');
   assert.equal(fields('', { pid: 123 }, { state: 'failed', result: { error: 'ordinary error' } }).health, 'ok');
   for (const quietMs of [null, 0, 15 * 60000]) assert.equal(fields('', { pid: 123 }, { state: 'running', quietMs, result: null }).health, 'ok');
-  const quiet = { state: 'running', quietMs: 15 * 60000 + 1, now: '$ node scripts/orch.mjs pr-watch 123' };
-  assert.equal(fields('', { pid: 123 }, quiet).health, 'silent');
-  assert.equal(fields('', { pid: 123, babysit: true }, quiet).health, 'ok');
-  assert.equal(fields('', { pid: 123, plan: { type: 'babysit' } }, quiet).health, 'ok');
-  assert.equal(fields('', { babysit: true }, { ...quiet, now: 'says: orch.mjs pr-watch is useful' }).health, 'silent');
-  assert.equal(fields('', { babysit: true }, { ...quiet, now: '$ node scripts/orch.mjs status run' }).health, 'silent');
-  assert.equal(fields('', { babysit: true }, { ...quiet, now: '$ node scripts/orch.mjs pr-watch-other' }).health, 'silent');
+  assert.equal(fields('', { pid: 123 }, { state: 'running', quietMs: 15 * 60000 + 1, now: '$ node scripts/orch.mjs status run' }).health, 'silent');
 });
 
 test('transient health recognizes provider/network failures but refuses ordinary failures, success, and usage limits', () => {
@@ -115,19 +109,16 @@ test('hints give one line per problem with log/resume commands, silence duration
   assert.match(reportHints({ id: 'run' }, [{ id: 'task', agent: 'claude', health: 'transient-error' }])[0], /--agent claude --brief <delta> -- --session <id>/);
 });
 
-test('brief note retains decisions behavior and documents every structured field for normal/babysit tasks', () => {
-  for (const babysit of [false, true]) {
-    const note = decisionNote(babysit);
-    assert.match(note, /## Decisions/);
-    assert.match(note, /never stop to wait for an answer/);
-    assert.match(note, /first line is `NEEDS DECISION:`/);
-    assert.match(note, /End your final message/);
-    const example = fields(note).report;
-    assert.equal(example.outcome, 'done');
-    for (const key of ['outcome', 'changed', 'checks', 'decisions', 'unresolved']) assert.ok(note.includes(`- \`${key}\``));
-    assert.match(note, /"question".*"options".*"recommendation"/);
-    if (babysit) assert.match(note, /stop watching/);
-  }
+test('brief note retains decisions behavior and documents every structured field', () => {
+  const note = decisionNote();
+  assert.match(note, /## Decisions/);
+  assert.match(note, /never stop to wait for an answer/);
+  assert.match(note, /first line is `NEEDS DECISION:`/);
+  assert.match(note, /End your final message/);
+  const example = fields(note).report;
+  assert.equal(example.outcome, 'done');
+  for (const key of ['outcome', 'changed', 'checks', 'decisions', 'unresolved']) assert.ok(note.includes(`- \`${key}\``));
+  assert.match(note, /"question".*"options".*"recommendation"/);
 });
 
 test('CLI exposes reports/scope in JSON and text, appends the brief, and preserves result closing', async (t) => {
@@ -211,36 +202,18 @@ test('CLI detects a dead relay without result.json, while an existing unreadable
   assert.notEqual((await f.json(['result', run.id, 'dead'])).health, 'dead');
 });
 
-test('CLI quiet-time health recognizes long pr-watch paths and rejects stale/completed waits', async (t) => {
+test('CLI quiet-time health flags a silent running task after 15 minutes', async (t) => {
   const f = await fixture(t);
   const run = await f.newRun('quiet');
   const started = await f.start(run, 'watcher', { flags: ['--read-only'], config: { delayMs: 30000 } });
   await f.ready(started);
-  const taskFile = f.taskFile(run, 'watcher');
-  writeJson(taskFile, { ...readJson(taskFile), babysit: true });
-  const command = `node /a/${'long-directory/'.repeat(8)}scripts/orch.mjs pr-watch 123`;
-  const watch = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'watch', name: 'Bash', input: { command } }] } };
-  async function health(events) {
-    const file = jsonl(path.join(started.outDir, 'events.jsonl'), events);
-    const old = new Date(Date.now() - 16 * 60000);
-    fs.utimesSync(file, old, old);
-    return (await f.json(['status', run.id])).tasks[0].health;
-  }
-  assert.equal(await health([watch]), 'ok');
-  assert.equal(await health([watch, { type: 'assistant', message: { content: [{ type: 'text', text: 'Now editing the fix.' }] } }]), 'silent');
-  assert.equal(await health([watch, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'watch', content: 'Done' }] } }]), 'silent');
-  writeJson(taskFile, { ...readJson(taskFile), babysit: false });
-  assert.equal(await health([watch]), 'silent');
+  const watch = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'watch', name: 'Bash', input: { command: 'node scripts/orch.mjs status ' + run.id } }] } };
+  const file = jsonl(path.join(started.outDir, 'events.jsonl'), [watch]);
+  const old = new Date(Date.now() - 16 * 60000);
+  fs.utimesSync(file, old, old);
+  assert.equal((await f.json(['status', run.id])).tasks[0].health, 'silent');
   assert.match((await f.command(['wait', run.id, '--timeout', '1ms'], { code: 3 })).stdout, /watcher: silent; quiet for 16m/);
   await f.command(['close', run.id, 'watcher']);
-
-  // Exercise the Codex activity shape too, without needing a live GitHub babysitter.
-  const task = { outDir: started.outDir, babysit: true };
-  const quiet = { state: 'running', quietMs: 16 * 60000 };
-  jsonl(path.join(started.outDir, 'events.jsonl'), [{ type: 'item.started', item: { type: 'command_execution', command } }]);
-  assert.equal(fields('', task, quiet).health, 'ok');
-  jsonl(path.join(started.outDir, 'events.jsonl'), [{ type: 'item.completed', item: { type: 'command_execution', command } }]);
-  assert.equal(fields('', task, quiet).health, 'silent');
 });
 
 test('health reads a transient error from the current event stream when result omits it', async (t) => {

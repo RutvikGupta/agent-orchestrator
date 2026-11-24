@@ -282,8 +282,7 @@ function answerInbox() {
   fs.writeFileSync(path.join(out, "demo-inbox-done"), "");
 }
 
-// A session waiting in a command with a timeout (a babysitter's pr-watch) sees it return, and runs
-// it again.
+// A session waiting in a command with a timeout sees it return, and runs it again.
 if (script.repeat) {
   const again = () => step(script.steps.at(-1));
   setTimeout(() => {
@@ -304,8 +303,8 @@ setInterval(() => {
     }
   }
   if (!answered) answerInbox();
-  // Keep the stream fresh, as a working agent's is; a session that waits quietly by design (a
-  // babysitter in pr-watch) is left alone.
+  // Keep the stream fresh, as a working agent's is; a session that waits quietly by design is left
+  // alone.
   if (!script.quiet && ++beat % 20 === 0) {
     const now = new Date();
     try {

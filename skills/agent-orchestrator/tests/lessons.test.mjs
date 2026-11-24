@@ -63,7 +63,7 @@ test('briefs include all lesson texts without evidence and omit empty lessons', 
   assert.doesNotMatch(await brief('implement', '-empty'), /Known traps/);
   await f.command(['lesson', run.id, 'Use handshakes', '--evidence', 'test failed'], { env });
   fs.appendFileSync(path.join(dir, 'lessons', 'project.md'), '- Keep manual edits $&\n');
-  for (const type of ['implement', 'debug', 'review', 'research', 'babysit']) {
+  for (const type of ['implement', 'debug', 'review', 'research']) {
     const text = await brief(type);
     assert.match(text, /## Known traps in this repository\n\n- Use handshakes\n- Keep manual edits \$&/);
     assert.doesNotMatch(text, /evidence: test failed/);

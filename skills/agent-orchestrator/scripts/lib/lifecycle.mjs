@@ -50,10 +50,12 @@ export function unlinkedVerifications(verifications, rounds) {
 
 // Why attempt `n` started: `first`, `resume` (a follow-up attempt), `rework` (after a `changes`
 // verdict) or `retry` (the automatic retry after a transient error). Records from before
-// attemptReasons existed fall back to their retry log.
+// attemptReasons existed fall back to their retry log; retired `fix` reasons show as `resume`.
 export function attemptReasonOf(task, n = task.attempt || 0) {
   if (!n) return null;
-  return task.attemptReasons?.[n] || (task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume");
+  const raw = task.attemptReasons?.[n];
+  if (raw) return raw === "fix" ? "resume" : raw;
+  return task.retryLog?.some((r) => r.attempt === n) ? "retry" : n === 1 ? "first" : "resume";
 }
 
 // Preparing a closed, never-started task again reopens it until the next close.
@@ -67,7 +69,6 @@ export function phaseOf(task, state) {
   // A task that a stop ended did not fail: its orchestrator stopped it and may resume it.
   if (["prepared", "running", "needs-decision", "closed", "stopped"].includes(state)) return state;
   if (state !== "completed" || rejectedNow(task)) return "failed";
-  if (task.babysit || task.plan?.type === "babysit") return "integrated";
   if (acceptedNow(task) && task.integratedAt) return "integrated";
   // A read-only task produces no code: collecting its result (or closing it) is its integration.
   if (task.readOnly && task.closedAt) return "integrated";
@@ -160,7 +161,7 @@ export function lifecycleHints(run, tasks) {
   // Outside the plan, a task whose result was already collected has been seen; only the plan's
   // tasks wait on acceptance.
   const reviewing = tasks.filter(
-    (t) => t.mode?.split("+")[0] !== "babysit" && t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
+    (t) => t.phase === "awaiting-review" && (planned.has(t.id) || !readJson(path.join(run.dir, "tasks", t.id, "task.json"))?.closedAt),
   );
   if (reviewing.length) {
     lines.push(`awaiting review: ${reviewing.map((t) => `${t.name || t.id} (${agoText(t.awaitingReviewMs || 0)})`).join(", ")}; review, commit, then run \`accept\``);

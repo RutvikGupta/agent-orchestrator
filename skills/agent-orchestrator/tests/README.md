@@ -35,7 +35,7 @@ bookkeeping is produced by CLI commands.
 `<!-- fake-relay {"status":"failed","error":"Usage limit reached"} -->`.
 Supported controls are `status`, `finalMessage`, `delayMs` (capped at 30 seconds),
 `error`, `extraEvents`, `touchedFiles`, `readOnlyViolation`, and `hold`. A brief without that
-comment, such as the one a parked babysitter's watcher writes, takes its controls from the
+comment, such as the one a parked task's watcher writes, takes its controls from the
 `FAKE_RELAY_CONFIG` environment variable (the same JSON). The fake accepts the
 real relay arguments, records its invocation, emits agent-specific JSONL events,
 and writes `result.json` and `final.txt`. SIGTERM writes a stopped result.
@@ -70,5 +70,5 @@ its exit, verify its port can be rebound, and remove the temporary directory,
 including when an assertion fails. Native transcript fixtures represent state;
 they do not launch processes. There are currently no TODO tests.
 
-External integrations (`agents --refresh`, live model calls, GitHub `pr-watch`,
-publishing/babysitting, browser opening) are deliberately outside this local suite.
+External integrations (`agents --refresh`, live model calls, publishing, browser opening) are
+deliberately outside this local suite.

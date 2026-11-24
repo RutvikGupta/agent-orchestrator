@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Removed the pull-request babysitter feature end to end (`start --babysit`/`--pr`, `pr-watch`,
+  `brief --type babysit`, plan type `babysit`, `pick --needs babysit`, watch/fix tiers and
+  `NEEDS FIX:` fix attempts, babysitter handoff notes, and babysitter docs and tests). General
+  parking (`park-until`, `PARKED:`, child waits and inbox wakes), write-task publish permissions,
+  and reading older task records on disk remain intact.
+  Upgrading: stop or close any parked babysitter task before you upgrade. Records of finished ones
+  still load as ordinary tasks, but a babysitter still parked or mid-resume at the upgrade is not
+  handled.
+
 - Gemini commits carry no Cursor co-author trailer. Cursor's CLI attributes commits and pull requests
   to its agent by default, so every commit a Gemini task made ended with `Co-authored-by: Cursor`.
   The relay's per-run config now turns both off, whatever the user's own Cursor config says.

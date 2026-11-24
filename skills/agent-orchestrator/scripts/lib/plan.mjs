@@ -6,10 +6,10 @@ import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { AGENTS, TASK_ID, agentName } from "./config.mjs";
-import { BABYSIT_WATCH_TIER, CLAUDE_DEFAULT_TIER, POLICY_AGENTS, loadPolicy } from "./policy.mjs";
+import { POLICY_AGENTS, loadPolicy } from "./policy.mjs";
 import { readJson } from "./util.mjs";
 
-export const TASK_TYPES = ["implement", "review", "research", "debug", "babysit"];
+export const TASK_TYPES = ["implement", "review", "research", "debug"];
 const LIST_FIELDS = ["owns", "uses", "produces", "resources", "dependsOn"];
 
 export function planPath(runDir) {
@@ -55,21 +55,20 @@ export function briefProblem(runDir, entry) {
 // "light, standard or complex": a tier list for messages.
 const orList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} or ${names.at(-1)}` : names.join(""));
 
+// What is wrong with a planned task's type, or null. `plan` rejects unknown types when recording a
+// plan; `dispatch` and first `start` check saved plans too, so a retired type is never launched.
+export function typeProblem(task) {
+  if (task?.type === undefined || TASK_TYPES.includes(task.type)) return null;
+  return `type ${JSON.stringify(task.type)} is no longer supported (use ${orList(TASK_TYPES)})`;
+}
+
 // What is wrong with a planned task's tier, or null. Every task names one, since `start` refuses a
-// new task without it. A pull-request babysitter is the exception: it watches at `standard` unless
-// its tier names another one up to `complex`, the tier of its fix attempts, so its tier may be left
-// out. `dispatch` uses this too, for a plan recorded before tiers were required.
+// new task without it. `dispatch` uses this too, for a plan recorded before tiers were required.
 export function tierProblem(task, policy = loadPolicy()) {
   if (!POLICY_AGENTS.includes(task?.agent)) return null; // the agent is reported on its own
   const label = agentName(task.agent);
   if (!policy[task.agent]) return `policy.json has no ${task.agent} tiers, so ${label} tasks cannot start`;
   const names = Object.keys(policy[task.agent].tiers);
-  if (task.agent === "claude" && task.type === "babysit") {
-    if (task.tier == null || task.tier === "") return null;
-    const rank = (name) => (Number.isInteger(policy.claude.tiers[name]?.rank) ? policy.claude.tiers[name].rank : names.indexOf(name) + 1);
-    const allowed = names.filter((name) => rank(name) <= rank(CLAUDE_DEFAULT_TIER));
-    return allowed.includes(task.tier) ? null : `a babysit task watches at ${orList(allowed)} (default ${BABYSIT_WATCH_TIER}), and its fix attempts run ${CLAUDE_DEFAULT_TIER}`;
-  }
   if (names.includes(task.tier)) return null;
   return task.tier == null || task.tier === ""
     ? `a ${label} task needs a tier (${orList(names)}): the lightest that does the task as well as the top one`
@@ -116,7 +115,6 @@ export function validatePlan(plan, held = new Map()) {
     for (const key of LIST_FIELDS) if (task[key] !== undefined && !stringList(task[key])) bad(`${key} must be a list of non-empty strings`);
     if (task.readOnly !== undefined && typeof task.readOnly !== "boolean") bad("readOnly must be true or false");
     if (task.readOnly && Array.isArray(task.owns) && task.owns.length) bad("is read-only, so it owns nothing: empty owns, and list what it reads under uses");
-    if (task.type === "babysit" && (task.agent !== "claude" || task.readOnly)) bad("a babysit task runs on Claude in write mode");
     if (!filled(task.brief)) bad("brief is empty: the path of its brief file, relative to the run directory");
   });
   if (!graphReadable) return { errors, conflicts: [] };
@@ -221,9 +219,8 @@ export function conflictText(c) {
 // Where each planned task stands, given the phase of every task that has a record (`phases`: id ->
 // phase). A task is ready when it has not started and every task it depends on is integrated; with
 // `runDir`, a ready task whose brief is not ready yet is listed under `unbriefed` instead.
-// Babysit tasks need a pull request number, which the plan does not hold, so they are started by hand.
 export function planProgress(plan, phases, runDir = null) {
-  const out = { started: [], ready: [], unbriefed: [], blocked: [], manual: [] };
+  const out = { started: [], ready: [], unbriefed: [], blocked: [] };
   for (const task of plan.tasks) {
     const phase = phases.get(task.id);
     if (phase && phase !== "prepared") {
@@ -233,9 +230,8 @@ export function planProgress(plan, phases, runDir = null) {
     const waitsOn = (task.dependsOn || [])
       .filter((dep) => phases.get(dep) !== "integrated")
       .map((dep) => ({ id: dep, phase: phases.get(dep) && phases.get(dep) !== "prepared" ? phases.get(dep) : "not started" }));
-    const problem = runDir && !waitsOn.length && task.type !== "babysit" ? briefProblem(runDir, task) : null;
+    const problem = runDir && !waitsOn.length ? briefProblem(runDir, task) : null;
     if (waitsOn.length) out.blocked.push({ task, waitsOn });
-    else if (task.type === "babysit") out.manual.push(task);
     else if (problem) out.unbriefed.push({ task, problem });
     else out.ready.push(task);
   }
@@ -250,7 +246,7 @@ export function waitsOnText(waitsOn) {
 // when its dependent is requested. Keep the running task's original reservation after replanning.
 export function runningConflicts(entry, running) {
   const reservation = (task) => ({ ...task, dependsOn: [],
-    owns: task.babysit || task.type === "babysit" || task.agent === "command" ? [] : task.owns,
+    owns: task.agent === "command" ? [] : task.owns,
     resources: task.agent === "command" ? [] : task.resources,
   });
   return running.flatMap((held) => findConflicts([

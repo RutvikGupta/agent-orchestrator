@@ -104,8 +104,7 @@ When it happens:
 A worktree is removed only when all of these hold. Otherwise it is kept, and the command lists it
 with the reason:
 
-- Its task is not running, and no running or parked task in any run uses the folder. A pull
-  request's worktree therefore stays while its babysitter works in it.
+- Its task is not running, and no running or parked task in any run uses the folder.
 - Its task's latest attempt was closed with `close`, or the task was accepted and integrated.
   Reading a finished write task's result with `result` also closes it, but only `gc` counts that.
 - It has no uncommitted changes: a modified, staged, deleted or renamed tracked file, or an

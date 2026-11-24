@@ -16,7 +16,7 @@ const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
 
 // One task as stats.mjs describes it for the tier summary.
 function item(agent, model, extra = {}) {
-  return { accepted: 0, firstAttemptAccepted: 0, tokensIn: 0, elapsedMs: null, chosen: true, reviewed: false,
+  return { accepted: 0, firstAttemptAccepted: 0, tokensIn: 0, elapsedMs: null, reviewed: false,
     first: { agent, model, effort: null, tier: null }, ...extra };
 }
 
@@ -33,8 +33,7 @@ test('the tier summary counts a task at the tier of its first attempt and rates 
     // Rejected, and finished with no verdict: only the rejection says anything about the tier.
     item('codex', luna, { reviewed: true, tokensIn: 50, elapsedMs: 240000 }),
     item('codex', luna, { tokensIn: 50, elapsedMs: 300000 }),
-    // Not counted: a babysitter, and a model no tier runs now.
-    item('codex', luna, { chosen: false, accepted: 1, firstAttemptAccepted: 1, reviewed: true, tokensIn: 7000 }),
+    // Not counted: a model no tier runs now.
     item('codex', 'gpt-5-retired', { accepted: 1, firstAttemptAccepted: 1, reviewed: true, tokensIn: 7000 }),
   ];
   const light = entry(items, 'light');
@@ -99,7 +98,7 @@ async function template(f, run, agent = 'codex') {
 // its result, as when a relay exits without one; `attemptTiers` records each attempt's tier on the
 // task, as `start` does.
 function seed(source, run, id, { agent = 'codex', tier = 'light', firstTier = tier, attempts = 1, elapsed = 60000, age = 3600000,
-  verdict = null, babysit = false, model, status, crashed = false, attemptTiers = false } = {}) {
+  verdict = null, model, status, crashed = false, attemptTiers = false } = {}) {
   const tiers = policy[agent].tiers;
   const dir = path.join(run.dir, 'tasks', id);
   fs.cpSync(source, dir, { recursive: true });
@@ -120,7 +119,7 @@ function seed(source, run, id, { agent = 'codex', tier = 'light', firstTier = ti
     last: { acceptedAt: new Date(started + elapsed + 1000).toISOString(), acceptedAttempt: attempts },
     rejected: { rejectedAt: new Date(started + elapsed + 1000).toISOString(), rejectedAttempt: attempts } }[verdict];
   writeJson(path.join(dir, 'task.json'), { ...readJson(path.join(source, 'task.json')), id, tier, model: tiers[tier].model,
-    effort: tiers[tier].effort, attempt: attempts, outDir: path.join(dir, `attempt-${attempts}`), babysit, pid: deadPid,
+    effort: tiers[tier].effort, attempt: attempts, outDir: path.join(dir, `attempt-${attempts}`), pid: deadPid,
     startedAt: new Date(started).toISOString(), ...stamp,
     // `start` records each attempt's tier itself now, so a task from before that has the field removed.
     attemptTiers: attemptTiers ? Object.fromEntries(Array.from({ length: attempts }, (_, i) => [i + 1, i === 0 ? firstTier : tier])) : undefined });
@@ -154,10 +153,9 @@ test('agents, the --tier error and stats show each tier\'s results from the last
   seed(source, run, 'l4', { tier: 'standard', firstTier: 'light', attempts: 2, elapsed: 240000, verdict: 'last' });
   seed(source, run, 'l5', { elapsed: 300000, verdict: 'rejected' });
   seed(source, run, 'l6', { elapsed: 360000 });
-  // standard: five finished tasks (the redone one is light's), a babysitter, and a task on a model no tier runs now.
+  // standard: five finished tasks (the redone one is light's), and a task on a model no tier runs now.
   for (const n of [1, 2, 3, 4]) seed(source, run, `s${n}`, { tier: 'standard', verdict: 'first' });
   seed(source, run, 's5', { tier: 'standard' });
-  seed(source, run, 's-babysit', { tier: 'standard', verdict: 'first', babysit: true });
   seed(source, run, 's-retired', { tier: 'standard', verdict: 'first', model: 'gpt-5-retired' });
   // strong: four finished tasks, one short of a rate.
   for (const n of [1, 2, 3, 4]) seed(source, run, `g${n}`, { tier: 'strong', verdict: 'first' });
@@ -198,12 +196,12 @@ test('agents, the --tier error and stats show each tier\'s results from the last
 
   // `stats` adds what an accepted task cost to each group: every input token of the group's tasks over
   // its accepted ones. Light's own model: five tasks of 120 over three accepted. The standard model:
-  // 840 from seven tasks and 240 from the redone one, over seven accepted.
+  // 720 from six tasks and 240 from the redone one, over six accepted.
   const label = (tier) => `${codexTiers[tier].model.replace(/^gpt-/, '')} ${codexTiers[tier].effort}`;
   const stats = await f.json(['stats']);
   const group = (tier) => stats.byAgent.find((g) => g.agent === 'codex' && g.modelLabel === label(tier));
   assert.deepEqual([group('light').accepted, group('light').tokensIn, group('light').tokensInPerAccepted], [3, 600, 200]);
-  assert.deepEqual([group('standard').accepted, group('standard').tokensIn, group('standard').tokensInPerAccepted], [7, 1080, 154]);
+  assert.deepEqual([group('standard').accepted, group('standard').tokensIn, group('standard').tokensInPerAccepted], [6, 960, 160]);
   assert.match((await f.command(['stats'])).stdout, /TOKENS IN PER ACCEPTED/);
 });
 

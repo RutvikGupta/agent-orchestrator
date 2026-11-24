@@ -235,7 +235,8 @@ for (const parked of [false, true]) test(`regression: gc preserves a worktree us
   let reader;
   if (parked) {
     const outDir = path.join(other.dir, 'tasks', 'reader', 'attempt-1');
-    writeJson(f.taskFile(other, 'reader'), { id: 'reader', cd: wt.path, outDir, pid: 99999999, attempt: 1, babysit: true, startedAt: daysAgo(2) });
+    writeJson(f.taskFile(other, 'reader'), { id: 'reader', agent: 'codex', cd: wt.path, outDir, pid: 99999999, attempt: 1, startedAt: daysAgo(2) });
+    writeJson(path.join(outDir, 'park-until.json'), { attempt: 1, command: ['true'], every: 60000, for: 3600000, why: 'feedback', at: daysAgo(1), until: new Date(Date.now() + 3600000).toISOString() });
     writeJson(path.join(outDir, 'result.json'), { status: 'completed', finishedAt: daysAgo(1), finalMessage: 'PARKED: waiting for feedback' });
   } else {
     reader = await f.start(other, 'reader', { config: { hold: true }, flags: ['--read-only', '--cd', wt.path] });
@@ -533,10 +534,10 @@ test('idle gc collects a restored worktree whose task was resumed and only read 
   assert.equal(fs.existsSync(wt.path), false);
 });
 
-test('a worktree on another local branch, as a babysitter\'s is, is collected; one on a detached commit no branch holds is kept', async (t) => {
+test('a worktree on another local branch is collected; one on a detached commit no branch holds is kept', async (t) => {
   const f = await fixture(t), run = await f.newRun();
-  // On the pull request's own branch: the commit is on neither the task's branch nor the base.
-  const pr = await worktree(f, run, 'babysit', { closedAt: daysAgo(3) });
+  // On a feature branch: the commit is on neither the task's branch nor the base.
+  const pr = await worktree(f, run, 'branch-task', { closedAt: daysAgo(3) });
   await f.git(['-C', pr.path, 'switch', '-q', '-c', 'feature/pull-request']);
   const onBranch = await commit(f, pr);
   // On a detached HEAD with a commit that no branch holds.
@@ -545,7 +546,7 @@ test('a worktree on another local branch, as a babysitter\'s is, is collected; o
   await commit(f, loose, 'loose.txt');
   idleRun(f, run);
   const out = await f.json(['gc']);
-  assert.deepEqual(out.runs[0].removed.map((r) => r.task), ['babysit']);
+  assert.deepEqual(out.runs[0].removed.map((r) => r.task), ['branch-task']);
   assert.match(out.runs[0].kept.find((k) => k.task === 'detached').reason, /not reachable from a retained branch/);
   assert.equal(fs.existsSync(pr.path), false);
   assert.equal(fs.existsSync(loose.path), true);

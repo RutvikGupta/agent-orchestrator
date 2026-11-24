@@ -281,7 +281,6 @@ export function planSteer(task, row = null) {
 export function planResume(task, row = null) {
   const refused = (why) => ({ wait: `${why}, so it is not interrupted; it reads the message after its current step`, refused: true });
   if (task.agent === COMMAND_AGENT) return { wait: "a command task has no session to resume and no agent to read the message", refused: true };
-  if (task.babysit || task.plan?.type === "babysit") return refused("a babysitter's park watcher delivers its messages");
   if (!RESUMABLE.has(task.agent)) return refused(`a ${task.agent} task cannot be resumed`);
   // The Codex relay refuses --network-access on a resumed run unless the sandbox is named, and a
   // sandboxed Codex task with the network on starts without naming it: its session would be stopped
@@ -451,7 +450,7 @@ export function adoptResume(run, task) {
   };
   saveTask(run, saved);
   writeJson(file, { ...record, attempt: saved.attempt, pid: saved.pid, resumedAt: saved.startedAt, adopted: true });
-  if (saved.startedBy || saved.babysit) watchForFinish(run, saved);
+  if (saved.startedBy) watchForFinish(run, saved);
   return saved;
 }
 
@@ -565,7 +564,7 @@ export const interruptBrief = () => [
   "",
   "Your session was stopped and resumed so that the messages sent to you, below, reach you now.",
   "",
-  `- Stopping the session also stopped every command you had started in the background. Start again what you still need, in the background, and wait for it with \`node ${CLI_PATH} nap <duration>\`, \`wait\` or \`pr-watch\`, which return as soon as a message arrives.`,
+  `- Stopping the session also stopped every command you had started in the background. Start again what you still need, in the background, and wait for it with \`node ${CLI_PATH} nap <duration>\` or \`wait\`, which return as soon as a message arrives.`,
   "- A tool call that was running when the session stopped was cut off: check what it did before you repeat it.",
   "- Your task and your brief are unchanged. Handle the messages first, then carry on where you left off, and finish as your brief says, with its final report.",
   "",

@@ -280,41 +280,22 @@ test('an accepted task, a read-only task and a task outside the plan need nothin
   assert.equal(await blocked(f), null);
 });
 
-// A fake gh on PATH, so that a parked babysitter never reaches a real service. It serves one open
-// pull request, #42, with nothing to act on (the protocol of park.test.mjs), and its watcher checks
-// every second.
-async function fakeGh(f) {
-  const bin = path.join(f.root, 'bin');
-  const data = path.join(f.root, 'github.json');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-if (args[0] === 'pr' && args[1] === 'view') console.log(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-else if (args[0] === 'api' && args[1] === 'graphql') console.log(JSON.stringify({data:{repository:{pullRequest:{reviewThreads:{nodes:[]}}}}}));
-else process.exit(91);
-`, { mode: 0o755 });
-  f.env.PATH = `${bin}:${f.env.PATH}`;
-  f.env.AGENT_ORCH_PARK_INTERVAL = '1s';
-  writeJson(data, { number: 42, url: 'https://github.com/example/repo/pull/42', title: 'Fixture PR',
-    state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    reviewDecision: '', headRefOid: await f.git(['rev-parse', 'HEAD']), headRefName: 'main',
-    baseRefName: 'base', statusCheckRollup: [], comments: [], reviews: [] });
-}
-
-test('a parked babysitter is not a finished result, and needs a wait like a running task', async (t) => {
+test('a parked task is not a finished result, and needs a wait like a running task', async (t) => {
   const f = await fixture(t);
-  await fakeGh(f);
   const run = await f.newRun();
   f.launchingSession(run, SESSION);
-  const parked = ['PARKED: PR #42 waits for a human review', '```orch-result',
+  const parked = ['PARKED: waits for the deploy', '```orch-result',
     '{"outcome":"parked","changed":[],"checks":[],"decisions":[],"unresolved":[]}', '```'].join('\n');
-  const task = await f.json(['start', run.id, 'watch', '--agent', 'claude', '--babysit', '--pr', '42',
-    '--why', 'Babysits the fixture PR', '--brief', f.brief('watch', { finalMessage: parked })]);
+  const task = await f.start(run, 'watch', { config: { hold: true, finalMessage: parked }, flags: ['--read-only'] });
+  await f.ready(task);
+  await f.command(['park-until', '--every', '30s', '--why', 'the deploy', '--', process.execPath, '-e', 'process.exit(1)'], {
+    env: { AGENT_ORCH_RUN: run.id, AGENT_ORCH_TASK: 'watch' },
+  });
+  f.release(task);
   // Parked: its attempt ended with the park signal, and its relay is gone.
-  await eventually(() => fs.existsSync(path.join(task.outDir, 'result.json')) && commandOf(task.pid) === '', 'the babysitter did not park', 20_000);
+  await eventually(() => fs.existsSync(path.join(task.outDir, 'result.json')) && commandOf(task.pid) === '', 'the task did not park', 20_000);
   const reason = await blocked(f);
-  assert.ok(reason, 'a parked babysitter with no wait blocks the stop');
+  assert.ok(reason, 'a parked task with no wait blocks the stop');
   assert.match(reason, /Nothing will wake this session/);
   assert.ok(reason.includes('watch'), reason);
   assert.doesNotMatch(reason, /nobody has read/, 'a parked task has not finished');
@@ -322,7 +303,7 @@ test('a parked babysitter is not a finished result, and needs a wait like a runn
     await eventually(() => commandOf(child.pid).includes('orch.mjs wait'), 'the wait did not start');
     assert.equal(await blocked(f), null);
   });
-  // Closing it ends the park: nothing runs, and a babysitter's result is never a write task's.
+  // Closing it ends the park: nothing runs, and a read-only task needs no acceptance.
   await f.command(['close', run.id, 'watch'], { env: OWNER });
   assert.equal(await blocked(f), null);
 });
