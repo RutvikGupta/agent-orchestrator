@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A Gemini task's final message is its last message. Cursor's result text joins every closing
+  message with no separator, so a task that wrote two closing messages had its `PARKED:` line in
+  the middle of the text and did not park. The relay now keeps the last message as the final
+  message (Cursor's result text only when no message came, or for an error result).
+
 - The dashboard keeps your place inside the Brief and the final report. The details panel is rebuilt
   as a running task writes events, every few seconds, and each rebuild put those boxes back at their
   top while you scrolled them; a rebuild now restores each box's scroll position for the same row.

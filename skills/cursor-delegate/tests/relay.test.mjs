@@ -41,6 +41,16 @@ if (args[0] === "--version") {
     if (mode === "turn-error") raw = raw.replace('"is_error":false', '"is_error":true')
       .replace('"result":"pong"', () => '"result":' + JSON.stringify(process.env.FAKE_ERROR || "Resource exhausted"));
     if (mode === "no-result") raw = raw.split("\\n").filter((line) => !line.includes('"type":"result"')).join("\\n");
+    if (mode === "two-messages") {
+      // Two closing messages, then a result whose text joins them with no separator, as Cursor does.
+      const first = "Report one\\n\\n\\u0060\\u0060\\u0060orch-result\\n{}\\n\\u0060\\u0060\\u0060";
+      const second = "PARKED: waits for the suite\\n\\nStill waiting.";
+      const events = raw.trimEnd().split("\\n").map((line) => JSON.parse(line)).filter((e) => e.type !== "assistant");
+      const result = events.pop();
+      for (const text of [first, second]) events.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] }, session_id: result.session_id });
+      events.push({ ...result, result: first + second });
+      raw = events.map((e) => JSON.stringify(e)).join("\\n") + "\\n";
+    }
     if (mode === "custom-tools") {
       const events = raw.trimEnd().split("\\n");
       const result = events.pop();
@@ -457,4 +467,17 @@ test("a run that ends without Cursor's totals keeps its estimate and teaches not
   assert.ok(result.usageEstimate.cacheReadTokens > 0);
   assert.ok(f.events().some((e) => e.type === "assistant" && e.message.usage?.input_tokens > 0));
   assert.equal(fs.existsSync(path.join(f.root, "state", "usage-calibration.json")), false);
+});
+
+test("the final message is Cursor's last message, not its result text that joins every message", (t) => {
+  const f = fixture(t);
+  assert.equal(f.run([], { env: { FAKE_MODE: "two-messages" } }).status, 0);
+  const last = "PARKED: waits for the suite\n\nStill waiting.";
+  assert.equal(f.result().finalMessage, last);
+  assert.equal(f.artifact("final.txt"), last);
+  assert.equal(f.events().at(-1).result, last);
+  // Both messages are still in the event log, in order.
+  const texts = f.events().filter((e) => e.type === "assistant").flatMap((e) => e.message.content).filter((b) => b.type === "text").map((b) => b.text);
+  assert.equal(texts.length, 2);
+  assert.match(texts[0], /^Report one/);
 });
