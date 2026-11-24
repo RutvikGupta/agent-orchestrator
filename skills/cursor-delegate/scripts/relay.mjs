@@ -331,6 +331,7 @@ async function relay(opts, brief) {
   let stopChild;
   let interruption;
   let sawInit = false;
+  let sawMessage = false; // an assistant message with text arrived
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
   const handlers = signals.map((signal) => () => {
     if (interruption?.status === "aborted") return;
@@ -366,6 +367,7 @@ async function relay(opts, brief) {
       const content = event.message.content.filter((block) => block.type === "text");
       if (content.length) {
         result.finalMessage = content.map((block) => block.text).join("\n");
+        sawMessage = true;
         const { id, usage } = estimator.text(result.finalMessage);
         appendEvent({ type: "assistant", session_id: result.sessionId, message: { id, role: "assistant", model: eventModel, content, usage } });
       }
@@ -443,7 +445,11 @@ async function relay(opts, brief) {
 
   if (vendorResult) {
     result.sessionId = vendorResult.session_id || result.sessionId;
-    if (typeof vendorResult.result === "string") result.finalMessage = vendorResult.result;
+    // Cursor's result text joins every message of the run with no separator between them, so a
+    // model that wrote two closing messages leaves its report and its PARKED: line in the middle of
+    // one run-on text. The final message is the last message, as Claude's is. The result text is
+    // used when no message came, and for an error result, whose text is the error.
+    if (typeof vendorResult.result === "string" && (!sawMessage || vendorResult.is_error)) result.finalMessage = vendorResult.result;
     if (vendorResult.usage) {
       const { inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0 } = vendorResult.usage;
       result.usage = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
