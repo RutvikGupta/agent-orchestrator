@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A dashboard test no longer fails at random. It waited for a first build's replacement to be running
+  with its overdue timer pending, but the replacement finished in milliseconds, so a check that ran
+  between two polls missed it: run alone the test failed every time. The test now holds the
+  replacement until it has checked it, then releases it.
+
 - Claude has a `strong` tier: Opus 5.5 at high effort, at the rank of Codex `strong` (sol) and Gemini
   `strong` (Neon medium), so Claude competes for strong work (debugging in a known area, reviews of
   medium diffs, a change across a few modules from a clear design) instead of only Codex and Gemini.

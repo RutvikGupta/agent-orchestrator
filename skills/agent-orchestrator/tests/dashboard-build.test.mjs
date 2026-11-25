@@ -749,7 +749,10 @@ test('a bad AGENT_ORCH_FIRST_BUILD_TIMEOUT stops startup with the usage code', a
 });
 
 test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lost first build too, then AGENT_ORCH_BUILD_TIMEOUT; the first limit is never the shorter', async (t) => {
-  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_BUILD_KILL_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang') });
+  // The hang holds two builds: the first, which times out, and its replacement, which must still be
+  // running (its overdue timer pending) when the test looks; a replacement that finished between two
+  // polls made the test flaky.
+  const b = await setup(t, { announced: false, env: { AGENT_ORCH_BUILD_TIMEOUT: '3s', AGENT_ORCH_BUILD_KILL_TIMEOUT: '3s', AGENT_ORCH_FIRST_BUILD_TIMEOUT: '90s' }, prepare: async (b) => b.touch('hang', '2') });
   await eventually(() => b.exists('blocked'), 'the first build did not start');
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
   // A read waits for the first board, through the lost build and its replacement.
@@ -761,6 +764,7 @@ test('builds get AGENT_ORCH_FIRST_BUILD_TIMEOUT until a first board exists, a lo
   // Its replacement is a first build too.
   await eventually(() => b.builds().length === 2 && b.pending('overdueBuild').length === 1, 'the replacement did not start');
   assert.deepEqual(b.pending('overdueBuild').map((x) => x.ms), [90_000]);
+  b.touch('release');
   assert.equal((await waiting).status, 200, 'the waiting read did not get the first board');
   await b.settled();
   await eventually(() => fs.existsSync(path.join(b.f.state, 'dashboard.json')), 'the dashboard was not announced after its first board');
