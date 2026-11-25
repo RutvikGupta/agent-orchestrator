@@ -42,11 +42,12 @@ test('pick lists the right candidates per tier and applies empty-record tie-brea
   assert.deepEqual(standard.candidates.map((c) => c.agent), ['claude', 'codex', 'gemini']);
   assert.equal(standard.agent, 'codex');
 
-  // strong: codex and gemini only; coding type prefers gemini over codex despite higher budget ($6 vs $3).
+  // strong: all three (Claude strong runs Opus at high effort); coding type prefers gemini over the
+  // others despite its higher budget ($6 vs codex $3).
   for (const type of ['implement', 'debug', 'review']) {
     const strong = await f.json(['pick', '--type', type, '--tier', 'strong']);
-    assert.deepEqual(strong.candidates.map((c) => c.agent), ['codex', 'gemini']);
-    assert.deepEqual(strong.excluded.map((e) => e.agent), ['claude']);
+    assert.deepEqual(strong.candidates.map((c) => c.agent), ['claude', 'codex', 'gemini']);
+    assert.deepEqual(strong.excluded.map((e) => e.agent), []);
     assert.equal(strong.agent, 'gemini');
     assert.match(strong.why, new RegExp(`Gemini's first coding tasks of this kind \\(0 of 5 finished ${type} tasks\\)`));
   }
@@ -135,6 +136,10 @@ test('pick alternates from real run history and switches to records once each ca
   }
   for (let i = 1; i <= 5; i++) {
     await finishedTask(f, run, `c${i}`, { agent: 'codex', tier: 'strong', type: 'implement', accepted: true, attempts: 1, tokensIn: 50_000 });
+  }
+  // claude strong (Opus at high effort) is a candidate too: 3/5 first-try (60%).
+  for (let i = 1; i <= 5; i++) {
+    await finishedTask(f, run, `o${i}`, { agent: 'claude', tier: 'strong', type: 'implement', accepted: true, attempts: i <= 2 ? 2 : 1, tokensIn: 80_000 });
   }
 
   const rec = await f.json(['pick', '--type', 'implement', '--tier', 'strong']);

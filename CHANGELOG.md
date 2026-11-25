@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Claude has a `strong` tier: Opus 5.5 at high effort, at the rank of Codex `strong` (sol) and Gemini
+  `strong` (Neon medium), so Claude competes for strong work (debugging in a known area, reviews of
+  medium diffs, a change across a few modules from a clear design) instead of only Codex and Gemini.
+  `complex` still runs Opus at xhigh, and `frontier` Fable. A failed Claude `standard` attempt now
+  escalates to `strong` before `complex`, and a `--max-tier strong` ceiling allows Opus at high effort.
+
 - Removed the pull-request babysitter feature end to end (`start --babysit`/`--pr`, `pr-watch`,
   `brief --type babysit`, plan type `babysit`, `pick --needs babysit`, watch/fix tiers and
   `NEEDS FIX:` fix attempts, babysitter handoff notes, and babysitter docs and tests). General
