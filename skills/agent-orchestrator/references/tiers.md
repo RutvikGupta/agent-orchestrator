@@ -8,7 +8,7 @@ holds each tier's model, effort and one-line use.
 
 | Agent | `light` | `standard` | `strong` | `complex` | `frontier` |
 | --- | --- | --- | --- | --- | --- |
-| Claude | `claude-haiku-5-5`, `xhigh` | `claude-sonnet-5-5`, `xhigh` | | `claude-opus-5-5`, `xhigh` | `claude-fable-5-2`, `high` (never above) |
+| Claude | `claude-haiku-5-5`, `xhigh` | `claude-sonnet-5-5`, `xhigh` | `claude-opus-5-5`, `high` | `claude-opus-5-5`, `xhigh` | `claude-fable-5-2`, `high` (never above) |
 | Codex | `gpt-6-luna`, `medium` | `gpt-6.1-terra`, `medium` | `gpt-6.2-sol`, `medium` | `gpt-6.2-astra`, `high` | |
 | Gemini | `gemini-4-hydrogen`, `low` | `gemini-4-hydrogen`, `high` | `gemini-4-neon`, `medium` | `gemini-4-neon`, `high` | |
 

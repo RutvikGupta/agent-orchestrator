@@ -103,7 +103,7 @@ Usage: node orch.mjs <command> [args] [--json]
                                   it is required unless this attempt keeps the previous attempt's
                                   agent and tier, or start escalates it automatically.
                                   --tier picks the model from policy.json and is
-                                  required for a new task: Claude light|standard|complex|frontier, Codex
+                                  required for a new task: Claude light|standard|strong|complex|frontier, Codex
                                   light|standard|strong|complex, Gemini light|standard|strong|complex
                                   (Gemini 4 Hydrogen and Neon, run through Cursor's agent CLI).
                                   Only frontier takes --effort (medium or high).

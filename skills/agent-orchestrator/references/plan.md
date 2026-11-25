@@ -22,7 +22,7 @@ the user's choices, and when to ask before dispatching.
 | `uses`, `produces` | The interfaces or contracts the task relies on, and those it creates or changes |
 | `resources` | Shared runtime state it needs: `port:8080`, `db:local-postgres`, `file:generated/schema.json` |
 | `dependsOn` | Task ids that must be integrated before this task starts. `dispatch` waits for them, `start` refuses without them, and `integrate` takes tasks in this order |
-| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `complex` or `frontier`; Codex or Gemini `light`, `standard`, `strong` or `complex`; required), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
+| `agent`, `tier`, `why` | The agent, its tier (Claude `light`, `standard`, `strong`, `complex` or `frontier`; Codex or Gemini `light`, `standard`, `strong` or `complex`; required), and your one-line assessment: the deciding factor, which names the criterion for `complex` or `frontier` and, for a choice between agents, the numbers that decided it |
 | `brief` | The brief file, relative to the run directory |
 
 ## Tiers in the plan

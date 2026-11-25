@@ -1,6 +1,6 @@
 {
   "claude": {
-    "note": "Tiers are listed lightest first. Every new task names its tier with --tier: start with the lightest one that does the task well, and move up after a failure. Work that only waits, or waits and then runs fixed commands, needs no model: a command task, never an agent of any tier (an agent that must judge after a wait parks with park-until). light, standard and complex run at xhigh effort. frontier runs Claude Fable 5.2, the strongest model, at high effort by default; --effort medium is its only other choice, and it never runs above high.",
+    "note": "Tiers are listed lightest first. Every new task names its tier with --tier: start with the lightest one that does the task well, and move up after a failure. Work that only waits, or waits and then runs fixed commands, needs no model: a command task, never an agent of any tier (an agent that must judge after a wait parks with park-until). light, standard and complex run at xhigh effort; strong runs Opus at high effort, beside Codex strong and Gemini strong. frontier runs Claude Fable 5.2, the strongest model, at high effort by default; --effort medium is its only other choice, and it never runs above high.",
     "tiers": {
       "light": {
         "model": "claude-haiku-5-5",
@@ -15,6 +15,13 @@
         "effort": "xhigh",
         "use": "small changes with clear done criteria and follow-on fixes; fact-gathering investigations and triage; drafting queries, permission requests and plans for a known area; a first review of a small diff; status reports",
         "budget": 10
+      },
+      "strong": {
+        "model": "claude-opus-5-5",
+        "rank": 3,
+        "effort": "high",
+        "use": "bounded work that needs more judgment than standard: debugging in a known area, reviews of medium diffs, a change across a few modules from a clear design, a failed standard attempt. Opus at high effort; complex runs it at xhigh",
+        "budget": 25
       },
       "complex": {
         "model": "claude-opus-5-5",
