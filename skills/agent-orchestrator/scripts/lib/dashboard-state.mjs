@@ -644,7 +644,7 @@ export function buildDashboardState() {
     }
     const described = listTasks(run);
     reviveParked(run, described); // a parked task whose watcher is not running gets a new one
-    const main = mainRow(run);
+    const main = mainRow(run, liveness);
     // The sub-agents of an agent that launched this run are rows under that agent's row, not under a main row.
     const agentHost = agentHostOf(run);
     const natives = listNative(run, described, runs).filter((t) => !(agentHost && t.parent === "orchestrator"));

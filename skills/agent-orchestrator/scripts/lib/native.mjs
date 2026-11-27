@@ -8,11 +8,13 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pidLiveness } from "./addressee.mjs";
 import { CLAUDE_PROJECTS, QUIET_AFTER_MS, TURN_SILENT_MS } from "./config.mjs";
 import { decisionsIn } from "./briefs.mjs";
 import { codexMeta, codexRolloutsSince, codexThreadStart } from "./codex.mjs";
 import { newSummary, summarizeEvents, summarizeRollout } from "./events.mjs";
 import { firstLine, formatElapsed, slug } from "./format.mjs";
+import { DASHBOARD_CALLER, ownershipOf, sessionsEnded } from "./ownership.mjs";
 import { listRuns } from "./runs.mjs";
 import { readJson } from "./util.mjs";
 import { claudeSessions, codexThreads } from "./vendor-status.mjs";
@@ -192,7 +194,7 @@ export function mainTranscript(run) {
 // The session that launched the run, read from its own transcript: Codex's rollout, or Claude
 // Code's <projects>/<project>/<session>.jsonl. Its counts cover the whole session, not only this
 // run, so they stay out of the run's totals.
-export function mainRow(run) {
+export function mainRow(run, liveness = (run) => sessionsEnded(ownershipOf(run, DASHBOARD_CALLER))) {
   const o = run.orchestrator;
   const file = mainTranscript(run);
   if (!file) return null;
@@ -205,9 +207,13 @@ export function mainRow(run) {
   // Claude Code also writes bookkeeping lines (costs, titles) to an idle session; its last message dates it.
   const lastMs = Math.min(Date.parse(summary.lastAt) || stat.mtimeMs, stat.mtimeMs);
   const row = nativeRow({ id: "main", agent: o.agent, parent: null, startedMs, lastMs, running, summary, sessionId: o.sessionId, file, why: "the session that launched this run; its counts cover the whole session" });
-  const state = row.stateSource === "transcript" ? running ? "running" : "idle"
+  // A missing recorded PID is a cheap first check. The shared host view also finds resumes.
+  const ended = pidLiveness(run, o).state === "ended" && liveness(run, o).state === "ended";
+  const state = ended ? "ended" : summary.sessionExited ? "idle"
+    : row.stateSource === "transcript" ? running ? "running" : "idle"
     : row.state === "completed" ? "idle" : row.state;
-  return { ...row, native: false, main: true, mode: "main", state, closed: false };
+  return { ...row, native: false, main: true, mode: "main", state, closed: false,
+    ...(ended || summary.sessionExited ? { quietMs: null, waiting: false, elapsed: formatElapsed(lastMs - startedMs), now: firstLine(summary.lastMessage) || summary.activity || "" } : {}) };
 }
 
 // Every native sub-agent of the session that launched this run, shown once: each belongs to the
