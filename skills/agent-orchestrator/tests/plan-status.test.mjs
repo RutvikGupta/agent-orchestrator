@@ -122,7 +122,7 @@ test('help explains the plan options, and each option is accepted only by its ow
     '--follow stays after that first wave',
     'a decision handed back, or a failure',
     'from the head of the branch they were integrated into',
-    'integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged]',
+    'integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged [--pr N]]',
     '--already-merged records an',
     'accepted task whose branch was merged earlier',
     '[--max-parallel N] [--force] [--unplanned]',

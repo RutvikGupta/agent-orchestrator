@@ -30,13 +30,15 @@ blocked. `status` and `recover` warn about it (`references/monitor.md`, "What `s
 Accept the task, then record it:
 
 ```bash
-$ORCH integrate <run> <task-id> [--into <branch>] --already-merged
+$ORCH integrate <run> <task-id> [--into <ref>] --already-merged [--pr <number>]
 ```
 
-- It records the task as integrated at the head of the target, and merges nothing.
-- The task must be accepted, and the target must already contain the accepted commit. Otherwise
-  it refuses.
-- It needs neither the target checked out nor clean.
+- It records the accepted task as integrated at the target commit when that commit contains
+  the accepted commit. Use any ref Git can resolve locally, including `origin/main`, with
+  `--into`. A run started on a detached HEAD requires `--into`.
+- For a squash merge, pass `--pr <number>` or name exactly one PR in the task report. The GitHub
+  CLI must confirm that the PR was merged and included the accepted commit.
+- This mode records how integration was verified and leaves the target ref and checkout as they are.
 
 ## On a conflict
 

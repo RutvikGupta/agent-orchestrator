@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CACHE_PATH, CLI_PATH, DEPTH, MAX_NEST_DEPTH, QUIET_AFTER_MS, nodeBin, parallelAt } from "../config.mjs";
 import { agoText, formatElapsed, table } from "../format.mjs";
+import { taskPullRequest, viewPullRequest } from "../github.mjs";
 import { phaseMap, reviewRoundsOf, unlinkedVerifications, verificationsOf } from "../lifecycle.mjs";
 import { briefMarkers, briefPath, briefProblem, conflictText, planPath, planProgress, readPlan, runningConflicts, manualMerge, tierProblem, typeProblem, validatePlan, waitsOnText } from "../plan.mjs";
 import { guard, launcherLabel, ownershipOf, readOnlyMark, recordChange, touchOwner } from "../ownership.mjs";
@@ -33,6 +34,10 @@ function gitOk(cwd, args) {
 
 function isAncestor(repo, commit, of) {
   return gitOk(repo, ["merge-base", "--is-ancestor", commit, of]);
+}
+
+function resolveCommit(repo, ref) {
+  return git(repo, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], { allowFail: true });
 }
 
 // Uncommitted changes in a checkout, without the tool caches that gate runs leave behind.
@@ -117,7 +122,8 @@ function startPoint(run, entry) {
   // Several targets are allowed only when one contains all prerequisite commits.
   const branches = [...new Set([...targets, run.baseBranch].filter(Boolean))];
   for (const branch of branches) {
-    const head = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { allowFail: true });
+    const recordedRef = dependencies.some((task) => task?.integratedInto === branch && task.integratedVerification);
+    const head = resolveCommit(run.repo, recordedRef ? branch : `refs/heads/${branch}`);
     if (head && dependencies.every((task) => !task?.integratedCommit || isAncestor(run.repo, task.integratedCommit, head))) {
       return { sha: head, label: `${branch} @ ${short(head)}` };
     }
@@ -511,7 +517,10 @@ export function cmdAccept(args) {
     ...(task.rejectedAt ? { rejectedAt: null, rejectedAttempt: null } : {}),
   };
   // A different commit, attempt or restored folder needs integration confirmed again.
-  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt || Date.parse(task.worktree?.restoredAt) > Date.parse(task.integratedAt))) Object.assign(accepted, { integratedAt: null, integratedCommit: null });
+  if (task.integratedAt && (task.acceptedCommit !== commit || task.acceptedAttempt !== attempt || Date.parse(task.worktree?.restoredAt) > Date.parse(task.integratedAt))) {
+    Object.assign(accepted, { integratedAt: null, integratedCommit: null });
+    delete accepted.integratedVerification;
+  }
   saveTask(run, accepted);
   recordChange(run, g, { task: id, attempt, action: "accepted" });
   reclaimTask(run, task);
@@ -538,6 +547,37 @@ function mergeGoal(run, task) {
   return String(entry?.goal || task.title || "").replace(/\s+/g, " ").trim();
 }
 
+function remoteBaseHint(run) {
+  if (!run.baseCommit) return "";
+  const refs = git(run.repo, ["for-each-ref", "--contains", run.baseCommit, "--format=%(refname:strip=2) %(symref)", "refs/remotes"], { allowFail: true });
+  // Skip symbolic refs such as origin/HEAD so they don't count as another branch.
+  const branches = (refs || "").split("\n").map((line) => line.trim()).filter((line) => line && !line.includes(" "));
+  return branches.length === 1 ? ` (try --into ${branches[0]})` : "";
+}
+
+function mergedVerification(run, task, row, args, target, targetHead) {
+  const number = args.pr ?? taskPullRequest(task, row.result?.finalMessage);
+  const accepted = task.acceptedCommit;
+  if (accepted && isAncestor(run.repo, accepted, targetHead)) return `contained in ${target}`;
+
+  const refuse = (reason) => die(`${reason}. Use --already-merged with an --into ref that contains the accepted commit, or --pr N for a squash-merged pull request.`);
+  if (!accepted) refuse(`task ${task.id} has no accepted commit to verify`);
+  if (number == null) refuse(`${target} does not contain the accepted commit ${short(accepted)}`);
+  const { pr, error } = viewPullRequest(run.repo, number);
+  if (error) refuse(`cannot verify PR #${number}: ${error}`);
+  if (pr?.state !== "MERGED" || !pr.mergedAt) refuse(`PR #${number} is not merged`);
+
+  const head = pr.headRefOid;
+  if (typeof head !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) {
+    refuse(`PR #${number} has no valid head commit`);
+  }
+  const contains = head === accepted || (resolveCommit(run.repo, head)
+    ? isAncestor(run.repo, accepted, head)
+    : Array.isArray(pr.commits) && pr.commits.some((commit) => commit?.oid === accepted));
+  if (!contains) refuse(`PR #${number} does not contain the accepted commit ${short(accepted)}`);
+  return `squash-merged as PR #${number}`;
+}
+
 export async function cmdIntegrate(args) {
   const run = loadRun(args._[0]);
   const id = validTask(args._[1]);
@@ -562,11 +602,18 @@ export async function cmdIntegrate(args) {
   const waiting = (entry?.dependsOn || []).filter((dep) => phases.get(dep) !== "integrated");
   if (waiting.length) die(`cannot integrate ${id}: waits on ${waiting.join(", ")} (not integrated)`);
   if (!run.isGit) die("the run's repository is not a git repository");
-  const target = args.into || run.baseBranch || die("the run started on a detached HEAD, so it has no base branch; pass --into BRANCH", 2);
-  const targetHead = git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
-  const record = async (commit, text) => {
+  const alreadyMerged = Boolean(args["already-merged"]);
+  if (args.pr !== undefined && (!alreadyMerged || !/^[1-9]\d*$/.test(args.pr))) die("--pr requires --already-merged and a positive pull request number", 2);
+  const target = args.into || run.baseBranch || die(alreadyMerged
+    ? `the run started on a detached HEAD, so it has no base branch. Pass --into REF${remoteBaseHint(run)} with a ref containing the accepted commit, or add --pr N for a squash-merged pull request.`
+    : "the run started on a detached HEAD, so it has no base branch; pass --into BRANCH", 2);
+  const targetHead = alreadyMerged
+    ? resolveCommit(run.repo, target) || die(`no commit ref ${target} in ${run.repo}. Pass an --into ref that resolves here and contains the accepted commit, or add --pr N for a squash-merged pull request.`, 2)
+    : git(run.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`], { allowFail: true }) || die(`no branch ${target} in ${run.repo}`, 2);
+  const record = async (commit, text, verification) => {
+    const receipt = verification ? { integratedVerification: verification } : {};
     if (!dryRun) {
-      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedInto: target, integratedBy: g.actor });
+      saveTask(run, { ...task, integratedAt: new Date().toISOString(), integratedCommit: commit, integratedInto: target, integratedBy: g.actor, ...receipt });
       recordChange(run, g, { task: id, attempt: task.attempt || null, action: "integrated" });
       reclaimTask(run, task);
     }
@@ -574,10 +621,15 @@ export async function cmdIntegrate(args) {
     const ready = dryRun ? [] : readyAfter(run, id);
     emit(
       args,
-      { id, dryRun, into: target, integratedCommit: commit, ready, cleanup },
+      { id, dryRun, into: target, integratedCommit: commit, ...receipt, ready, cleanup },
       `${text}${cleanup ? `\n${collectionText(cleanup)}` : ""}${ready.length ? `\nready to dispatch now: ${ready.join(", ")}\nnext: ${CLI} dispatch ${run.id}` : ""}`,
     );
   };
+
+  if (alreadyMerged) {
+    const verification = mergedVerification(run, task, row, args, target, targetHead);
+    return record(targetHead, `${dryRun ? "would record" : "recorded"} ${id} as integrated at ${target} @ ${short(targetHead)} (${verification})`, verification);
+  }
 
   const branch = taskBranch(run, task);
   if (!branch) {
@@ -592,10 +644,6 @@ export async function cmdIntegrate(args) {
   const tip = git(run.repo, ["rev-parse", `refs/heads/${branch}`]);
   if (task.acceptedCommit && tip !== task.acceptedCommit) {
     die(`${branch} is at ${short(tip)}, but ${id} was accepted at ${short(task.acceptedCommit)}: review the newer commits, then run: ${CLI} accept ${run.id} ${id}`);
-  }
-  if (args["already-merged"]) {
-    if (!isAncestor(run.repo, tip, targetHead)) die(`${target} does not contain ${branch}; --already-merged records only commits already reachable from the target`);
-    return record(targetHead, `${target} already contains ${branch}; ${dryRun ? "would record" : "recorded"} ${id} as integrated at ${short(targetHead)}`);
   }
   // The merge happens in the user's checkout, so it must be on the target and hold no uncommitted
   // work. Never switch, stash, or reset it on the user's behalf.

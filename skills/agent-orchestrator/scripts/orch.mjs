@@ -246,13 +246,15 @@ Usage: node orch.mjs <command> [args] [--json]
                                   --note records why; notes when no clean verdict is recorded
   resolve RUN TASK --note TEXT    Mark a handed-back decision as handled, when you answered it
                                   without resuming the agent
-  integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged]
+  integrate RUN TASK [--into BRANCH] [--dry-run] [--already-merged [--pr N]]
                                   Merge an accepted task's branch into the run's base branch (or
                                   BRANCH), which must be checked out and clean in the run's repo.
                                   Checks for conflicts first and changes nothing if there are any.
                                   --dry-run only runs the check. --already-merged records an
                                   accepted task whose branch was merged earlier (by hand, say) as
-                                  integrated, without merging again; status warns about such tasks
+                                  integrated, without merging again. In this mode --into accepts
+                                  any commit ref, such as origin/main. --pr N verifies a merged
+                                  pull request when its commits were squashed.
   recover [RUN] [--all]           Read-only summary of the runs this session launched (--all: every
                                   run active in the last 24h): tasks by phase, blocked tasks, dirty
                                   worktrees, dead processes, and the next command for each
@@ -438,7 +440,7 @@ const specs = {
   review: { value: ["agent", "tier", "focus"], bool: ["adopt"] },
   rework: { value: ["from", "note", "tier", "why"], bool: ["adopt"] },
   resolve: { value: ["note"], bool: ["adopt"] },
-  integrate: { value: ["into"], bool: ["dry-run", "already-merged", "adopt"] },
+  integrate: { value: ["into", "pr"], bool: ["dry-run", "already-merged", "adopt"] },
   recover: { bool: ["all"] },
 };
 const handlers = {
