@@ -42,6 +42,7 @@ main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 7px va
 .rich a{color:var(--ask);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--ask) 40%,transparent)}.rich a:hover{border-bottom-color:var(--ask)}
 .msg .r{grid-column:2;border-left:3px solid var(--ok);padding-left:8px;margin-top:2px}.msg .r .k{color:var(--ok)}
 .msg{display:grid;grid-template-columns:150px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+.prompts{max-height:32vh;overflow:auto}
 /* A folded message shows its first line only; its replies are counted beside its time. */
 .msg pre{min-width:0}.msg.shut pre{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msg.shut .r{display:none}
 .mt{border:0;background:none;color:var(--muted);cursor:pointer;padding:0 5px 0 0;font-size:10px;line-height:1;vertical-align:1px}.mt:hover,.mt:focus-visible{color:var(--fg);outline:none}

@@ -218,12 +218,14 @@ test('selecting a row opens its detail panel and schedules its live log', async 
 
 test('details fetch transcript logs for main and native rows and attempt logs for launched tasks', async () => {
   const fetched = [];
+  const long = 'A long prompt. '.repeat(30);
+  const prompts = [{ text: 'Earlier prompt' }, { text: long }];
   // querySelectorAll: the panel holds no inner scrolling box here (innerScroll, restoreInner).
   const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, querySelectorAll: () => [], replaceChildren(...children) { this.children = children; } };
   const context = vm.createContext({
     sel: null, state: [], lastDetail: '', holding: () => false,
     document: { getElementById: () => panel },
-    fetch: async (url) => { fetched.push(url); return { json: async () => ({ events: [{ kind: 'says', text: 'Live fixture output.' }] }) }; },
+    fetch: async (url) => { fetched.push(url); return { json: async () => ({ events: [{ kind: 'says', text: 'Live fixture output.' }], prompts: [...prompts] }) }; },
     $: (tag, attrs, ...children) => ({ tag, attrs, children }), fmt: String, cls: String, startedIn: () => null, reportView: () => [], closeDetail() {},
   });
   vm.runInContext(snippet('const atBottom=', 'async function limits()'), context);
@@ -239,6 +241,18 @@ test('details fetch transcript logs for main and native rows and attempt logs fo
     assert.match(JSON.stringify(panel.children), /Live fixture output/);
     assert.equal(panel.dataset.sel, `section/${kind}`);
     assert.equal(panel.scrollTop, panel.scrollHeight);
+    if (kind === 'main') {
+      assert.match(JSON.stringify(panel.children), /Your messages \(2\)/);
+      const list = panel.children.find((node) => node.attrs['data-sk'] === 'prompts');
+      assert.match(JSON.stringify(list.children[0]), /Earlier prompt/);
+      assert.match(list.children[1].attrs.class, /\bshut\b/);
+      prompts.push({ text: 'Later prompt' });
+      await context.detail();
+      assert.match(JSON.stringify(panel.children), /Your messages \(3\)/);
+      assert.match(JSON.stringify(panel.children.find((node) => node.attrs['data-sk'] === 'prompts').children.at(-1)), /Later prompt/);
+    } else {
+      assert.doesNotMatch(JSON.stringify(panel.children), /Your messages/);
+    }
   }
 });
 

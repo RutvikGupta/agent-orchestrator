@@ -3,7 +3,7 @@ for(const c of kids.flat())if(c!=null)e.append(c.nodeType?c:document.createTextN
 const fmt=n=>n==null?"-":n<1000?String(n):n<1e6?(n/1000).toFixed(n<1e4?1:0)+"k":(n/1e6).toFixed(1)+"M";
 const outcome=t=>t.phase==="parked"?"parked":t.closed&&t.state==="idle"?"completed":t.state;
 const exitedLabel=t=>outcome(t);
-const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="parked"?"s-parked":s==="prepared"||s==="closed"||s==="idle"||s==="stopped"?"s-idle":"s-bad";
+const cls=s=>s==="running"?"s-running":s==="needs-decision"?"s-ask":s==="completed"?"s-completed":s==="parked"?"s-parked":s==="prepared"||s==="closed"||s==="idle"||s==="ended"||s==="stopped"?"s-idle":"s-bad";
 // The attempt of its task that started an agent, once the task has had more than one.
 const startedIn=(x,parent)=>x.taskAgent&&x.taskAttempt&&parent?.attempt>1?x.taskAttempt:null;
 let sel=null,state=[],lastState="",lastDetail="",server=null;const IND=18;
@@ -55,7 +55,7 @@ const slide=(root,before)=>{if(!before.size||matchMedia("(prefers-reduced-motion
 // A finished task whose result waits on review pulses purple, like a running one, until it is accepted.
 const reviewing=t=>t.attention?.kind==="awaiting-review";
 const syncPulses=root=>{for(const d of root.querySelectorAll(".dot.d-run,.dot.d-review"))for(const a of d.getAnimations())a.startTime=0};
-const dotClass=t=>{const s=outcome(t);return reviewing(t)?"d-review":s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="parked"?"d-park":s==="idle"||s==="prepared"||s==="closed"?"":"d-bad"};
+const dotClass=t=>{const s=outcome(t);return reviewing(t)?"d-review":s==="running"?"d-run":s==="needs-decision"?"d-ask":s==="completed"?"d-ok":s==="parked"?"d-park":["idle","ended","prepared","closed"].includes(s)?"":"d-bad"};
 // A row's elapsed time in the board's own format, but with no seconds once it passes a minute. A
 // running row's is counted here from its start, every second (tick), so it moves between board
 // reads; any other row shows what the board sent. A parked task does not count up.
@@ -271,16 +271,18 @@ const shownAttempt=(key,t)=>{const n=attemptShown.get(key);return n&&n<=(t.attem
 const logAttempt=(key,t)=>t&&!t.native&&!t.main?shownAttempt(key,t):0;
 const logKey=(key,t)=>{const n=logAttempt(key,t);return n?key+"@"+n:key};
 const logSource=(t,n)=>t.agentLog&&n===(t.attempt||0)?"api/transcript?file="+encodeURIComponent(t.agentLog):t.native||t.main?(t.outDir?"api/transcript?file="+encodeURIComponent(t.outDir):null):"api/events?run="+encodeURIComponent(t.run)+"&task="+encodeURIComponent(t.id)+(n?"&attempt="+n:"");
-// A log's fingerprint for the panel's change check: its length and a hash of every entry, since a
-// log capped at 400 entries keeps its length as new entries push old ones out. Worked out once per log.
+// A fingerprint for the panel's change check. A capped log or prompt list keeps its length as
+// new entries push old ones out, so hash every entry once per fetch.
 const prints=new WeakMap();
 function logPrint(ev){if(!ev)return"loading";let p=prints.get(ev);if(p!=null)return p;let h=2166136261;
-  for(const e of ev){const s=e.kind+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
+  for(const e of ev){const s=(e.kind??e.time)+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
   p=ev.length+":"+h.toString(36);prints.set(ev,p);return p}
 function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSource(t,n);if(!src)return Promise.resolve([]);if(loading.has(lk))return loading.get(lk);
   if(t.external||src.startsWith("api/transcript")&&t.agentLog)return loadTranscript(lk,t,src);
-  const load=fetch(src).then(r=>r.json()).then(v=>v.events||[]).catch(()=>logs.get(lk)?.ev||[]).then(ev=>{loading.delete(lk);logs.delete(lk);
-    logs.set(lk,{ev,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return ev});
+  const load=fetch(src).then(r=>{if(t.main&&r.ok===false)throw new Error("HTTP "+r.status);return r.json()})
+    .then(v=>({ev:v.events||[],prompts:t.main&&Array.isArray(v.prompts)?v.prompts:null}))
+    .catch(()=>logs.get(lk)||{ev:[]}).then(log=>{loading.delete(lk);logs.delete(lk);
+      logs.set(lk,{...log,at:Date.now()});if(logs.size>30)logs.delete(logs.keys().next().value);return log.ev});
   loading.set(lk,load);return load}
 // An outside agent's events come from its own transcript (api/transcript, the same 400 events as a native
 // agent's log), whether a skill's script or a task's own shell started it. Kept from successful reads
@@ -336,9 +338,9 @@ function agentsView(key,t){const list=agentList(key,t);if(!list.length)return[];
 function paint(key,t,ext,ev,keep){
   // A task that orch.mjs started has receipts; its working directory and branch go in its Context line.
   const own=!ext&&!t.external&&(t.attempts||[]).length>0,n=own?shownAttempt(key,t):0,past=own&&n!==t.attempt;
-  const lk=logKey(key,t),src=logSource(t,n),failed=t.external&&logFailed.has(lk),good=logs.get(lk)?.ev;
+  const lk=logKey(key,t),src=logSource(t,n),failed=t.external&&logFailed.has(lk),good=logs.get(lk)?.ev,prompts=logs.get(lk)?.prompts;
   const up=t.taskAgent?state.find(r=>r.id===key.split("/")[0])?.tasks.find(x=>x.key===t.parentKey):null; // the task that started this agent
-  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(failed?"!":"")+"|"+agentList(key,t).map(x=>x.key+x.state+x.model+x.taskAttempt).join()+(up?up.attempt:"")+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
+  const sig=key+"@"+n+JSON.stringify(t)+logPrint(ev)+(t.main?logPrint(prompts):"")+(failed?"!":"")+"|"+agentList(key,t).map(x=>x.key+x.state+x.model+x.taskAttempt).join()+(up?up.attempt:"")+(own?briefSig(key,t,n):"")+"|"+pendingSig(key);if(sig===lastDetail)return;
   const d=document.getElementById("detail");if(holding(d)){behind=true;return}lastDetail=sig;
   const to=keep&&d.dataset.sel===key?d.scrollTop:logScroll(d.dataset.sel===key,d),inner=innerScroll(d,d.dataset.sel===key);
   const rows=eventRows(ev),message=t.finalMessage?shownMessage(t):"";
@@ -354,7 +356,7 @@ function paint(key,t,ext,ev,keep){
     ...reviewView(t),
     ...(message?[$("h3",{},ext?"Latest message":"Final report"),$("div",{class:"final","data-sk":"final"},$("pre",{},message))]:[]),
     ...(t.main?[$("p",{class:"muted"},"The session that launched this run. Its counts cover the whole session and are not in the run's totals.")]:[]),
-    ...messagesView(key,t),
+    ...messagesView(key,t,prompts),
     $("h3",{},t.external&&!src?"Events: its transcript was not found":failed&&!good?"Events: could not be read, trying again"
         :(past?"Events of attempt "+n:"Events")+(ev?" ("+rows.length+", newest last)"+(ext?", from its transcript":"")+(failed?"; the latest read failed, trying again":""):" (loading…)"),
       past?$("button",{type:"button",class:"linkish",onclick:()=>showAttempt(key,t.attempt)},"show attempt "+t.attempt):null),
@@ -483,13 +485,18 @@ function touched(key){if(sel!==key)return;compose();repaint(key)}
 // button or link inside it, or one that ends a text selection in it, is left alone.
 const foldClick=fn=>e=>{const s=getSelection();if(e.target.closest("button,a,input,textarea,select")||(s&&!s.isCollapsed&&e.currentTarget.contains(s.anchorNode)))return;fn()};
 const msgFold=new Map(),longText=x=>x.length>280||x.split("\n").length>4;
-function messagesView(key,t){const sent=serverMessages(t),mine=shownLocal(key,t);if(!sent.length&&!mine.length)return[];
+function messagesView(key,t,prompts){const sent=serverMessages(t),mine=shownLocal(key,t);if(t.main?!prompts:!sent.length&&!mine.length)return[];
   const word={sending:"sending…",queued:"queued",failed:"failed"},pic=n=>n?"\n("+imageCount(n)+" attached)":"";
-  const items=[...sent.map(m=>({id:key+"|"+(m.id||m.time),text:m.text+pic(m.images),m})),...mine.map(e=>({id:key+"|l"+e.lid,text:e.text+pic(e.images),e}))];
+  const items=t.main?prompts.map((p,i)=>({id:key+"|prompt|"+(p.time??"")+"|"+i,text:p.text,p}))
+    :[...sent.map(m=>({id:key+"|"+(m.id||m.time),text:m.text+pic(m.images),m})),...mine.map(e=>({id:key+"|l"+e.lid,text:e.text+pic(e.images),e}))];
   const open=i=>msgFold.has(i.id)?msgFold.get(i.id):!longText(i.text),long=items.filter(i=>longText(i.text)),anyOpen=long.some(open);
   const flip=(list,to)=>{for(const i of list)msgFold.set(i.id,to);repaint(key)};
   const arrow=i=>longText(i.text)?$("button",{type:"button",class:"mt "+(open(i)?"open":"shut"),"aria-label":open(i)?"fold this message":"show the whole message","aria-expanded":String(open(i)),onclick:()=>flip([i],!open(i))}):null;
-  return[$("h3",long.length?{class:"fold",onclick:foldClick(()=>flip(long,!anyOpen))}:{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),"aria-label":anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,"Messages ("+items.length+")"),
+  const heading=$("h3",long.length?{class:"fold",onclick:foldClick(()=>flip(long,!anyOpen))}:{},long.length?$("button",{type:"button",class:"mt "+(anyOpen?"open":"shut"),"aria-label":anyOpen?"fold every long message":"show every message whole","aria-expanded":String(anyOpen),onclick:()=>flip(long,!anyOpen)}):null,(t.main?"Your messages":"Messages")+" ("+items.length+")");
+  if(t.main)return[heading,$("div",{class:"prompts","data-sk":"prompts"},...items.map(i=>
+    $("div",{class:"msg you"+(open(i)?"":" shut")+(longText(i.text)?" fold":""),...(longText(i.text)?{onclick:foldClick(()=>flip([i],!open(i)))}:{})},
+      $("span",{class:"k"},arrow(i),"you"+(i.p.time?" · "+timeText(i.p.time):"")),$("pre",{},i.text))))];
+  return[heading,
     ...items.map(i=>i.m?$("div",{class:"msg"+(i.m.from==="user"?" you":"")+(open(i)?"":" shut")+(longText(i.text)?" fold":""),...(longText(i.text)?{onclick:foldClick(()=>flip([i],!open(i)))}:{})},
       $("span",{class:"k"},arrow(i),(i.m.from==="user"?"you":"orchestrator")+" · "+hhmm(i.m.time)+" · "+(i.m.read?"read":"queued")+(!open(i)&&i.m.replies?.length?" · "+i.m.replies.length+(i.m.replies.length===1?" reply":" replies"):"")),$("pre",{},i.text),
       ...(i.m.replies||[]).map(r=>$("div",{class:"r"},$("span",{class:"k"},"reply · "+hhmm(r.time)),rich(r.text))))
