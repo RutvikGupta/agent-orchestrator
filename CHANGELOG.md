@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `integrate --already-merged` records work that landed through a squash-merged pull request, in a
+  checkout with no local branches. `--into` accepts a remote ref such as `origin/development`, and
+  `--pr N` (or the one pull request the task reported) counts when `gh` shows it merged with a head
+  that contains the accepted commit.
 - A main session's details panel lists every message you typed in it. The panel read only the last 2 MB
   of the session's transcript, so a long session showed a few of its prompts (14 of 148 in one case).
   `/api/transcript` now also returns your prompts from the whole transcript, read once and then only
