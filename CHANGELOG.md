@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A main session's details panel lists every message you typed in it. The panel read only the last 2 MB
+  of the session's transcript, so a long session showed a few of its prompts (14 of 148 in one case).
+  `/api/transcript` now also returns your prompts from the whole transcript, read once and then only
+  what it gains, and the page lists them under "Your messages", newest last. A main session whose
+  process has ended shows as `ended` instead of `running`, and `/exit` ends its turn.
+
 - A dashboard test no longer fails at random. It waited for a first build's replacement to be running
   with its overdue timer pending, but the replacement finished in milliseconds, so a check that ran
   between two polls missed it: run alone the test failed every time. The test now holds the
