@@ -3,7 +3,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { claudeTool } from "./claude.mjs";
+import { StringDecoder } from "node:string_decoder";
+import { claudeTool, subagentEvent } from "./claude.mjs";
 import { eventShape } from "./events.mjs";
 import { REPLY_PREFIX, readInbox, readReplies } from "./inbox.mjs";
 import { compact, formatElapsed, relPath, shortText, unwrapShell } from "./format.mjs";
@@ -148,6 +149,92 @@ export function transcriptLog(file, codex, limit) {
     for (const [kind, body] of Array.isArray(r[0]) ? r : [r]) if (String(body).trim()) out.push({ kind, text: String(body).slice(0, 4000) });
   }
   return out.slice(-limit);
+}
+
+// Keep a byte offset and any unfinished line for each recent real path. A file replacement
+// or truncation invalidates the cached prompts and the partially decoded UTF-8.
+const PROMPT_KEEP = 500;
+const PROMPT_CHARS = 4000;
+const PROMPT_CHUNK = 1 << 20;
+const PROMPT_FILES = 32;
+const promptCache = new Map();
+
+// User entries Claude Code writes that the user did not type: notices of finished background
+// work, local command records, injected reminders, and the mark of an interrupted turn.
+const NOT_TYPED = ["<task-notification>", "<local-command-", "<command-", "<system-reminder>", "<bash-stdout>", "<bash-stderr>", "[Request interrupted by user"];
+
+const capped = (text) => {
+  if (text.length <= PROMPT_CHARS) return text;
+  const cut = text.slice(0, PROMPT_CHARS);
+  return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; // never end on half a surrogate pair
+};
+
+// One transcript line as a prompt, or null when it is not one the user typed.
+function promptOf(e) {
+  if (e?.type !== "user" || e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly || subagentEvent(e)) return null;
+  const c = e.message?.content;
+  let blocks;
+  if (typeof c === "string") blocks = [c];
+  else if (Array.isArray(c) && !c.some((b) => b?.type === "tool_result")) blocks = c.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text);
+  else return null;
+  const text = blocks.filter((block) => {
+    const text = block.trimStart();
+    return text && !NOT_TYPED.some((prefix) => text.startsWith(prefix));
+  }).join("\n");
+  return text ? { time: typeof e.timestamp === "string" ? e.timestamp : null, text: capped(text) } : null;
+}
+
+function addPrompt(entry, line) {
+  // Most lines are model requests. When the first key identifies the type, skip non-user lines.
+  const type = /^\{"type":"([^"]+)"/.exec(line)?.[1];
+  if (type && type !== "user") return;
+  let e;
+  try {
+    e = JSON.parse(line);
+  } catch {
+    return; // not JSON: skip it, the rest of the file still reads
+  }
+  const prompt = promptOf(e);
+  if (!prompt) return;
+  entry.prompts.push(prompt);
+  if (entry.prompts.length > PROMPT_KEEP) entry.prompts.shift();
+}
+
+function readPrompts(entry, file) {
+  const fd = fs.openSync(file, "r");
+  try {
+    const { dev, ino, size } = fs.fstatSync(fd);
+    if (dev !== entry.dev || ino !== entry.ino || size < entry.offset) {
+      Object.assign(entry, { dev, ino, offset: 0, rest: "", decoder: new StringDecoder("utf8"), prompts: [] });
+    }
+    if (size === entry.offset) return;
+    const chunk = Buffer.allocUnsafe(Math.min(PROMPT_CHUNK, size - entry.offset));
+    while (entry.offset < size) {
+      const n = fs.readSync(fd, chunk, 0, Math.min(chunk.length, size - entry.offset), entry.offset);
+      if (n === 0) break;
+      entry.offset += n;
+      const lines = (entry.rest + entry.decoder.write(chunk.subarray(0, n))).split("\n");
+      entry.rest = lines.pop();
+      for (const line of lines) if (line) addPrompt(entry, line);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The dashboard route passes an already-resolved path. Codex user turns are in its events.
+export function transcriptPrompts(file, codex) {
+  if (codex) return [];
+  const entry = promptCache.get(file) || { prompts: [] };
+  promptCache.delete(file);
+  try {
+    readPrompts(entry, file);
+  } catch {
+    // Use the last successful read if the file vanished or could not be read.
+  }
+  promptCache.set(file, entry);
+  if (promptCache.size > PROMPT_FILES) promptCache.delete(promptCache.keys().next().value);
+  return entry.prompts;
 }
 
 export function eventLog(run, task, attempt, limit) {

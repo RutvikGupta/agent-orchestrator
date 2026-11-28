@@ -92,6 +92,18 @@ export function applyClaudeEvent(s, e, cwd) {
   const before = s.beforeCommand;
   s.beforeCommand = null;
   const text = e.type === "user" && typeof e.message?.content === "string" ? e.message.content : "";
+  const own = !subagentEvent(e);
+  if (own && e.type === "user" && !e.isMeta && !e.isCompactSummary && !e.isVisibleInTranscriptOnly) {
+    const input = userText(e).trim();
+    if (/^\/(exit|quit)$|^<command-name>\/(exit|quit)<\/command-name>(?:\s|$)/.test(input)) {
+      s.sessionExited = true;
+      s.busy = false;
+      s.ended = true;
+      s.turnEnded = true;
+      s.interrupted = false;
+      return;
+    }
+  }
   if (text.startsWith(LOCAL_OUTPUT) || text.startsWith("<local-command-stderr>")) {
     if (before) Object.assign(s, before);
     if (text.startsWith(LOCAL_OUTPUT)) applyLocalCommand(s, text);
@@ -99,7 +111,6 @@ export function applyClaudeEvent(s, e, cwd) {
   }
   if (text.startsWith("<command-name>")) s.beforeCommand = { busy: s.busy, ended: s.ended, interrupted: s.interrupted };
   // The session id is the task's own: a sub-agent's events name another session.
-  const own = !subagentEvent(e);
   if (e.type === "system" && e.subtype === "init") {
     if (own) s.sessionId = e.session_id || s.sessionId;
     s.model = e.model || s.model;
@@ -154,6 +165,7 @@ export function applyClaudeEvent(s, e, cwd) {
     s.busy = false; // the user pressed Esc or rejected a tool: the turn ended unfinished
     s.interrupted = true;
   } else if (e.type === "user" && !e.isMeta && (typeof e.message?.content === "string" || e.message?.content?.some?.((b) => b.type === "text"))) {
+    if (own) s.sessionExited = false;
     s.ended = false; // a new message resumes the session
     s.interrupted = false;
     s.busy = true;

@@ -218,15 +218,26 @@ test('selecting a row opens its detail panel and schedules its live log', async 
 
 test('details fetch transcript logs for main and native rows and attempt logs for launched tasks', async () => {
   const fetched = [];
-  // querySelectorAll: the panel holds no inner scrolling box here (innerScroll, restoreInner).
-  const panel = { scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {}, querySelectorAll: () => [], replaceChildren(...children) { this.children = children; } };
+  const long = 'A long prompt. '.repeat(30);
+  const prompts = [];
+  const promptList = () => panel.children?.find((node) => node.attrs['data-sk'] === 'prompts');
+  const panel = {
+    scrollTop: 0, scrollHeight: 1000, clientHeight: 200, dataset: {},
+    querySelectorAll: () => promptList() ? [promptList()] : [],
+    replaceChildren(...children) {
+      this.children = children;
+      const list = promptList();
+      if (list) Object.assign(list, { dataset: { sk: 'prompts' }, scrollTop: 20, clientHeight: 40, scrollHeight: 120 + 20 * list.children.length });
+    },
+  };
   const context = vm.createContext({
     sel: null, state: [], lastDetail: '', holding: () => false,
     document: { getElementById: () => panel },
-    fetch: async (url) => { fetched.push(url); return { json: async () => ({ events: [{ kind: 'says', text: 'Live fixture output.' }] }) }; },
+    fetch: async (url) => { fetched.push(url); return { json: async () => ({ events: [{ kind: 'says', text: 'Live fixture output.' }], prompts: [...prompts] }) }; },
     $: (tag, attrs, ...children) => ({ tag, attrs, children }), fmt: String, cls: String, startedIn: () => null, reportView: () => [], closeDetail() {},
   });
   vm.runInContext(snippet('const atBottom=', 'async function limits()'), context);
+  vm.runInContext('const taskAt = key => state[0].tasks.find(t => key === "section/" + t.key)', context);
   for (const [kind, flags, expected] of [
     ['main', { main: true, outDir: '/main transcript.jsonl' }, 'api/transcript?file=%2Fmain%20transcript.jsonl'],
     ['native', { native: true, outDir: '/child.jsonl' }, 'api/transcript?file=%2Fchild.jsonl'],
@@ -239,6 +250,34 @@ test('details fetch transcript logs for main and native rows and attempt logs fo
     assert.match(JSON.stringify(panel.children), /Live fixture output/);
     assert.equal(panel.dataset.sel, `section/${kind}`);
     assert.equal(panel.scrollTop, panel.scrollHeight);
+    if (kind === 'main') {
+      assert.doesNotMatch(JSON.stringify(panel.children), /Your messages/, 'empty history has no heading');
+      prompts.push({ text: 'Earlier prompt' }, { text: long });
+      await context.detail();
+      assert.match(JSON.stringify(panel.children), /Your messages \(2\)/);
+      const list = promptList();
+      assert.match(JSON.stringify(list.children[0]), /Earlier prompt/);
+      assert.match(list.children[1].attrs.class, /\bshut\b/);
+      assert.equal(list.scrollTop, list.scrollHeight, 'first prompt paint opens at the newest message');
+      list.children[1].children[0].children[0].attrs.onclick();
+      assert.doesNotMatch(promptList().children[1].attrs.class, /\bshut\b/);
+      promptList().scrollTop = promptList().scrollHeight - promptList().clientHeight;
+      prompts.push({ text: 'Later prompt' });
+      await context.detail();
+      assert.match(JSON.stringify(panel.children), /Your messages \(3\)/);
+      assert.match(JSON.stringify(promptList().children.at(-1)), /Later prompt/);
+      assert.equal(promptList().scrollTop, promptList().scrollHeight, 'appends keep a reader at the bottom');
+
+      promptList().scrollTop = 0;
+      prompts.shift(); // the server drops the oldest prompt at its cap
+      prompts.push({ text: 'Newest prompt' });
+      await context.detail();
+      assert.equal(promptList().scrollTop, 0, 'a reader at the top stays there');
+      assert.doesNotMatch(promptList().children[0].attrs.class, /\bshut\b/, 'an eviction keeps the fold choice on the same prompt');
+      assert.match(JSON.stringify(promptList().children[0]), /A long prompt/);
+    } else {
+      assert.doesNotMatch(JSON.stringify(panel.children), /Your messages/);
+    }
   }
 });
 

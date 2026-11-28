@@ -8,7 +8,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CLAUDE_PROJECTS, CODEX_HOME, DASHBOARD_DIR, DASHBOARD_FILE, DASHBOARD_TOKEN_FILE, RUNS_DIR, STATE_ROOT, TASK_ID, USAGE_CACHE } from "./config.mjs";
-import { eventLog, transcriptLog } from "./event-log.mjs";
+import { eventLog, transcriptLog, transcriptPrompts } from "./event-log.mjs";
 import { createEscalator, escalationCheckMs } from "./escalate.mjs";
 import { codexLimits, limitsText } from "./limits.mjs";
 import { SendError, deliverMessage, steerQueued } from "./commands/inbox.mjs";
@@ -658,7 +658,7 @@ export async function serveDashboard({ host, port, args }) {
         const under = (root) => Boolean(root) && file.startsWith(root + path.sep);
         const codex = under(real(path.join(CODEX_HOME, "sessions")));
         if (!file.endsWith(".jsonl") || !(codex || under(real(CLAUDE_PROJECTS)))) return send(403, "application/json", '{"error":"not a session transcript"}');
-        return send(200, "application/json", JSON.stringify({ events: transcriptLog(file, codex, 400) }));
+        return send(200, "application/json", JSON.stringify({ events: transcriptLog(file, codex, 400), prompts: transcriptPrompts(file, codex) }));
       }
       return send(404, "text/plain", "not found");
     } catch (error) {

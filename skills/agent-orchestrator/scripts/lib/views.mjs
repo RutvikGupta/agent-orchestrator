@@ -80,7 +80,7 @@ export function statusText(run, tasks, notices = unseenNotices(run)) {
   const cols = ["id", "agent", "model", "mode", "state", "elapsed", "steps", "tokens", "now"];
   return [
     `run ${run.id}${orchestratorLabel(run)}${readOnlyMark(own)}`,
-    ...(main ? [`main session (whole session, not in the totals): ${main.modelLabel} · ${main.state} · tokens ${main.tokensExact ? "" : "~"}${compact(main.tokensIn)}/${compact(main.tokensOut)} · ${shortText(main.now, 70)}`] : []),
+    ...(main ? [`main session (whole session, not in the totals): ${main.modelLabel} · ${paint(main.state, main.state, process.stdout.isTTY && main.state === "ended")} · tokens ${main.tokensExact ? "" : "~"}${compact(main.tokensIn)}/${compact(main.tokensOut)} · ${shortText(main.now, 70)}`] : []),
     tasks.length ? table(statusRows(tasks), cols) : "(no orch.mjs tasks)",
     ...(native.length ? ["native sub-agents (started with the host's own tool, not orch.mjs):", table(statusRows(native), cols)] : []),
     `total: ${totalsText(totals([...tasks, ...native]))}`,
@@ -117,7 +117,7 @@ function orchestratorLabel(run) {
   return ` · launched by ${o.agent}${o.sessionId ? ` session ${o.sessionId.slice(0, 8)}` : ""}`;
 }
 
-const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 90, aborted: 31, prepared: 90, closed: 90, idle: 90 };
+const COLORS = { running: 33, "needs-decision": 35, completed: 32, failed: 31, timeout: 31, stalled: 31, stopped: 90, aborted: 31, prepared: 90, closed: 90, idle: 90, ended: 90 };
 
 function paint(text, state, tty) {
   const code = COLORS[state] ?? (String(state).endsWith("_unavailable") ? 31 : null);

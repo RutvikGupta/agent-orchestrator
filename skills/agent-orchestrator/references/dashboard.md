@@ -44,6 +44,7 @@ act on. `SKILL.md` step 5 says when to open it.
 - Any parked task shows as `parked`, with what it waits for (`references/monitor.md`, "Parked tasks").
 - Clicking a session shows its final report and its live event log. The log opens at the newest
   events and follows new output while the reader is at the bottom.
+- A main session's details list up to 500 of your latest prompts, newest last.
 - For a task, the panel also shows its receipts: its brief, one line per attempt (clicking one shows
   that attempt's log), each check's saved evidence, and your `verify` runs, `verdict` rounds and
   acceptance.
@@ -54,9 +55,9 @@ act on. `SKILL.md` step 5 says when to open it.
   space. `/api/health` carries the same reading as `disk`: `freeBytes`, `totalBytes`, `minBytes`,
   `low`, `critical`, `summary` and `title`.
 - A main session's state comes from `claude agents --json` when Claude Code reports that session
-  (`stateSource` on the row), and from its transcript otherwise. Codex's app server is read only with
-  `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see threads another Codex
-  process runs.
+  (`stateSource` on the row), and from its transcript otherwise. It shows `ended` when its process
+  is gone and the session has no live process. Codex's app server is read only with
+  `AGENT_ORCH_CODEX_APP_SERVER=1`, because a standalone server cannot see threads another Codex process runs.
 
 ## Messages to a task
 
