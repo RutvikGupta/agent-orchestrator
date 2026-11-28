@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { claudeTool } from "./claude.mjs";
+import { claudeTool, subagentEvent } from "./claude.mjs";
 import { eventShape } from "./events.mjs";
 import { REPLY_PREFIX, readInbox, readReplies } from "./inbox.mjs";
 import { compact, formatElapsed, relPath, shortText, unwrapShell } from "./format.mjs";
@@ -161,7 +161,7 @@ const promptCache = new Map();
 
 // User entries Claude Code writes that the user did not type: notices of finished background
 // work, local command records, injected reminders, and the mark of an interrupted turn.
-const NOT_TYPED = ["<task-notification>", "<local-command-", "<command-", "<system-reminder>", "[Request interrupted by user"];
+const NOT_TYPED = ["<task-notification>", "<local-command-", "<command-", "<system-reminder>", "<bash-stdout>", "<bash-stderr>", "[Request interrupted by user"];
 
 const capped = (text) => {
   if (text.length <= PROMPT_CHARS) return text;
@@ -171,7 +171,7 @@ const capped = (text) => {
 
 // One transcript line as a prompt, or null when it is not one the user typed.
 function promptOf(e) {
-  if (e?.type !== "user" || e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly) return null;
+  if (e?.type !== "user" || e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly || subagentEvent(e)) return null;
   const c = e.message?.content;
   let blocks;
   if (typeof c === "string") blocks = [c];

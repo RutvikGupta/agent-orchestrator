@@ -43,6 +43,10 @@ test('the dashboard reads the whole prompt history and follows changes to the tr
     prompt('<local-command-caveat>Local command</local-command-caveat>'),
     prompt('<command-name>/status</command-name>'),
     prompt([{ type: 'text', text: '<system-reminder>Reminder</system-reminder>' }]),
+    prompt('Sidechain input', { isSidechain: true }),
+    prompt('Child agent input', { parent_tool_use_id: 'child-tool' }),
+    prompt('<bash-stdout>Shell output</bash-stdout>'),
+    prompt([{ type: 'text', text: '<bash-stderr>Shell error</bash-stderr>' }]),
     prompt('Explain tool results', { entryLabel: 'tool_result' }),
   ]);
   const board = await f.dashboard();
@@ -99,6 +103,17 @@ test('a dead launcher ends the main row unless the session was resumed', async (
   const state = (session) => sections.find((s) => s.orchestrator.sessionId === session)?.tasks.find((row) => row.main)?.state;
   assert.equal(state(saved.orchestrator.sessionId), 'ended');
   assert.equal(state(resumedSession), 'running');
+
+  await f.start(run, 'status-task', { env: {
+    CLAUDE_CODE_SESSION_ID: saved.orchestrator.sessionId, CODEX_THREAD_ID: saved.orchestrator.sessionId,
+  } });
+  await f.finished(run, 'status-task');
+  // The owner command refreshed the launcher's identity. Restore the ended process fixture.
+  writeJson(runFile, { ...readJson(runFile), orchestrator: { ...saved.orchestrator, pid: processThatExited.pid } });
+  const args = ['status', run.id];
+  const { stdout } = await f.command(args, { env: { NODE_OPTIONS: '--import=data:text/javascript,process.stdout.isTTY=true' } });
+  assert.match(stdout, /main session.*\x1b\[90mended\x1b\[0m/);
+  assert.match((await f.command(args)).stdout, /main session.* · ended · /);
 });
 
 test('Claude exit and quit close a main session turn', async (t) => {

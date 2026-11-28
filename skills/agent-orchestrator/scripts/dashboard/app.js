@@ -256,9 +256,13 @@ function reportView(t){const r=t.report,out=t.scopeViolations||[];if(!r&&!out.le
 const atBottom=({scrollTop,scrollHeight,clientHeight})=>scrollTop+clientHeight>=scrollHeight-40;
 const logScroll=(same,panel)=>!same||atBottom(panel)?"bottom":panel.scrollTop;
 // Boxes inside the panel scroll on their own (the Brief, the final report). A rebuild keeps where
-// the reader left each one, by its data-sk key, while the panel still shows the same row.
-function innerScroll(d,same){return same?new Map([...d.querySelectorAll("[data-sk]")].map(e=>[e.dataset.sk,e.scrollTop])):new Map()}
-function restoreInner(d,saved){for(const e of d.querySelectorAll("[data-sk]")){const y=saved.get(e.dataset.sk);if(y)e.scrollTop=y}}
+// the reader left each one. The prompt list starts at the newest message and follows new arrivals
+// while the reader is at the bottom.
+function innerScroll(d,same){return same?new Map([...d.querySelectorAll("[data-sk]")].map(e=>[
+  e.dataset.sk,e.dataset.sk==="prompts"&&e.scrollTop+e.clientHeight>=e.scrollHeight-1?"bottom":e.scrollTop])):new Map()}
+function restoreInner(d,saved){for(const e of d.querySelectorAll("[data-sk]")){
+  const y=saved.get(e.dataset.sk)??(e.dataset.sk==="prompts"?"bottom":null);
+  if(y!=null)e.scrollTop=y==="bottom"?e.scrollHeight:y}}
 // The latest log fetched for each recently shown row, so a row paints at once when chosen. A
 // row's log starts loading when the pointer reaches it, so it is usually ready by the click, and
 // a row never has two loads at once.
@@ -274,8 +278,9 @@ const logSource=(t,n)=>t.agentLog&&n===(t.attempt||0)?"api/transcript?file="+enc
 // A fingerprint for the panel's change check. A capped log or prompt list keeps its length as
 // new entries push old ones out, so hash every entry once per fetch.
 const prints=new WeakMap();
+function textHash(s,h=2166136261){for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}return h}
 function logPrint(ev){if(!ev)return"loading";let p=prints.get(ev);if(p!=null)return p;let h=2166136261;
-  for(const e of ev){const s=(e.kind??e.time)+"\u0000"+e.text+"\u0001";for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}}
+  for(const e of ev)h=textHash((e.kind??e.time)+"\u0000"+e.text+"\u0001",h);
   p=ev.length+":"+h.toString(36);prints.set(ev,p);return p}
 function loadLog(key,t){const n=logAttempt(key,t),lk=n?key+"@"+n:key,src=logSource(t,n);if(!src)return Promise.resolve([]);if(loading.has(lk))return loading.get(lk);
   if(t.external||src.startsWith("api/transcript")&&t.agentLog)return loadTranscript(lk,t,src);
@@ -485,9 +490,9 @@ function touched(key){if(sel!==key)return;compose();repaint(key)}
 // button or link inside it, or one that ends a text selection in it, is left alone.
 const foldClick=fn=>e=>{const s=getSelection();if(e.target.closest("button,a,input,textarea,select")||(s&&!s.isCollapsed&&e.currentTarget.contains(s.anchorNode)))return;fn()};
 const msgFold=new Map(),longText=x=>x.length>280||x.split("\n").length>4;
-function messagesView(key,t,prompts){const sent=serverMessages(t),mine=shownLocal(key,t);if(t.main?!prompts:!sent.length&&!mine.length)return[];
+function messagesView(key,t,prompts){const sent=serverMessages(t),mine=shownLocal(key,t);if(t.main?!prompts?.length:!sent.length&&!mine.length)return[];
   const word={sending:"sending…",queued:"queued",failed:"failed"},pic=n=>n?"\n("+imageCount(n)+" attached)":"";
-  const items=t.main?prompts.map((p,i)=>({id:key+"|prompt|"+(p.time??"")+"|"+i,text:p.text,p}))
+  const items=t.main?prompts.map(p=>({id:key+"|prompt|"+(p.time??"")+"|"+textHash(p.text).toString(36),text:p.text,p}))
     :[...sent.map(m=>({id:key+"|"+(m.id||m.time),text:m.text+pic(m.images),m})),...mine.map(e=>({id:key+"|l"+e.lid,text:e.text+pic(e.images),e}))];
   const open=i=>msgFold.has(i.id)?msgFold.get(i.id):!longText(i.text),long=items.filter(i=>longText(i.text)),anyOpen=long.some(open);
   const flip=(list,to)=>{for(const i of list)msgFold.set(i.id,to);repaint(key)};
